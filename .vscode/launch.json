@@ -1,0 +1,83 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run Grain Extension",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/packages/vscode",
+                // 宿主窗口默认打开 counter 示例，方便直接试高亮 / 诊断 / 跳转
+                "${workspaceFolder}/examples/counter"
+            ],
+            "outFiles": ["${workspaceFolder}/packages/vscode/dist/**/*.js"],
+            // 用一次性构建，不要用 watch：后台任务要是没被 problemMatcher 认出来就会一直卡住
+            "preLaunchTask": "build vscode",
+            "presentation": {
+                "group": "grain",
+                "order": 1
+            }
+        },
+        {
+            // 已经构建过、只想快速重启宿主窗口时用（跳过编译）
+            "name": "Run Grain Extension (no build)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/packages/vscode",
+                "${workspaceFolder}/examples/counter"
+            ],
+            "outFiles": ["${workspaceFolder}/packages/vscode/dist/**/*.js"],
+            "presentation": {
+                "group": "grain",
+                "order": 2
+            }
+        },
+        {
+            // 用一套全新的用户数据 / 扩展目录，排除本机配置和已装扩展的干扰
+            "name": "Run Grain Extension (clean profile)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/packages/vscode",
+                "--user-data-dir=${workspaceFolder}/.vscode-test/user-data",
+                "--extensions-dir=${workspaceFolder}/.vscode-test/extensions",
+                "${workspaceFolder}/examples/counter"
+            ],
+            "outFiles": ["${workspaceFolder}/packages/vscode/dist/**/*.js"],
+            "presentation": {
+                "group": "diagnose",
+                "order": 1
+            }
+        },
+        {
+            // 基线：加载一个什么都不做的空扩展。
+            // 注意不能省略 --extensionDevelopmentPath——不传的话 VSCode 会把工作区根目录当扩展目录，
+            // 而根目录 package.json 不是扩展清单，会报 `version` mandatory 然后加载失败
+            "name": "Empty Extension Host (baseline)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": ["--extensionDevelopmentPath=${workspaceFolder}/.vscode/empty-extension"],
+            "presentation": {
+                "group": "diagnose",
+                "order": 2
+            }
+        },
+        {
+            // 空扩展 + 全新用户数据 / 扩展目录：一次排除「本机配置」和「已装扩展」两个变量
+            "name": "Empty Extension Host (clean profile)",
+            "type": "extensionHost",
+            "request": "launch",
+            "args": [
+                "--extensionDevelopmentPath=${workspaceFolder}/.vscode/empty-extension",
+                "--disable-extensions",
+                "--user-data-dir=${workspaceFolder}/.vscode-test/user-data",
+                "--extensions-dir=${workspaceFolder}/.vscode-test/extensions"
+            ],
+            "presentation": {
+                "group": "diagnose",
+                "order": 3
+            }
+        }
+    ]
+}

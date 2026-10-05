@@ -1,3 +1,6 @@
+import { simpleTraverse } from '@typescript-eslint/typescript-estree';
+import type { TSESTree } from '@typescript-eslint/typescript-estree';
+
 import type {
     AttributeValue,
     Element,
@@ -8,6 +11,8 @@ import type {
     Script,
     TemplateNode
 } from '../types.js';
+import { transpileModule, ModuleKind, ScriptTarget } from 'typescript';
+
 import {
     analyze_script,
     collect_reads,
@@ -90,6 +95,183 @@ function template_reads(node: TemplateNode): Set<string> {
     return names;
 }
 
+interface PropsInfo {
+    /** `$props()` 调用本身的区间 */
+    call: [number, number];
+
+    /** 解构模式的区间 */
+    id: [number, number] | null;
+    /** 要保留的解构项（children 由 create 的参数提供，得剔掉） */
+    keep: Array<[number, number]>;
+    /** 解构出来的变量：局部变量名 + 它在 props 上的键名 */
+    names: Array<{ name: string; key: string }>;
+}
+
+function is_children(property: unknown): boolean {
+    const node = property as { type?: string; key?: { type?: string; name?: string } };
+
+    return node?.key?.type === 'Identifier' && node.key.name === 'children';
+}
+
+/** 找出 `$props()`：调用位置 + 解构模式 */
+function find_props(script: Script | null): PropsInfo | null {
+    if (!script) return null;
+
+    for (const statement of script.content.body) {
+        if (statement.type !== 'VariableDeclaration') continue;
+
+        for (const declarator of statement.declarations) {
+            const init = declarator.init;
+
+            if (init?.type !== 'CallExpression') continue;
+            if (init.callee.type !== 'Identifier' || init.callee.name !== '$props') continue;
+
+            const info: PropsInfo = { call: init.range, id: null, keep: [], names: [] };
+
+            if (declarator.id.type === 'ObjectPattern') {
+                const kept = declarator.id.properties.filter((property) => !is_children(property));
+
+                info.id = declarator.id.range;
+                info.keep = kept.map((property) => property.range);
+
+                info.names = kept
+                    .filter((property): property is TSESTree.Property => property.type === 'Property')
+                    .map((property) => {
+                        // `{ label: l = 1 }` 取 `l`，`{ label }` 取 `label`
+                        const value = property.value;
+                        const target = value.type === 'AssignmentPattern' ? value.left : value;
+                        const name = target.type === 'Identifier' ? target.name : '';
+                        const key =
+                            property.key.type === 'Identifier' && !property.computed
+                                ? property.key.name
+                                : name;
+
+                        return { name, key };
+                    })
+                    .filter((entry) => entry.name !== '');
+            }
+
+            return info;
+        }
+    }
+
+    return null;
+}
+
+/** `let { value = $bindable(0) } = $props()` 里的 `value` */
+interface BindableInfo {
+    /** 子组件里的局部变量名 */
+    name: string;
+    /** props 上的键名（`{ value: v = $bindable() }` 时是 `value`） */
+    prop: string;
+    /** 兜底值源码；`$bindable()` 没给参数时为 `undefined` */
+    fallback: string;
+    /** 生成的读写对变量名 */
+    binding: string;
+    /** 这一项在解构里的区间（要从解构里剔掉） */
+    property: [number, number];
+    /** `let { ... } = $props()` 这条语句的结束位置，绑定声明插在它后面 */
+    statement_end: number;
+}
+
+/** script 源码里的一处改写，区间是相对 script 内容开头的原始偏移 */
+interface Edit {
+    start: number;
+    end: number;
+    text: string;
+}
+
+/** 从后往前应用，前面的改写不会影响后面区间的计算 */
+function apply_edits(code: string, edits: Edit[], base: number): string {
+    let result = code;
+
+    for (const edit of [...edits].sort((a, b) => b.start - a.start || b.end - a.end)) {
+        const start = edit.start - base;
+        const end = edit.end - base;
+
+        if (start < 0 || end > result.length) continue;
+
+        result = result.slice(0, start) + edit.text + result.slice(end);
+    }
+
+    return result;
+}
+
+/** 找出 `$props()` 解构里用 `$bindable(...)` 声明的项 */
+function find_bindables(block: Script, source: string): BindableInfo[] {
+    const found: BindableInfo[] = [];
+
+    for (const statement of block.content.body) {
+        if (statement.type !== 'VariableDeclaration') continue;
+
+        for (const declarator of statement.declarations) {
+            const init = declarator.init;
+
+            if (init?.type !== 'CallExpression') continue;
+            if (init.callee.type !== 'Identifier' || init.callee.name !== '$props') continue;
+            if (declarator.id.type !== 'ObjectPattern') continue;
+
+            for (const property of declarator.id.properties) {
+                if (property.type !== 'Property') continue;
+                if (property.value.type !== 'AssignmentPattern') continue;
+
+                const right = property.value.right;
+
+                if (right.type !== 'CallExpression') continue;
+                if (right.callee.type !== 'Identifier' || right.callee.name !== '$bindable') continue;
+                if (property.value.left.type !== 'Identifier') continue;
+
+                const name = property.value.left.name;
+                const key =
+                    property.key.type === 'Identifier' && !property.computed ? property.key.name : name;
+                const argument = right.arguments[0];
+
+                found.push({
+                    name,
+                    prop: key,
+                    fallback: argument ? source.slice(argument.range[0], argument.range[1]) : 'undefined',
+                    binding: `__binding$${name}`,
+                    property: property.range,
+                    statement_end: statement.range[1]
+                });
+            }
+        }
+    }
+
+    return found;
+}
+
+/** `+=` -> `+`、`??=` -> `??`：把赋值运算符还原成二元运算符 */
+function binary_operator(operator: string): string {
+    return operator.slice(0, -1);
+}
+
+/**
+ * 去掉类型标注：`<script>` 里写的是 TS，产物必须是纯 JS。
+ *
+ * 作用于整个模块（含模板代码）而不是只转 script 片段——这样 TS 能看见
+ * `B` 在模板代码里被用（`<B />` 会生成 `B.create(...)`），不会把 import 当成"只用于类型"删掉。
+ */
+function transpile(code: string, filename: string): string {
+    const result = transpileModule(code, {
+        fileName: `${filename}.ts`,
+        compilerOptions: {
+            target: ScriptTarget.ES2022,
+            module: ModuleKind.ESNext,
+            // 不改写 import / export 的写法，避免"看起来没用到"的 import 被删
+            verbatimModuleSyntax: true,
+            removeComments: false
+        }
+    });
+
+    return result.outputText;
+}
+
+/** 首字母大写（`<Foo />`）或带点（`<Foo.Bar />`）的标签是子组件 */
+function is_component_name(name: string): boolean {
+    return /^[A-Z]/.test(name) || name.includes('.');
+}
+
 function escape_template(text: string): string {
     return text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 }
@@ -98,9 +280,32 @@ class Generator {
     private statements: string[] = [];
     private slots: Slot[] = [];
     private wrappers: PendingWrapper[] = [];
+    private pending_binds: Array<{ name: string; target: string; writes: Set<string> }> = [];
     private counter = 0;
     private wrapper_counter = 0;
     private root_name = 'update$0';
+    /** `$bindable` 声明的双向绑定 prop */
+    private bindables: BindableInfo[] = [];
+    /**
+     * `$bindable` 变量的写入改写（SFC 绝对偏移）。
+     * script 和事件包装都要用——包装是复制函数体，不改写的话子组件写不回父组件。
+     */
+    private bindable_edits: Edit[] = [];
+    /**
+     * 是否处在"每次重建都会重新创建"的上下文里（for 块、组件插槽）。
+     * 这里面的片段不用注册——重建后旧节点就失效了，注册了只会产生无效的 update 调用。
+     */
+    private inside_fragment = false;
+    /** 正在生成插槽内容：这里的 `{expr}` 得有自己的文本节点，父组件才能刷新它 */
+    private inside_slot = false;
+    /** 用到了 creText */
+    private needs_text = false;
+    /** `$props()` 解构出来的变量，生成 `set_props` 要用 */
+    private prop_names: Array<{ name: string; key: string }> = [];
+    /** `$bindable` 变量 -> 它的刷新函数名 */
+    private refresh_names = new Map<string, string>();
+    /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
+    private pending_refreshes: Array<{ name: string; deps: Set<string> }> = [];
 
     constructor(
         private source: string,
@@ -108,7 +313,8 @@ class Generator {
         private runtime: string,
         private analysis: ScriptAnalysis | null,
         /** 组件级样式的类名；`<style global>` 或没有样式时为 null */
-        private scope_id: string | null
+        private scope_id: string | null,
+        private filename: string
     ) {}
 
     run(): CompileResult {
@@ -118,30 +324,67 @@ class Generator {
 
         this.fragment(this.root.template.children, root_name);
 
-        const output: string[] = [`import { creEle, creFragment } from ${JSON.stringify(this.runtime)};`];
+        // script 要先处理：`$bindable` 会决定要不要 import to_binding
+        const parts = this.root.script ? this.script(this.root.script) : { head: [], body: '' };
+
+        const imported = ['creEle', 'creFragment'];
+        if (this.bindables.length > 0) imported.push('to_binding');
+        if (this.needs_text) imported.push('creText');
+
+        const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
 
         if (this.root.module) {
             output.push('', '/* <script module> */', this.root.module.raw.trim());
         }
 
-        if (this.root.script) {
-            output.push('', '/* <script> */', this.script(this.root.script));
+        // import / export 留在模块顶层
+        if (parts.head.length > 0) output.push('', ...parts.head);
+
+        // 实例代码：每个组件实例各跑一遍，所以放进 create()
+        const instance: string[] = [];
+
+        if (parts.body) {
+            instance.push('/* <script> */', parts.body);
         }
 
         // 事件包装：原函数体 + 触发受影响的片段（README 里的 `increment_$1`）
         const wrappers = this.wrapper_statements();
-        if (wrappers.length > 0) output.push('', ...wrappers);
+        if (wrappers.length > 0) instance.push('', ...wrappers);
 
-        output.push('', '/* template */', ...this.statements);
+        // bind: 的 setter
+        const binds = this.bind_statements();
+        if (binds.length > 0) instance.push('', ...binds);
+
+        // $bindable 非受控时的刷新函数
+        const refreshes = this.refresh_statements();
+        if (refreshes.length > 0) instance.push('', ...refreshes);
+
+        instance.push('', '/* template */', ...this.statements);
+
+        // 属性修改触发器：得等所有片段都收集完，才知道 props 变了要刷哪些
+        const set_props = this.props_statements();
+        if (set_props.length > 0) instance.push('', ...set_props);
+
+        instance.push('', `return ${root_name};`);
 
         output.push(
             '',
-            '/** 挂载组件。`mount.target` 留给 HMR 重新挂载用 */',
+            '/** 建一个组件实例。父组件通过 `Foo.create(props, children)` 调用 */',
+            'export function create(props = {}, children = null) {',
+            ...instance.map((line) => (line ? `  ${line}` : '')),
+            '}'
+        );
+
+        output.push(
+            '',
+            '/** 挂到页面上。`mount.target` 留给 HMR 重新挂载用 */',
             'export default function mount(target) {',
             '  mount.target = target;',
-            `  target.appendChild(${root_name}.el);`,
-            `  return ${root_name};`,
-            '}'
+            '  const update = create();',
+            '  target.appendChild(update.el);',
+            '  return update;',
+            '}',
+            'mount.create = create;'
         );
 
         const stylesheet = this.root.stylesheet;
@@ -151,25 +394,193 @@ class Generator {
               ? scope_stylesheet(stylesheet, this.scope_id)
               : stylesheet.raw;
 
-        return { js: output.join('\n'), css };
+        return { js: transpile(output.join('\n'), this.filename), css };
     }
 
     // ------------------------------------------------------------ script
 
-    /** 去掉 `$state(...)` 包装，其余原样保留 */
-    private script(block: Script): string {
-        let code = block.raw;
-        const offset = block.contentStart;
+    /**
+     * 处理实例脚本：
+     * - `head`：import / export 必须留在模块顶层（不能塞进 create() 里）
+     * - `body`：其余代码放进 create()，每个组件实例各跑一遍
+     * - `$state(...)` 去掉包装，`$props()` 换成 props 参数
+     */
+    private script(block: Script): { head: string[]; body: string } {
+        const edits: Edit[] = [];
 
-        const states = [...(this.analysis?.states.values() ?? [])].sort((a, b) => b.range[0] - a.range[0]);
+        // 1. import / export 留在模块顶层
+        const hoisted = block.content.body.filter(
+            (statement) => statement.type === 'ImportDeclaration' || statement.type.startsWith('Export')
+        );
 
-        for (const state of states) {
-            const start = state.range[0] - offset;
-            const end = state.range[1] - offset;
-            code = code.slice(0, start) + state.init + code.slice(end);
+        const head = hoisted.map((statement) => this.slice(statement.range).trim());
+
+        for (const statement of hoisted) {
+            edits.push({ start: statement.range[0], end: statement.range[1], text: '' });
         }
 
-        return code.trim();
+        // 2. `$state(...)` -> 初始值
+        for (const state of this.analysis?.states.values() ?? []) {
+            edits.push({ start: state.range[0], end: state.range[1], text: state.init });
+        }
+
+        // 3. `$props()` -> `props`
+        const props = find_props(block);
+        const bindables = props ? find_bindables(block, this.source) : [];
+
+        this.bindables = bindables;
+        if (props) this.prop_names = props.names;
+
+        if (props) {
+            edits.push({ start: props.call[0], end: props.call[1], text: 'props' });
+
+            // 解构里去掉 children（跟 create() 的参数重名）和 `$bindable` 项
+            if (props.id) {
+                const dropped = new Set(bindables.map((bindable) => bindable.property[0]));
+                const kept = props.keep
+                    .filter(([from]) => !dropped.has(from))
+                    .map(([from, to]) => this.source.slice(from, to))
+                    .join(', ');
+
+                edits.push({ start: props.id[0], end: props.id[1], text: `{${kept}}` });
+            }
+        }
+
+        // 4. `$bindable` 变量的写入 -> 读写对
+        this.bindable_edits = this.bindable_writes(block, bindables);
+        edits.push(...this.bindable_edits);
+
+        // 5. 读写对的声明，插在 `let { ... } = $props()` 之后
+        for (const bindable of bindables) {
+            const { start, end } = { start: bindable.statement_end, end: bindable.statement_end };
+
+            edits.push({
+                start,
+                end,
+                text: `\nconst ${bindable.binding} = to_binding(props[${JSON.stringify(bindable.prop)}], ${bindable.fallback});\nlet ${bindable.name} = ${bindable.binding}.get();`
+            });
+        }
+
+        return { head, body: apply_edits(block.raw, edits, block.contentStart).trim() };
+    }
+
+    /**
+     * `$bindable` 变量的写入，两条路分开走：
+     *
+     * ```js
+     * a++;
+     * // ->
+     * if (__binding$a.external) __binding$a.set(a + 1);        // 受控：值归父组件管，只推过去
+     * else { a = a + 1; __refresh$a(); }                        // 非受控：binding 不掺和，自己改自己刷
+     * ```
+     */
+    private bindable_writes(block: Script, bindables: BindableInfo[]): Edit[] {
+        if (bindables.length === 0) return [];
+
+        const by_name = new Map(bindables.map((bindable) => [bindable.name, bindable]));
+        const edits: Edit[] = [];
+
+        /** 每个变量一个"刷新依赖它的片段"的函数，片段收集完之后才生成 */
+        const refresh_of = (name: string): string => {
+            const existing = this.refresh_names.get(name);
+            if (existing) return existing;
+
+            const generated = `__refresh$${this.counter++}`;
+
+            this.refresh_names.set(name, generated);
+            this.pending_refreshes.push({ name: generated, deps: new Set([name]) });
+
+            return generated;
+        };
+
+        /** 这次写入：变量名、新值的表达式、读写对 */
+        const read_write = (
+            node: TSESTree.Node
+        ): { name: string; value: string; binding: string } | null => {
+            if (node.type === 'AssignmentExpression') {
+                if (node.left.type !== 'Identifier') return null;
+
+                const bindable = by_name.get(node.left.name);
+                if (!bindable) return null;
+
+                const right = this.slice(node.right.range);
+                const value =
+                    node.operator === '='
+                        ? right
+                        : `${node.left.name} ${binary_operator(node.operator)} ${right}`;
+
+                return { name: node.left.name, value, binding: bindable.binding };
+            }
+
+            if (node.type === 'UpdateExpression') {
+                if (node.argument.type !== 'Identifier') return null;
+
+                const bindable = by_name.get(node.argument.name);
+                if (!bindable) return null;
+
+                return {
+                    name: node.argument.name,
+                    value: `${node.argument.name} ${node.operator === '++' ? '+' : '-'} 1`,
+                    binding: bindable.binding
+                };
+            }
+
+            return null;
+        };
+
+        simpleTraverse(block.content as unknown as TSESTree.Node, {
+            enter: (node, parent) => {
+                const write = read_write(node);
+                if (!write) return;
+
+                const { name, value, binding } = write;
+
+                // 赋值语句：展开成 if / else 两条路
+                if (parent?.type === 'ExpressionStatement') {
+                    edits.push({
+                        start: parent.range[0],
+                        end: parent.range[1],
+                        text:
+                            `if (${binding}.external) ${binding}.set(${value}); ` +
+                            `else { ${name} = ${value}; ${refresh_of(name)}(); }`
+                    });
+
+                    return;
+                }
+
+                // 塞在表达式里的写入（`f(a = 1)` 这种）展开不成语句，用三元
+                edits.push({
+                    start: node.range[0],
+                    end: node.range[1],
+                    text: `(${binding}.external ? ${binding}.set(${value}) : (${name} = ${value}, ${refresh_of(name)}()))`
+                });
+            }
+        });
+
+        return edits;
+    }
+
+    /**
+     * 非受控时 `$bindable` 就是个普通变量，改完得自己刷依赖它的片段。
+     * 用 function 声明（会提升），这样 script 顶层的写入也不会踩到 TDZ。
+     */
+    private refresh_statements(): string[] {
+        return this.pending_refreshes.map((refresh) => {
+            const updates = this.update_calls(refresh.deps);
+
+            return `function ${refresh.name}() {${updates ? ` ${updates}` : ' '}}`;
+        });
+    }
+
+    /** 函数体源码；`$bindable` 的写入顺带改成读写对调用 */
+    private body_source(range: [number, number]): string {
+        const [from, to] = range;
+
+        if (this.bindable_edits.length === 0) return this.source.slice(from, to);
+
+        const inside = this.bindable_edits.filter((edit) => edit.start >= from && edit.end <= to);
+
+        return apply_edits(this.source.slice(from, to), inside, from);
     }
 
     private wrapper_statements(): string[] {
@@ -188,16 +599,71 @@ class Generator {
             let body: string;
 
             if (node.body.type === 'BlockStatement') {
-                const source = this.slice(node.body.range);
+                const source = this.body_source(node.body.range);
                 body = updates ? `${source.slice(0, -1)} ${updates}}` : source;
             } else {
-                body = `{ ${this.slice(node.body.range)}${updates ? `; ${updates}` : ''} }`;
+                body = `{ ${this.body_source(node.body.range)}${updates ? `; ${updates}` : ''} }`;
             }
 
             output.push(`const ${wrapper.name} = ${head} ${body};`);
         }
 
         return output;
+    }
+
+    /** `bind:` 的 setter：赋值 + 刷新受影响的片段（延迟到这里才能算全片段） */
+    private bind_statements(): string[] {
+        return this.pending_binds.map((bind) => {
+            const updates = this.update_calls(bind.writes);
+
+            // setter 把最终值返回：子组件那边 `x = binding.set(v)` 拿到的就是父组件的值
+            return `const ${bind.name} = ($value) => { ${bind.target} = $value;${updates ? ` ${updates}` : ''} return (${bind.target}); };`;
+        });
+    }
+
+    /**
+     * 子组件的属性修改触发器：`update.set_props(props, children)`。
+     *
+     * 父组件 props 变了只调这个，不重新 create —— 重新 create 会把子组件自己的 state 丢掉。
+     */
+    private props_statements(): string[] {
+        const changed = new Set<string>();
+        const body: string[] = [];
+        // `$bindable` 的 prop 是个绑定对象，不能直接赋给变量，下面单独处理
+        const bound = new Set(this.bindables.map((bindable) => bindable.name));
+
+        for (const entry of this.prop_names) {
+            if (bound.has(entry.name)) continue;
+
+            body.push(`  ${entry.name} = $props[${JSON.stringify(entry.key)}];`);
+            changed.add(entry.name);
+        }
+
+        // `$bindable`：只有受控（父用了 `bind:`）才跟着父的值走。
+        // 父只是普通传值时，子组件自己维护，父推过来的值不再覆盖它
+        for (const bindable of this.bindables) {
+            body.push(`  if (${bindable.binding}.external) ${bindable.name} = ${bindable.binding}.get();`);
+            changed.add(bindable.name);
+        }
+
+        const updates = this.update_calls(changed);
+
+        // 插槽：引用没变就别重新挂，父组件已经把里面的节点刷新过了
+        const slot_updates = this.update_calls(new Set(['children']));
+
+        if (slot_updates) {
+            body.push('  if ($children !== undefined && $children !== children) {');
+            body.push('    children = $children;');
+            body.push(`    ${slot_updates}`);
+            body.push('  }');
+        }
+
+        if (updates) body.push(`  ${updates}`);
+
+        // 既没有 props 也没有插槽，就不用给父组件留这个入口了
+        if (body.length === 0) return [];
+
+        return [`${this.root_name}.set_props = ($props, $children) => {`, ...body, '};'];
     }
 
     /** 写了 `writes` 里的 state 之后，需要刷新哪些片段 */
@@ -249,9 +715,114 @@ class Generator {
         return { ...attributes, class: [...chunks, ` ${scope}`] };
     }
 
-    private element(node: Element): string {
+    private element(node: Element, owner: string | null, index: number): string | string[] {
+        return is_component_name(node.name)
+            ? this.component(node, owner, index)
+            : this.plain_element(node);
+    }
+
+    /**
+     * 子组件：`<Foo count={count}>slot</Foo>`。
+     *
+     * 只 `create()` 一次。依赖的 state 变化时推新 props 给它（`set_props`），
+     * 不重新 create —— 重建会把子组件自己的 state 一起丢掉。
+     */
+    private component(node: Element, owner: string | null, index: number): string[] {
+        const parts: string[] = [];
+        const deps = new Set<string>();
+
+        for (const [key, value] of Object.entries(this.scoped_attributes(node.attributes))) {
+            parts.push(this.component_attribute(key, value));
+
+            if (value === true || typeof value === 'string') continue;
+
+            for (const chunk of Array.isArray(value) ? value : [value]) {
+                if (typeof chunk !== 'string') add_all(deps, collect_reads(chunk.content));
+            }
+        }
+
+        const props_code = `{${parts.join(', ')}}`;
+
+        // 插槽只建一次；里面的 updater 记下来，父组件推 props 之前先刷它们
+        let slot_code = 'null';
+        let slot_updaters: string[] = [];
+
+        if (node.children.length > 0) {
+            const saved = this.inside_slot;
+            this.inside_slot = true;
+
+            let items: string[] = [];
+            let statements: string[] = [];
+
+            try {
+                [items, statements] = this.capture(() => this.children(node.children, null));
+            } finally {
+                this.inside_slot = saved;
+            }
+
+            // 静态文本是字符串字面量，剩下的是可以刷新的 updater
+            slot_updaters = items.filter((item) => !item.startsWith('"'));
+            this.statements.push(...statements);
+
+            const slot_name = `slot$${this.counter++}`;
+            this.statements.push(`const ${slot_name} = () => [${items.join(', ')}];`);
+
+            slot_code = slot_name;
+        }
+
         const name = `update$${this.counter++}`;
-        const items = this.children(node.children, name);
+        this.statements.push(`const ${name} = ${node.name}.create(${props_code}, ${slot_code});`);
+
+        // 没有依赖（或不在能注册片段的上下文里）：建一次就完事
+        if (deps.size === 0 || !owner) return [name];
+
+        // 有依赖：属性更新器占 children 的下一个编号，props 变了只推 props，不重建
+        const updater = `props$${this.counter++}`;
+        const refresh = slot_updaters.map((item) => `${item}();`).join(' ');
+
+        this.statements.push(
+            `const ${updater} = () => { ${refresh}${name}.set_props(${props_code}, ${slot_code}); };`,
+            `${updater}.props = true;`
+        );
+
+        this.slots.push({ update: owner, index: index + 1, deps });
+
+        return [name, updater];
+    }
+
+    /**
+     * 组件属性：按**值**传（不是 getter）。
+     * `bind:` / `bindactive:` 例外，传 `{ get, set }` 给子组件。
+     */
+    private component_attribute(key: string, value: AttributeValue | true): string {
+        const name = JSON.stringify(key);
+
+        if (key.startsWith('bind:') || key.startsWith('bindactive:')) {
+            const plain = key.slice(key.indexOf(':') + 1);
+
+            return this.attribute(key, value, null, 0, plain).code;
+        }
+
+        if (value === true) return `${name}: true`;
+        if (typeof value === 'string') return `${name}: ${JSON.stringify(value)}`;
+
+        const chunks = Array.isArray(value) ? value : [value];
+
+        // 单个表达式直接传值，混合的用模板字符串
+        if (chunks.length === 1 && typeof chunks[0] !== 'string') {
+            return `${name}: (${chunks[0].raw})`;
+        }
+
+        const parts = chunks.map((chunk) =>
+            typeof chunk === 'string' ? escape_template(chunk) : '${' + chunk.raw + '}'
+        );
+
+        return `${name}: \`${parts.join('')}\``;
+    }
+
+    private plain_element(node: Element): string {
+        const name = `update$${this.counter++}`;
+        const items = this.children(node.children, this.inside_fragment ? null : name);
 
         const props: string[] = [];
         let prop_index = 0;
@@ -269,14 +840,19 @@ class Generator {
         return name;
     }
 
-    /** 生成一个属性；`slot` 表示它占用了一个动态片段编号 */
+    /**
+     * 生成一个属性。`owner` 为 null 时不注册动态片段（组件整体重建，内部片段没意义）。
+     * `slot` 表示它占用了一个动态片段编号。
+     */
     private attribute(
         key: string,
         value: AttributeValue | true,
-        owner: string,
-        slot_index: number
+        owner: string | null,
+        slot_index: number,
+        /** 写进产物里的键名。组件属性会去掉 `bind:` 前缀——前缀只有 creEle 才认 */
+        output_key = key
     ): { code: string; slot: boolean } {
-        const name = JSON.stringify(key);
+        const name = JSON.stringify(output_key);
 
         if (value === true) return { code: `${name}: true`, slot: false };
         if (typeof value === 'string') return { code: `${name}: ${JSON.stringify(value)}`, slot: false };
@@ -284,15 +860,40 @@ class Generator {
         const chunks = Array.isArray(value) ? value : [value];
         const expressions = chunks.filter((chunk): chunk is Expression => typeof chunk !== 'string');
 
-        // README 第 4 条：源不是响应式变量，编译期算不出谁依赖它，
-        // 所以 setter 之后直接让根调度器全量刷新（运行时也会重跑 getter）
-        if (key.startsWith('bindactive:')) {
+        const bind_prefix = key.startsWith('bindactive:')
+            ? 'bindactive:'
+            : key.startsWith('bind:')
+              ? 'bind:'
+              : null;
+
+        if (bind_prefix) {
             const expression = expressions[0];
 
+            if (!expression) {
+                return { code: `${name}: { get: () => undefined, set: ($value) => $value }`, slot: false };
+            }
+
+            if (bind_prefix === 'bindactive:') {
+                // README 第 4 条：源不是响应式变量，编译期算不出谁依赖它，
+                // setter 之后让根调度器全量刷新，运行时也会重跑 getter
+                return {
+                    code: `${name}: { external: true, get: () => (${expression.raw}), set: ($value) => { ${expression.raw} = $value; ${this.root_name}(); return (${expression.raw}); } }`,
+                    slot: false
+                };
+            }
+
+            // bind: 源是响应式变量，编译期就知道要刷哪些片段 —— 但得等所有片段收集完才能算，
+            // 所以 setter 先留个名字，最后统一生成
+            const setter = `__bind$${this.counter++}`;
+            this.pending_binds.push({
+                name: setter,
+                target: expression.raw,
+                writes: collect_reads(expression.content)
+            });
+
+            // external: true —— 子组件那边看到这个标记就知道值要听外面的
             return {
-                code: expression
-                    ? `${name}: { get: () => (${expression.raw}), set: ($value) => { ${expression.raw} = $value; ${this.root_name}(); } }`
-                    : `${name}: { get: () => undefined, set: () => {} }`,
+                code: `${name}: { external: true, get: () => (${expression.raw}), set: ${setter} }`,
                 slot: false
             };
         }
@@ -310,9 +911,9 @@ class Generator {
         const deps = new Set<string>();
         for (const expression of expressions) add_all(deps, collect_reads(expression.content));
 
-        this.slots.push({ update: owner, index: slot_index, deps });
+        if (owner) this.slots.push({ update: owner, index: slot_index, deps });
 
-        return { code: `${name}: () => \`${parts.join('')}\``, slot: true };
+        return { code: `${name}: () => \`${parts.join('')}\``, slot: Boolean(owner) };
     }
 
     /** 事件处理器：复制原函数体，末尾追加受影响的片段刷新 */
@@ -343,13 +944,17 @@ class Generator {
 
         for (const node of nodes) {
             const code = this.child(node, items.length, owner);
-            if (code !== null) items.push(code);
+            if (code === null) continue;
+
+            // 子组件会返回两项：实例本身 + 属性更新器
+            if (Array.isArray(code)) items.push(...code);
+            else items.push(code);
         }
 
         return items;
     }
 
-    private child(node: TemplateNode, index: number, owner: string | null): string | null {
+    private child(node: TemplateNode, index: number, owner: string | null): string | string[] | null {
         switch (node.type) {
             case 'comment':
                 return null;
@@ -358,11 +963,22 @@ class Generator {
                 return JSON.stringify(node.content);
 
             case 'expression':
+                // 插槽里的表达式要插到子组件里去，没有父元素能挂它的片段，
+                // 所以给它一个自己的文本节点，父组件拿到返回值就能刷新
+                if (this.inside_slot) {
+                    const name = `update$${this.counter++}`;
+
+                    this.needs_text = true;
+                    this.statements.push(`const ${name} = creText(() => (${node.raw}));`);
+
+                    return name;
+                }
+
                 if (owner) this.slots.push({ update: owner, index, deps: collect_reads(node.content) });
                 return `() => (${node.raw})`;
 
             case 'element':
-                return this.element(node);
+                return this.element(node, owner, index);
 
             case 'IfBlock':
                 return this.if_block(node, index, owner);
@@ -440,14 +1056,17 @@ class Generator {
     /** 临时把生成语句收集到别处，用于 render 函数体 */
     private capture<T>(run: () => T): [T, string[]] {
         const saved = this.statements;
+        const saved_fragment = this.inside_fragment;
         const inner: string[] = [];
 
         this.statements = inner;
+        this.inside_fragment = true;
 
         try {
             return [run(), inner];
         } finally {
             this.statements = saved;
+            this.inside_fragment = saved_fragment;
         }
     }
 
@@ -466,5 +1085,12 @@ export function generate(root: Root, source: string, options: CompileOptions = {
             ? create_scope_id(source, options.filename)
             : null;
 
-    return new Generator(source, root, options.runtimeModule ?? 'grain', analysis, scope_id).run();
+    return new Generator(
+        source,
+        root,
+        options.runtimeModule ?? 'grain',
+        analysis,
+        scope_id,
+        options.filename ?? 'component.grain'
+    ).run();
 }

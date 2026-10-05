@@ -1,0 +1,36 @@
+<script>
+    let {
+        label,
+        count = $bindable(0),
+        children
+    } = $props<{ label: string; count?: number; children?: () => unknown }>();
+
+    let clicks: number = $state(0);
+
+    function bump(): void {
+        clicks += 1;
+    }
+
+    /** count 是 $bindable，这里的写入会写回父组件（父那边是 bind:count={total}） */
+    function add(): void {
+        count += 1;
+    }
+</script>
+
+<div class="child">
+    <b>{label}</b> clicks={clicks} count={count}
+    <button onclick={bump}>+clicks</button>
+    <button onclick={add}>+count</button>
+    {children}
+</div>
+
+<style>
+    .child {
+        padding: 0.5rem;
+        border: 1px solid #ddd;
+    }
+
+    .child b {
+        color: green;
+    }
+</style>

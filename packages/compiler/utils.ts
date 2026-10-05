@@ -45,6 +45,25 @@ export function is_alpha(char: string | null | undefined): boolean {
 
 export type Locator = (offset: number) => { line: number; column: number };
 
+/**
+ * typescript-estree 抛的是 `TSError`，带 `location.start.offset / end.offset`。
+ * 因为解析时前面补的是等长空白，这些 offset 就是整个 SFC 里的绝对偏移，可以直接用。
+ * 拿不到就退回调用方给的兜底区间。
+ */
+export function error_range(error: unknown, fallback: [number, number]): [number, number] {
+    const location = (error as { location?: { start?: { offset?: number }; end?: { offset?: number } } } | null)
+        ?.location;
+
+    const start = location?.start?.offset;
+    const end = location?.end?.offset;
+
+    if (typeof start === 'number' && typeof end === 'number') {
+        return [start, Math.max(end, start + 1)];
+    }
+
+    return fallback;
+}
+
 /** offset -> line / column（1-based），用于错误信息 */
 export function create_locator(source: string): Locator {
     const line_starts = [0];

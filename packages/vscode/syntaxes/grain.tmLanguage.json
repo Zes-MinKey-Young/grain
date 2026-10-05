@@ -1,0 +1,136 @@
+{
+    "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+    "name": "Grain",
+    "scopeName": "source.grain",
+    "patterns": [
+        { "include": "#script-block" },
+        { "include": "#style-block" },
+        { "include": "#comment" },
+        { "include": "#block-tag" },
+        { "include": "#expression" },
+        { "include": "#closing-tag" },
+        { "include": "#element" }
+    ],
+    "repository": {
+        "script-block": {
+            "name": "meta.embedded.block.script.grain",
+            "begin": "(<)(script)([^>]*)(\\>)",
+            "beginCaptures": {
+                "1": { "name": "punctuation.definition.tag.begin.grain" },
+                "2": { "name": "entity.name.tag.script.grain" },
+                "3": { "name": "entity.other.attribute-name.grain" },
+                "4": { "name": "punctuation.definition.tag.end.grain" }
+            },
+            "end": "(</)(script)(\\s*)(\\>)",
+            "endCaptures": {
+                "1": { "name": "punctuation.definition.tag.begin.grain" },
+                "2": { "name": "entity.name.tag.script.grain" },
+                "4": { "name": "punctuation.definition.tag.end.grain" }
+            },
+            "contentName": "source.ts",
+            "patterns": [{ "include": "source.ts" }]
+        },
+        "style-block": {
+            "name": "meta.embedded.block.style.grain",
+            "begin": "(<)(style)([^>]*)(\\>)",
+            "beginCaptures": {
+                "1": { "name": "punctuation.definition.tag.begin.grain" },
+                "2": { "name": "entity.name.tag.style.grain" },
+                "3": { "name": "entity.other.attribute-name.grain" },
+                "4": { "name": "punctuation.definition.tag.end.grain" }
+            },
+            "end": "(</)(style)(\\s*)(\\>)",
+            "endCaptures": {
+                "1": { "name": "punctuation.definition.tag.begin.grain" },
+                "2": { "name": "entity.name.tag.style.grain" },
+                "4": { "name": "punctuation.definition.tag.end.grain" }
+            },
+            "contentName": "source.css",
+            "patterns": [{ "include": "source.css" }]
+        },
+        "comment": {
+            "name": "comment.block.grain",
+            "begin": "<!--",
+            "end": "-->"
+        },
+        "block-tag": {
+            "name": "meta.block.grain",
+            "begin": "(\\{)(:?/?)(if|for|else)\\b",
+            "beginCaptures": {
+                "1": { "name": "punctuation.section.embedded.begin.grain" },
+                "2": { "name": "keyword.control.grain" },
+                "3": { "name": "keyword.control.grain" }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": { "name": "punctuation.section.embedded.end.grain" }
+            },
+            "patterns": [{ "include": "#operator" }, { "include": "source.ts" }]
+        },
+        "expression": {
+            "name": "meta.embedded.expression.grain",
+            "begin": "\\{",
+            "beginCaptures": {
+                "0": { "name": "punctuation.section.embedded.begin.grain" }
+            },
+            "end": "\\}",
+            "endCaptures": {
+                "0": { "name": "punctuation.section.embedded.end.grain" }
+            },
+            "patterns": [{ "include": "#operator" }, { "include": "source.ts" }]
+        },
+        "operator": {
+            "match": "(=>|<=|>=|===|!==|==|!=|&&|\\|\\||\\*\\*|[+\\-*/%<>=!?:])",
+            "name": "keyword.operator.grain"
+        },
+        "closing-tag": {
+            "name": "meta.tag.closing.grain",
+            "begin": "(</)([a-zA-Z][\\w:.-]*)",
+            "beginCaptures": {
+                "1": { "name": "punctuation.definition.tag.begin.grain" },
+                "2": { "name": "entity.name.tag.grain" }
+            },
+            "end": "(\\s*)(\\>)",
+            "endCaptures": {
+                "2": { "name": "punctuation.definition.tag.end.grain" }
+            }
+        },
+        "element": {
+            "name": "meta.tag.grain",
+            "begin": "(<)([a-zA-Z][\\w:.-]*)",
+            "beginCaptures": {
+                "1": { "name": "punctuation.definition.tag.begin.grain" },
+                "2": { "name": "entity.name.tag.grain" }
+            },
+            "end": "(/?)(\\>)",
+            "endCaptures": {
+                "1": { "name": "punctuation.definition.tag.grain" },
+                "2": { "name": "punctuation.definition.tag.end.grain" }
+            },
+            "patterns": [{ "include": "#attribute" }]
+        },
+        "attribute": {
+            "patterns": [
+                {
+                    "match": "([a-zA-Z_:@#.][\\w:.-]*)(\\s*)(=)?",
+                    "captures": {
+                        "1": { "name": "entity.other.attribute-name.grain" },
+                        "3": { "name": "keyword.operator.assignment.grain" }
+                    }
+                },
+                {
+                    "name": "string.quoted.double.grain",
+                    "begin": "\"",
+                    "end": "\"",
+                    "patterns": [{ "include": "#expression" }]
+                },
+                {
+                    "name": "string.quoted.single.grain",
+                    "begin": "'",
+                    "end": "'",
+                    "patterns": [{ "include": "#expression" }]
+                }
+            ]
+        }
+    }
+}

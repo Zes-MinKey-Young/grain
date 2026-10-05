@@ -3,9 +3,10 @@
 </script>
 
 <script>
+    import B from "./B.grain";
     let count = $state(0);
     let history = $state([]);
-    let draft = '';
+    let draft: string = '';
 
     function increment() {
         count += 1;
@@ -23,6 +24,7 @@
     <p>还没点过</p>
 {/if}
 
+<B a={count} />
 <ul>
     {for (const item of history)}
         <li>第 {item} 次</li>

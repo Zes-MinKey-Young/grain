@@ -1,0 +1,12 @@
+{
+    "name": "empty-extension",
+    "displayName": "Empty Extension (diagnostic)",
+    "description": "最小合法扩展，只用来验证扩展宿主本身能不能起来",
+    "publisher": "grain",
+    "version": "0.0.0",
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "main": "./extension.js",
+    "activationEvents": ["*"]
+}

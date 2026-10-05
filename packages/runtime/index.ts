@@ -8,38 +8,89 @@
  *    运行时不需要再做任何依赖追踪
  */
 
-/** `creEle` 的返回值：既是更新调度器，也带着根节点 */
+/**
+ * `creEle` / `creFragment` 的返回值：既是更新调度器，也带着根节点。
+ *
+ * 子组件额外挂一个 `set_props` —— 父组件靠它推新 props，
+ * 不用重新 `create()`（重建会把子组件自己的 state 丢掉）。
+ */
 export interface Updater {
     (...indices: number[]): void;
     el: Node;
+    set_props?: (props: Props, children?: (() => unknown) | null) => void;
 }
 
 export interface Binding<T = unknown> {
     get(): T;
-    set(value: T): void;
+    /**
+     * 写入，并把**最终值**返回——父组件可能在 setter 里改写过。
+     * 非受控时就是写进去的那个值。
+     */
+    set(value: T): T;
+    /**
+     * 这个绑定是不是来自父组件的 `bind:`。
+     * true = 听外面的（父改了值，子组件跟着变）；false = 里面自己搞（父传的只当初始值）
+     */
+    external?: boolean;
 }
 
 type Props = Record<string, unknown>;
 
+const FRAGMENT_NODE = 11;
+
 interface Slot {
-    anchor: Comment;
+    /** 属性更新器没有锚点——它不改 DOM，只是把新 props 推给子组件 */
+    anchor: Comment | null;
     render: () => unknown;
     nodes: Node[];
+    /** 为 true 时 render() 的返回值不用管，调一次就行 */
+    props?: boolean;
 }
 
-/** 把片段的返回值统一成 DOM 节点数组 */
+/** 属性更新器：父组件用它把新 props 推给已经创建好的子组件 */
+export interface PropsUpdater {
+    (): void;
+    props: true;
+}
+
+/**
+ * 把片段的返回值统一成 DOM 节点数组。
+ *
+ * 布尔值不渲染（if 块不成立时返回 null / false 就是这个意思）。
+ * DocumentFragment 要展开成它的子节点——挂进 DOM 之后 fragment 本身不在文档里，
+ * 记录 fragment 的话重渲染时删不掉旧节点。
+ */
 function to_nodes(value: unknown): Node[] {
     if (value === null || value === undefined || value === false || value === true) return [];
-    if (value instanceof Node) return [value];
+
+    if (value instanceof Node) {
+        return (value as Node & { nodeType: number }).nodeType === FRAGMENT_NODE
+            ? [...value.childNodes]
+            : [value];
+    }
+
     if (Array.isArray(value)) return value.flatMap(to_nodes);
 
     if (typeof value === 'function') {
         const updater = value as Partial<Updater>;
-        if (updater.el) return [updater.el];
+        // 递归：Updater 的 el 可能是 fragment，要展开
+        if (updater.el) return to_nodes(updater.el);
         return to_nodes((value as () => unknown)());
     }
 
     return [document.createTextNode(String(value))];
+}
+
+/** 控件回写用哪个事件：checked 和 select 用 change，其余用 input */
+function event_for(el: Element, name: string): string {
+    if (name === 'checked') return 'change';
+    if (name === 'value' && el.tagName === 'SELECT') return 'change';
+
+    return 'input';
+}
+
+function read_prop(el: Element, name: string): unknown {
+    return name in el ? (el as unknown as Record<string, unknown>)[name] : el.getAttribute(name);
 }
 
 function apply_prop(el: Element, key: string, value: unknown): void {
@@ -53,12 +104,18 @@ function apply_prop(el: Element, key: string, value: unknown): void {
 }
 
 function render_slot(slot: Slot): void {
+    // 属性更新器：只跑一次，不动 DOM
+    if (slot.props) {
+        slot.render();
+        return;
+    }
+
     const nodes = to_nodes(slot.render());
 
     for (const node of slot.nodes) node.parentNode?.removeChild(node);
     slot.nodes = nodes;
 
-    const parent = slot.anchor.parentNode;
+    const parent = slot.anchor?.parentNode;
     if (!parent) return;
 
     for (const node of nodes) parent.insertBefore(node, slot.anchor);
@@ -78,9 +135,16 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
     const nested: Updater[] = [];
 
     for (const [key, value] of Object.entries(props)) {
-        if (key.startsWith('bindactive:')) {
-            // README 第 4 条：setter 跑完之后主动跑一次 getter
-            const name = key.slice('bindactive:'.length);
+        const binding_prefix = key.startsWith('bindactive:')
+            ? 'bindactive:'
+            : key.startsWith('bind:')
+              ? 'bind:'
+              : null;
+
+        if (binding_prefix) {
+            // bind:        源是响应式变量，编译器已经把 update 写进 setter 里了
+            // bindactive:  源不是响应式变量（README 第 4 条），setter 跑完由运行时主动全量刷新
+            const name = key.slice(binding_prefix.length);
             const binding = value as Binding;
 
             // 注册成属性片段，`update()` 全量刷新时会重新跑 getter
@@ -88,13 +152,9 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
             prop_slots.push(apply);
             apply();
 
-            element.addEventListener('input', () => {
-                binding.set(
-                    name in element
-                        ? (element as unknown as Record<string, unknown>)[name]
-                        : element.getAttribute(name)
-                );
-                update();
+            element.addEventListener(event_for(element, name), () => {
+                binding.set(read_prop(element, name));
+                if (binding_prefix === 'bindactive:') update();
             });
         } else if (key.startsWith('on') && typeof value === 'function') {
             element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
@@ -109,6 +169,12 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
 
     children.forEach((child, index) => {
         if (typeof child === 'function') {
+            // 属性更新器：占一个片段编号，但不产生 DOM
+            if ((child as Partial<PropsUpdater>).props === true) {
+                slots[index] = { anchor: null, render: child as () => unknown, nodes: [], props: true };
+                return;
+            }
+
             // 嵌套元素（creEle 的返回值）直接挂上去，不算动态片段
             const child_el = (child as Partial<Updater>).el;
             if (child_el) {
@@ -159,4 +225,53 @@ export function creEle(tag: string, props?: Props, children?: unknown[]): Update
 /** 组件根：不产生真实元素，内容直接挂到挂载点上 */
 export function creFragment(children?: unknown[]): Updater {
     return create(null, {}, children ?? []);
+}
+
+/**
+ * 插槽里的 `{expr}`。
+ *
+ * 普通位置上的 `{expr}` 是父元素的一个片段，靠父元素的 `update(n)` 刷新；
+ * 插槽里的没有父元素可挂（节点要插到子组件里），所以给它一个自己的文本节点，
+ * 父组件拿到的返回值可以直接调用来刷新它。
+ */
+export function creText(value: () => unknown): Updater {
+    const node = document.createTextNode('');
+
+    const update = () => {
+        const next = value();
+
+        node.data = next === null || next === undefined || next === false || next === true ? '' : String(next);
+    };
+
+    update();
+    update.el = node;
+
+    return update as Updater;
+}
+
+function is_binding(value: unknown): value is Binding {
+    if (typeof value !== 'object' || value === null) return false;
+
+    const candidate = value as Partial<Binding>;
+
+    return typeof candidate.get === 'function' && typeof candidate.set === 'function';
+}
+
+/**
+ * `$bindable` 声明的 prop 在子组件里的落地形式。
+ *
+ * 父组件用了 `bind:x` 时传进来的是 `{ get, set }`，直接用它——子组件写入就会写回父组件的变量。
+ * 父组件只是普通传值时，退化成一个本地读写对，子组件自己玩。
+ */
+export function to_binding<T>(value: unknown, fallback: T): Binding<T> {
+    // 父组件用了 `bind:` 时传进来的就是绑定本身，直接用它（external 由父那边打上）
+    if (is_binding(value)) return value as Binding<T>;
+
+    let current = (value === undefined ? fallback : value) as T;
+
+    return {
+        external: false,
+        get: () => current,
+        set: (next: T) => (current = next)
+    };
 }

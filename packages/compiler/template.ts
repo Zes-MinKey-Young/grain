@@ -8,13 +8,14 @@ import type {
     RawExpression,
     RawForBlock,
     RawIfBlock,
-    RawTemplateNode,
-    Text
+    RawTemplateNode
 } from './types.js';
 import { decode_entities, is_alpha, is_whitespace, VOID_ELEMENTS } from './utils.js';
 
 const REGEX_TAG_NAME = /[^\s/>=]+/y;
 const REGEX_ATTRIBUTE_NAME = /[^\s/>=]+/y;
+/** 只由换行符组成的文本段：没有渲染意义，不进 AST */
+const REGEX_ONLY_NEWLINES = /^[\n\r]+$/;
 
 /**
  * 读取顶层模板片段，遇到 `<script>` / `<style>` 就停下来交还给 Root 解析。
@@ -66,7 +67,23 @@ function is_block_mark(source: string, index: number): boolean {
 
 /** 读取一批节点：连续的文本 / 表达式，或者一个元素 / 逻辑块 */
 function read_nodes(parser: Parser, top_level: boolean): RawTemplateNode[] {
-    const nodes = read_text_nodes(parser);
+    let previous = -1;
+    let nodes = read_text_nodes(parser);
+
+    // 纯换行的文本段会被丢掉，读完位置已经往前走了却什么都没收着——
+    // 接着往后读，直到收到真节点，或者撞上标签 / 块标记（那时位置不会再动）
+    while (nodes.length === 0 && parser.index !== previous) {
+        previous = parser.index;
+        if (parser.index >= parser.length) return [];
+
+        // 丢掉纯换行之后可能正好停在 `</div>` / `{:else}` / `{/if}` 上。
+        // 这些不是 read_nodes 该管的，交还给 read_children / read_branch_children 的循环
+        if (!top_level && (is_closing_tag(parser) || parser.match('{:') || parser.match('{/')))
+            return [];
+
+        nodes = read_text_nodes(parser);
+    }
+
     if (nodes.length > 0) return nodes;
 
     if (parser.index >= parser.length) return [];
@@ -290,7 +307,7 @@ function read_text_nodes(parser: Parser): RawTemplateNode[] {
         if (source[i] === '{') {
             if (is_block_mark(source, i)) break;
 
-            if (i > start) nodes.push(create_text(source, start, i));
+            push_text(nodes, source, start, i);
 
             parser.index = i;
             nodes.push(read_expression(parser));
@@ -303,15 +320,24 @@ function read_text_nodes(parser: Parser): RawTemplateNode[] {
         i += 1;
     }
 
-    if (i > start) nodes.push(create_text(source, start, i));
+    push_text(nodes, source, start, i);
     parser.index = i;
 
     return nodes;
 }
 
-function create_text(source: string, start: number, end: number): Text {
+/**
+ * 收一段文本。纯换行的直接丢掉——产物里就不会出现一堆 `"\n    "` 了。
+ *
+ * 带空格 / 制表符的仍然保留：inline 元素之间的空白是有渲染意义的。
+ */
+function push_text(nodes: RawTemplateNode[], source: string, start: number, end: number): void {
+    if (start >= end) return;
+
     const raw = source.slice(start, end);
-    return { type: 'text', raw, content: decode_entities(raw), start, end };
+    if (REGEX_ONLY_NEWLINES.test(raw)) return;
+
+    nodes.push({ type: 'text', raw, content: decode_entities(raw), start, end });
 }
 
 // ---------------------------------------------------------------- 属性

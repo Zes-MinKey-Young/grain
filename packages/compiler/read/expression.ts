@@ -13,6 +13,7 @@ import type {
     TSProgram
 } from '../types.js';
 import { TS_OPTIONS } from './script.js';
+import { error_range } from '../utils.js';
 
 /**
  * 把一个 `{ ... }` 表达式交给 typescript-estree 解析。
@@ -31,13 +32,15 @@ export function parse_expression(node: RawExpression, masked: string): TSExpress
         program = parse_ts(code, TS_OPTIONS);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new ParseError(`表达式 \`{${node.raw}}\` 解析失败：${message}`, node.start, node.end);
+        const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
+
+        throw new ParseError(`表达式 \`{${node.raw}}\` 解析失败：${message}`, start, end);
     }
 
     const statement = program.body[0];
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ExpressionStatement') {
-        throw new ParseError(`\`{${node.raw}}\` 里必须正好是一个表达式`, node.start, node.end);
+        throw new ParseError(`\`{${node.raw}}\` 里必须正好是一个表达式`, node.contentStart, node.contentEnd);
     }
 
     return statement.expression;
@@ -58,13 +61,15 @@ export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
         program = parse_ts(code, TS_OPTIONS);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        throw new ParseError(`\`{${node.raw}}\` 解析失败：${message}`, node.start, node.end);
+        const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
+
+        throw new ParseError(`\`{${node.raw}}\` 解析失败：${message}`, start, end);
     }
 
     const statement = program.body[0];
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ForOfStatement') {
-        throw new ParseError(`\`{${node.raw}}\` 里必须是 \`for (... of ...)\``, node.start, node.end);
+        throw new ParseError(`\`{${node.raw}}\` 里必须是 \`for (... of ...)\``, node.contentStart, node.contentEnd);
     }
 
     return statement;

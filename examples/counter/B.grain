@@ -1,0 +1,9 @@
+<script>
+    let { a = $bindable(0) } = $props<{a: number}>();
+    setInterval(() => {
+        a++;
+        console.log(a);
+    }, 1000);
+</script>
+
+{a}

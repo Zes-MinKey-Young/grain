@@ -3,11 +3,14 @@
   "private": true,
   "scripts": {
     "example": "node scripts/example.mjs",
-    "typecheck": "tsc --noEmit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --strict --types node packages/compiler/index.ts packages/vite-plugin/index.ts examples/grain.d.ts examples/counter/main.ts examples/inspector/main.ts"
+    "vscode:build": "pnpm --filter grain-vscode build",
+    "vscode:watch": "pnpm --filter grain-vscode watch",
+    "typecheck": "tsc --noEmit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --strict --types node packages/compiler/index.ts packages/vite-plugin/index.ts examples/grain.d.ts examples/counter/main.ts examples/inspector/main.ts examples/components/main.ts"
   },
   "dependencies": {
     "@typescript-eslint/typescript-estree": "^8.71.0",
-    "css-tree": "^3.2.1"
+    "css-tree": "^3.2.1",
+    "typescript": "6.0.3"
   },
   "devDependencies": {
     "@types/css-tree": "^3.2.0",

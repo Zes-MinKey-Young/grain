@@ -1,0 +1,79 @@
+{
+    "name": "grain-vscode",
+    "displayName": "Grain",
+    "description": "Grain 语言支持：语法高亮、诊断、跳转定义、悬停、补全",
+    "version": "0.0.0",
+    "private": true,
+    "publisher": "grain",
+    "engines": {
+        "vscode": "^1.85.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "main": "./dist/vscode/src/extension.js",
+    "activationEvents": [
+        "onLanguage:grain",
+        "onCommand:grain.compileJs",
+        "onCommand:grain.compileCss"
+    ],
+    "contributes": {
+        "languages": [
+            {
+                "id": "grain",
+                "aliases": [
+                    "Grain",
+                    "grain"
+                ],
+                "extensions": [
+                    ".grain"
+                ],
+                "configuration": "./language-configuration.json"
+            }
+        ],
+        "grammars": [
+            {
+                "language": "grain",
+                "scopeName": "source.grain",
+                "path": "./syntaxes/grain.tmLanguage.json",
+                "embeddedLanguages": {
+                    "source.ts": "typescript",
+                    "source.css": "css"
+                }
+            }
+        ],
+        "commands": [
+            {
+                "command": "grain.compileJs",
+                "title": "Grain: 编译当前文件 → JS"
+            },
+            {
+                "command": "grain.compileCss",
+                "title": "Grain: 编译当前文件 → CSS"
+            }
+        ],
+        "configuration": {
+            "title": "Grain",
+            "properties": {
+                "grain.semanticDiagnostics": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "用 TypeScript 语言服务报告类型错误（关闭后只报语法错误）"
+                },
+                "grain.debug": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "把语言服务的调用情况输出到「输出 → Log (Extension Host)」"
+                }
+            }
+        }
+    },
+    "scripts": {
+        "build": "tsc -p . --ignoreDeprecations 6.0",
+        "watch": "tsc -p . --ignoreDeprecations 6.0 --watch"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.140.0",
+        "typescript": "6.0.3"
+    }
+}

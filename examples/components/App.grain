@@ -1,0 +1,25 @@
+<script>
+    import Child from './Child.grain';
+
+    let name = $state('world');
+    let text = $state('');
+    let total = $state(0);
+</script>
+
+<Child label={name} bind:count={total}>
+    <em>插槽里也能读到 {name}</em>
+</Child>
+
+<p>
+    <input bind:value={text} placeholder="输入点什么" />
+    <span>text: {text}</span>
+    <span>total: {total}</span>
+</p>
+
+<button onclick={() => name = 'grain'}>改名</button>
+
+<style>
+    button {
+        margin-top: 0.5rem;
+    }
+</style>

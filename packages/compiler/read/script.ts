@@ -1,6 +1,7 @@
 import { type TSESTreeOptions, parse as parse_ts } from '@typescript-eslint/typescript-estree';
 import { ParseError } from '../errors.js';
 import type { RawScript, Script, TSProgram } from '../types.js';
+import { error_range } from '../utils.js';
 
 export const TS_OPTIONS = {
     comment: true,
@@ -26,8 +27,10 @@ export function parse_script(block: RawScript, masked: string): Script {
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const tag = block.context === 'module' ? '<script module>' : '<script>';
+        // 只勾出错的那一段，不是整个 script
+        const [start, end] = error_range(error, [block.contentStart, block.contentEnd]);
 
-        throw new ParseError(`${tag} 解析失败：${message}`, block.contentStart, block.contentEnd);
+        throw new ParseError(`${tag} 解析失败：${message}`, start, end);
     }
 
     return { ...block, content };
