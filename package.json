@@ -1,0 +1,17 @@
+{
+  "name": "grain",
+  "private": true,
+  "scripts": {
+    "example": "node scripts/example.mjs",
+    "typecheck": "tsc --noEmit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --strict --types node packages/compiler/index.ts packages/vite-plugin/index.ts examples/grain.d.ts examples/counter/main.ts examples/inspector/main.ts"
+  },
+  "dependencies": {
+    "@typescript-eslint/typescript-estree": "^8.71.0",
+    "css-tree": "^3.2.1"
+  },
+  "devDependencies": {
+    "@types/css-tree": "^3.2.0",
+    "@types/node": "^26.6.4",
+    "vite": "^8.3.2"
+  }
+}

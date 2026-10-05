@@ -1,0 +1,57 @@
+<script module>
+    export const title = 'counter';
+</script>
+
+<script>
+    let count = $state(0);
+    let history = $state([]);
+    let draft = '';
+
+    function increment() {
+        count += 1;
+        history.push(count);
+    }
+</script>
+
+<button class="btn {title}" onclick={increment}>
+    {title}: clicked {count} times
+</button>
+
+{if count > 0}
+    <p>已经点过 {count} 次</p>
+{:else}
+    <p>还没点过</p>
+{/if}
+
+<ul>
+    {for (const item of history)}
+        <li>第 {item} 次</li>
+    {:else}
+        <li>暂无记录</li>
+    {/for}
+</ul>
+
+<p>
+    <input bindactive:value={draft} placeholder="draft 不是 $state" />
+    <span>draft: {draft}</span>
+</p>
+
+<style>
+    * {
+        box-sizing: border-box;
+    }
+
+    .btn {
+        color: red;
+        animation: fade 0.3s ease;
+    }
+
+    ul > li:hover {
+        color: blue;
+    }
+
+    @keyframes fade {
+        from { opacity: 0 }
+        to { opacity: 1 }
+    }
+</style>

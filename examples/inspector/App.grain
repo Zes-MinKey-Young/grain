@@ -1,0 +1,25 @@
+<script module>
+    export const label = 'inspector';
+</script>
+
+<script>
+    let items = $state(['a', 'b']);
+</script>
+
+<div class="box">
+    {if items.length > 1}
+        <ul>
+            {for (const item of items)}
+                <li>{item}</li>
+            {/for}
+        </ul>
+    {:else}
+        <em>空的</em>
+    {/if}
+</div>
+
+<style>
+    .box {
+        padding: 0.5rem;
+    }
+</style>
