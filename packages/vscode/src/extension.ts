@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import type { Analysis } from './analysis.js';
 import { update_diagnostics } from './diagnostics.js';
 import { register_providers } from './providers.js';
-import { set_debug } from './typescript.js';
+import { read_tsconfig, set_compiler_options, set_debug } from './typescript.js';
 
 const analyses = new Map<string, Analysis>();
 
@@ -21,6 +21,26 @@ function get_analysis_module(): AnalysisModule {
 
 function is_grain(document: vscode.TextDocument): boolean {
     return document.languageId === 'grain';
+}
+
+/**
+ * 工作区有 tsconfig.json 就用它的编译选项（`lib` / `target` / `strict` …）。
+ * 没有也不打紧，插件自带一套（含 DOM）。
+ */
+async function load_tsconfig(): Promise<void> {
+    const files = await vscode.workspace.findFiles('**/tsconfig.json', '**/node_modules/**', 1);
+    if (files.length === 0) return;
+
+    try {
+        const options = read_tsconfig(files[0].fsPath);
+
+        if (options) {
+            set_compiler_options(options);
+            console.log('[grain] 采用 tsconfig:', files[0].fsPath);
+        }
+    } catch (error) {
+        console.error('[grain] 读取 tsconfig 失败', error);
+    }
 }
 
 function refresh(document: vscode.TextDocument, collection: vscode.DiagnosticCollection): void {
@@ -109,9 +129,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
     sync_debug();
 
+    // 后台读，不占激活的时间；语言服务是惰性建的，读完了正好赶上第一次用
+    void load_tsconfig();
+
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('grain')) sync_debug();
+        }),
+        // tsconfig 改了要重新读一遍
+        vscode.workspace.onDidSaveTextDocument((document) => {
+            if (document.uri.fsPath.endsWith('tsconfig.json')) void load_tsconfig();
         })
     );
 
@@ -137,7 +164,15 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
         vscode.workspace.onDidOpenTextDocument(schedule),
         vscode.workspace.onDidChangeTextDocument((event) => schedule(event.document)),
-        vscode.workspace.onDidSaveTextDocument(schedule),
+        vscode.workspace.onDidSaveTextDocument((document) => {
+            // 组件改了，别的文档缓存的它的 props 得作废。
+            // 分析模块还没加载过的话，缓存本来就不存在
+            if (is_grain(document) && analysis_module) {
+                analysis_module.forget_component(document.uri.fsPath);
+            }
+
+            schedule(document);
+        }),
         vscode.workspace.onDidCloseTextDocument((document) => {
             const key = document.uri.toString();
 

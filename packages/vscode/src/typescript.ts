@@ -34,23 +34,75 @@ declare function $props<T extends Record<string, unknown> = Record<string, unkno
  * 子组件里对它的赋值会写回父组件的 \`x\`；参数是父组件没传值也没绑定时的兜底。
  */
 declare function $bindable<T>(fallback?: T): T;
+
+declare module "*.grain" {
+    interface GrainComponent {
+        /** 挂到目标元素上（根组件用法） */
+        (target: Element): unknown;
+        /** 作为子组件被父组件调用 */
+        create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
+    }
+
+    const component: GrainComponent;
+    export default component;
+}
 `;
 
 let options: TS.CompilerOptions | null = null;
+/** 工作区 tsconfig.json 里的编译选项 */
+let overrides: TS.CompilerOptions | null = null;
 
 function get_options(): TS.CompilerOptions {
     const ts = get_ts();
 
-    return (options ??= {
+    if (options) return options;
+
+    const merged: TS.CompilerOptions = {
         target: ts.ScriptTarget.ES2022,
         module: ts.ModuleKind.ESNext,
         moduleResolution: ts.ModuleResolutionKind.Bundler,
-        lib: ['lib.es2022.d.ts'],
+        // 组件里直接写 DOM 是常态（`document`、`EventTarget`、`localStorage`…）
+        lib: ['lib.es2022.d.ts', 'lib.dom.d.ts'],
         strict: true,
         noEmit: true,
         skipLibCheck: true,
-        allowJs: false
-    });
+        allowJs: false,
+        ...(overrides ?? {})
+    };
+
+    // 这几项由插件自己决定，tsconfig 改不了
+    merged.noEmit = true;
+    merged.allowJs = false;
+
+    return (options ??= merged);
+}
+
+/**
+ * 读工作区的 tsconfig.json（会顺着 `extends` 找下去），拿来当编译选项。
+ * 这样项目里配的 `lib` / `target` / `strict` 都能生效。
+ */
+export function read_tsconfig(path: string): TS.CompilerOptions | null {
+    const ts = get_ts();
+
+    const host: TS.ParseConfigFileHost = {
+        useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
+        readDirectory: (root, extensions, excludes, includes, depth) =>
+            ts.sys.readDirectory(root, extensions, excludes, includes, depth),
+        fileExists: (file) => ts.sys.fileExists(file),
+        readFile: (file) => ts.sys.readFile(file),
+        getCurrentDirectory: () => ts.sys.getCurrentDirectory(),
+        onUnRecoverableConfigFileDiagnostic: () => {}
+    };
+
+    return ts.getParsedCommandLineOfConfigFile(path, {}, host)?.options ?? null;
+}
+
+/** 换编译选项。语言服务不会自己重读配置，得把它丢掉重建 */
+export function set_compiler_options(next: TS.CompilerOptions): void {
+    overrides = next;
+    options = null;
+
+    typescript_service.reset();
 }
 
 /**
@@ -151,6 +203,12 @@ class TypeScriptService {
 
     private get(): TS.LanguageService {
         return (this.service ??= get_ts().createLanguageService(this.host()));
+    }
+
+    /** 丢掉已建好的语言服务，下次用到时按新配置重建 */
+    reset(): void {
+        this.service = null;
+        log('语言服务已重置');
     }
 
     /** 提前把语言服务建好（在编辑 .grain 时后台调用，避免第一次 hover 卡一下） */

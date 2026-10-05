@@ -109,8 +109,42 @@
             },
             "patterns": [{ "include": "#attribute" }]
         },
+        "binding": {
+            "name": "meta.binding.grain",
+            "begin": "(bind)(\\:)([\\w.-]*)(\\s*)(=)(\\s*)(\\{)",
+            "beginCaptures": {
+                "1": { "name": "keyword.control.grain" },
+                "2": { "name": "keyword.control.grain" },
+                "3": { "name": "entity.other.attribute-name.grain" },
+                "5": { "name": "keyword.operator.assignment.grain" },
+                "7": { "name": "punctuation.section.embedded.begin.grain" }
+            },
+            "end": "(\\})",
+            "endCaptures": {
+                "1": { "name": "punctuation.section.embedded.end.grain" }
+            },
+            "patterns": [
+                { "include": "#binding-key" },
+                { "include": "#operator" },
+                { "include": "source.ts" }
+            ]
+        },
+        "binding-key": {
+            "match": "\\b(get|set|listen|active)\\b(?=\\s*[:(])|\\bactive\\b(?=\\s*[,}])",
+            "name": "keyword.other.grain"
+        },
         "attribute": {
             "patterns": [
+                { "include": "#binding" },
+                {
+                    "match": "(bind)(\\:)([\\w.-]*)(\\s*)(=)?",
+                    "captures": {
+                        "1": { "name": "keyword.control.grain" },
+                        "2": { "name": "keyword.control.grain" },
+                        "3": { "name": "entity.other.attribute-name.grain" },
+                        "5": { "name": "keyword.operator.assignment.grain" }
+                    }
+                },
                 {
                     "match": "([a-zA-Z_:@#.][\\w:.-]*)(\\s*)(=)?",
                     "captures": {

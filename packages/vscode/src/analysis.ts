@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+
 import { compile, parse, ParseError } from '../../compiler/index.js';
 import type { Expression, Root, Script, TemplateNode } from '../../compiler/index.js';
 import {
@@ -19,6 +22,27 @@ export interface Declaration {
     kind: 'variable' | 'function';
 }
 
+/** `$props<{...}>()` 里的一个属性 */
+export interface ComponentProp {
+    name: string;
+    /** 类型源码，如 `string` / `() => unknown` */
+    type: string;
+    optional: boolean;
+    /** 子组件里用 `$bindable()` 声明过，可以双向绑定 */
+    bindable: boolean;
+}
+
+/** 模板里的一个元素。属性没有位置信息，靠重新扫描标签头部得到 */
+export interface ElementInfo {
+    name: string;
+    /** `<` 的位置 */
+    start: number;
+    /** 标签名结束的位置 */
+    name_end: number;
+    /** 元素结束的位置 */
+    end: number;
+}
+
 export interface Analysis {
     root: Root | null;
     error: ParseError | null;
@@ -30,6 +54,10 @@ export interface Analysis {
     expression_at(offset: number): Expression | null;
     /** 找出覆盖某个偏移的 script（模板之外、script 内容之内） */
     script_at(offset: number): Script | null;
+    /** 找出覆盖某个偏移的元素（模板里） */
+    element_at(offset: number): ElementInfo | null;
+    /** 导入的某个组件接受哪些属性（来自它自己的 `$props<...>()`） */
+    component_props(name: string): ComponentProp[];
     /** TypeScript 语言服务给的悬停信息（带类型），只在 script 区域里有效 */
     quick_info(offset: number): QuickInfo | null;
     /** TypeScript 的语义诊断（类型错误、未定义变量等） */
@@ -128,7 +156,19 @@ function collect_expressions(nodes: TemplateNode[]): Expression[] {
                     if (value === true || typeof value === 'string') continue;
 
                     for (const chunk of Array.isArray(value) ? value : [value]) {
-                        if (typeof chunk !== 'string') expressions.push(chunk);
+                        if (typeof chunk === 'string') continue;
+
+                        // 绑定值（`bind:value={ ... }`）不是表达式；
+                        // 但里面 get / set / listen / 变量这些是 TS 解析出来的，照样要诊断
+                        if (!('type' in chunk)) {
+                            for (const item of [chunk.expression, chunk.get, chunk.set, chunk.listen]) {
+                                if (item) expressions.push(item);
+                            }
+
+                            continue;
+                        }
+
+                        expressions.push(chunk);
                     }
                 }
                 node.children.forEach(visit);
@@ -155,6 +195,182 @@ function collect_expressions(nodes: TemplateNode[]): Expression[] {
     return expressions;
 }
 
+/** 类型字面量的最小结构（够用就行，不把整个 TSESTree 拉进来） */
+interface TypeLiteralLike {
+    type: string;
+    members?: Array<{
+        type: string;
+        optional?: boolean;
+        key?: { type: string; name?: string };
+        typeAnnotation?: { typeAnnotation?: { range?: [number, number] } };
+    }>;
+}
+
+/** 从 `{ label: string; count?: number }` 这样的类型字面量读出属性 */
+function members_of(node: TypeLiteralLike, source: string): ComponentProp[] {
+    if (node.type !== 'TSTypeLiteral' || !node.members) return [];
+
+    const props: ComponentProp[] = [];
+
+    for (const member of node.members) {
+        if (member.type !== 'TSPropertySignature') continue;
+        if (member.key?.type !== 'Identifier' || !member.key.name) continue;
+
+        const range = member.typeAnnotation?.typeAnnotation?.range;
+
+        props.push({
+            name: member.key.name,
+            optional: member.optional === true,
+            type: range ? source.slice(range[0], range[1]) : 'unknown',
+            bindable: false
+        });
+    }
+
+    return props;
+}
+
+/** 组件的 `$props<{...}>()` 接受哪些属性 */
+function props_of(script: Script | null, source: string): ComponentProp[] {
+    if (!script) return [];
+
+    for (const statement of script.content.body) {
+        if (statement.type !== 'VariableDeclaration') continue;
+
+        for (const declarator of statement.declarations) {
+            const init = declarator.init;
+
+            if (init?.type !== 'CallExpression') continue;
+            if (init.callee.type !== 'Identifier' || init.callee.name !== '$props') continue;
+
+            // 泛型参数：新版 estree 放 typeArguments，旧版放 typeParameters
+            const call = init as unknown as {
+                typeArguments?: { params: TypeLiteralLike[] };
+                typeParameters?: { params: TypeLiteralLike[] };
+            };
+            const argument = (call.typeArguments ?? call.typeParameters)?.params[0];
+            const props = argument ? members_of(argument, source) : [];
+
+            // 哪些属性是双向绑定的，看解构里有没有 `$bindable(...)`
+            const bound = bindable_names(declarator.id);
+
+            for (const prop of props) prop.bindable = bound.has(prop.name);
+
+            return props;
+        }
+    }
+
+    return [];
+}
+
+/** 解构模式里写了 `$bindable(...)` 的项：`{ count = $bindable(0) }` */
+function bindable_names(id: unknown): Set<string> {
+    const names = new Set<string>();
+
+    const pattern = id as {
+        type?: string;
+        properties?: Array<{
+            type?: string;
+            value?: {
+                type?: string;
+                left?: { type?: string; name?: string };
+                right?: { type?: string; callee?: { type?: string; name?: string } };
+            };
+        }>;
+    };
+
+    if (pattern.type !== 'ObjectPattern' || !pattern.properties) return names;
+
+    for (const property of pattern.properties) {
+        if (property.type !== 'Property') continue;
+        if (property.value?.type !== 'AssignmentPattern') continue;
+        if (property.value.right?.type !== 'CallExpression') continue;
+        if (property.value.right.callee?.name !== '$bindable') continue;
+
+        const target = property.value.left;
+        if (target?.type !== 'Identifier' || !target.name) continue;
+
+        names.add(target.name);
+    }
+
+    return names;
+}
+
+/** 解析过的组件：路径 -> 属性。文件保存时失效 */
+const component_cache = new Map<string, ComponentProp[]>();
+
+export function forget_component(path: string): void {
+    component_cache.delete(path);
+}
+
+function component_props_at(path: string): ComponentProp[] {
+    const cached = component_cache.get(path);
+    if (cached) return cached;
+
+    let props: ComponentProp[] = [];
+
+    try {
+        const source = readFileSync(path, 'utf8');
+
+        props = props_of(parse(source, { filename: path }).script, source);
+    } catch {
+        props = [];
+    }
+
+    component_cache.set(path, props);
+
+    return props;
+}
+
+/** script 里 `import Foo from './Foo.grain'` 全收集起来 */
+function imported_components(script: Script | null, filename: string): Map<string, ComponentProp[]> {
+    const components = new Map<string, ComponentProp[]>();
+    if (!script) return components;
+
+    for (const statement of script.content.body) {
+        if (statement.type !== 'ImportDeclaration') continue;
+
+        const specifier = statement.source.value;
+        if (typeof specifier !== 'string' || !specifier.endsWith('.grain')) continue;
+
+        const binding = statement.specifiers.find((item) => item.type === 'ImportDefaultSpecifier') as
+            | { local?: { name?: string } }
+            | undefined;
+
+        if (!binding?.local?.name) continue;
+
+        components.set(binding.local.name, component_props_at(resolve(dirname(filename), specifier)));
+    }
+
+    return components;
+}
+
+function element_at(nodes: TemplateNode[], offset: number): ElementInfo | null {
+    for (const node of nodes) {
+        const children: TemplateNode[] =
+            node.type === 'element' || node.type === 'IfBlock' || node.type === 'ForBlock'
+                ? [
+                      ...node.children,
+                      ...(node.type === 'IfBlock' ? node.alternates.flatMap((item) => item.children) : []),
+                      ...(node.type === 'ForBlock' && node.fallback ? node.fallback.children : [])
+                  ]
+                : [];
+
+        if (node.type === 'element' && offset >= node.start && offset <= node.end) {
+            return {
+                name: node.name,
+                start: node.start,
+                name_end: node.start + 1 + node.name.length,
+                end: node.end
+            };
+        }
+
+        const nested = element_at(children, offset);
+        if (nested) return nested;
+    }
+
+    return null;
+}
+
 export function analyze(source: string, filename: string): Analysis {
     let root: Root | null = null;
     let error: ParseError | null = null;
@@ -179,6 +395,7 @@ export function analyze(source: string, filename: string): Analysis {
     }
 
     const expressions = root ? collect_expressions(root.template.children) : [];
+    const components = imported_components(root?.script ?? null, filename);
 
     // 把 script 铺到虚拟 .ts 文件里交给 TS 语言服务
     // 注意用 `!=`：解析失败时 root 为 null，root?.script 是 undefined，用 !== 会漏过去
@@ -207,6 +424,14 @@ export function analyze(source: string, filename: string): Analysis {
             }
 
             return null;
+        },
+
+        element_at(offset: number): ElementInfo | null {
+            return root ? element_at(root.template.children, offset) : null;
+        },
+
+        component_props(name: string): ComponentProp[] {
+            return components.get(name) ?? [];
         },
 
         // 虚拟文件与原文件 offset 一一对应，直接把光标偏移传进去就行
