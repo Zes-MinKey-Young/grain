@@ -1,9 +1,10 @@
 import type { Parser } from './parser.js';
-import { scan_expression } from './scan.js';
+import { scan_binding_item, scan_expression } from './scan.js';
 import type {
     Attributes,
     Comment,
     RawAttributeValue,
+    RawBindingValue,
     RawElseBlock,
     RawExpression,
     RawForBlock,
@@ -342,6 +343,107 @@ function push_text(nodes: RawTemplateNode[], source: string, start: number, end:
 
 // ---------------------------------------------------------------- 属性
 
+/** 绑定值里的键：`get:` / `set:` / `listen:`，以及简写的 `active` */
+const REGEX_BINDING_KEY = /^\s*(get|set|listen|active)\s*:/;
+const REGEX_BINDING_FLAG = /^\s*(active)\s*$/;
+/** 不带键名的 listen 简写：`listen(eventBus, eventName, guard)` */
+const REGEX_LISTEN_CALL = /^\s*listen\s*\(/;
+
+/** 裁剪出绑定值里一项的内容（去掉两端空白），做成一个待解析的片段 */
+function slice_item(source: string, start: number, end: number): RawExpression {
+    let from = start;
+    let to = end;
+
+    while (from < to && is_whitespace(source[from])) from += 1;
+    while (to > from && is_whitespace(source[to - 1])) to -= 1;
+
+    return {
+        type: 'expression',
+        raw: source.slice(from, to),
+        contentStart: from,
+        contentEnd: to,
+        start: from,
+        end: to
+    };
+}
+
+/**
+ * `bind:` 的绑定值：`{count}`、`{count, active}`、`{ get: ..., set: ..., active }`。
+ *
+ * 自己按顶层逗号断开、认键名，不交给 TS 去猜 —— 这是 grain 的语法，
+ * 只有里面那些具体的值（getter、setter、表达式）才归 TS 管。
+ */
+function read_binding_value(parser: Parser): RawBindingValue {
+    const source = parser.source;
+    const start = parser.index;
+
+    parser.eat('{', true);
+
+    const binding: RawBindingValue = {
+        start,
+        end: start,
+        expression: null,
+        get: null,
+        set: null,
+        listen: null,
+        active: false
+    };
+
+    while (true) {
+        parser.allow_whitespace();
+
+        const item_start = parser.index;
+        const { contentEnd, end } = scan_binding_item(source, item_start, parser.locate);
+
+        // contentEnd 就是这一项内容的结束位置（逗号或 `}` 之前）
+        const text = source.slice(item_start, contentEnd);
+        const closing = source[contentEnd] === '}';
+        const item_end = contentEnd;
+
+        const key = REGEX_BINDING_KEY.exec(text);
+        const flag = key ? null : REGEX_BINDING_FLAG.exec(text);
+        const call = key || flag ? null : REGEX_LISTEN_CALL.exec(text);
+
+        if (flag) {
+            binding.active = true;
+        } else if (call) {
+            // `listen(bus, "do", guard)`：连键名都不用写，整项就是 listen 的值
+            binding.listen = slice_item(source, item_start, item_end);
+        } else if (key) {
+            const name = key[1] as 'get' | 'set' | 'listen' | 'active';
+            // 值从冒号之后开始
+            let from = item_start + key[0].length;
+            let to = item_end;
+
+            while (from < to && is_whitespace(source[from])) from += 1;
+            while (to > from && is_whitespace(source[to - 1])) to -= 1;
+
+            if (name === 'active') {
+                binding.active = source.slice(from, to) !== 'false';
+            } else {
+                binding[name] = {
+                    type: 'expression',
+                    raw: source.slice(from, to),
+                    contentStart: from,
+                    contentEnd: to,
+                    start: from,
+                    end: to
+                };
+            }
+        } else {
+            // 没有键名：这就是变量形式（`{count}`），整项当表达式
+            binding.expression = slice_item(source, item_start, item_end);
+        }
+
+        parser.index = end;
+
+        if (closing) {
+            binding.end = end;
+            return binding;
+        }
+    }
+}
+
 /**
  * `<script>` / `<style>` 的属性：值就是普通字符串，不解析表达式。
  */
@@ -375,7 +477,9 @@ export function read_attributes(
 
         if (parser.eat('=')) {
             parser.allow_whitespace();
-            value = read_value(parser) as RawAttributeValue;
+
+            // `bind:` 的值是 grain 自己的语法，走专门的解析器
+            value = (name.startsWith('bind:') ? read_binding_value(parser) : read_value(parser)) as RawAttributeValue;
         }
 
         attributes[name] = value;

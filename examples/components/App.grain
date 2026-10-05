@@ -4,6 +4,15 @@
     let name = $state('world');
     let text = $state('');
     let total = $state(0);
+
+    // 非响应式源：只有事件总线知道它变了，靠 listen 通知 Grain 重新求值 getter
+    const bus = new EventTarget();
+    let stamp = 0;
+
+    function tick() {
+        stamp = Math.floor(Math.random() * 1000);
+        bus.dispatchEvent(new Event('tick'));
+    }
 </script>
 
 <Child label={name} bind:count={total}>
@@ -17,6 +26,12 @@
 </p>
 
 <button onclick={() => name = 'grain'}>改名</button>
+
+<p>
+    <input bind:value={ get: () => stamp, set: (value) => stamp = Number(value), listen(bus, 'tick', (ev) => true) } />
+    <span>stamp: {stamp}</span>
+    <button onclick={tick}>tick</button>
+</p>
 
 <style>
     button {

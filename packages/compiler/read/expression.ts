@@ -1,9 +1,11 @@
 import { parse as parse_ts } from '@typescript-eslint/typescript-estree';
 import { ParseError } from '../errors.js';
 import type {
+    BindingValue,
     Expression,
     ForBlock,
     RawAttributeValue,
+    RawBindingValue,
     RawExpression,
     RawForBlock,
     RawTemplateNode,
@@ -41,6 +43,42 @@ export function parse_expression(node: RawExpression, masked: string): TSExpress
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ExpressionStatement') {
         throw new ParseError(`\`{${node.raw}}\` 里必须正好是一个表达式`, node.contentStart, node.contentEnd);
+    }
+
+    return statement.expression;
+}
+
+/** 绑定值没有 `type` 字段，表达式有 */
+function is_binding(value: RawAttributeValue): value is RawBindingValue {
+    return typeof value === 'object' && value !== null && !('type' in value);
+}
+
+/**
+ * 解析绑定值里的一项（`get` / `set` / `listen` / 变量）。
+ *
+ * 这些片段不裹在 `{ ... }` 里，所以能直接按源码解析，偏移一个字符都不动。
+ * 只有对象字面量（以 `{` 开头）得包一层括号，否则会被当成块语句。
+ */
+export function parse_snippet(node: RawExpression, masked: string, label: string): TSExpression {
+    const raw = node.raw;
+    const wrap = raw.trimStart().startsWith('{');
+    const code = masked.slice(0, node.contentStart) + (wrap ? `(${raw})` : raw);
+
+    let program: TSProgram;
+
+    try {
+        program = parse_ts(code, TS_OPTIONS);
+    } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
+
+        throw new ParseError(`${label} \`${raw}\` 解析失败：${message}`, start, end);
+    }
+
+    const statement = program.body[0];
+
+    if (program.body.length !== 1 || !statement || statement.type !== 'ExpressionStatement') {
+        throw new ParseError(`${label} \`${raw}\` 必须是一个表达式`, node.contentStart, node.contentEnd);
     }
 
     return statement.expression;
@@ -94,7 +132,19 @@ export function parse_expressions(template: Template<RawTemplateNode>, masked: s
             return;
         }
 
-        visit_chunk(value);
+        // 绑定值：`{ get, set, listen, active }`，各项分别解析
+        if (is_binding(value)) {
+            const binding = value as RawBindingValue;
+
+            for (const key of ['expression', 'get', 'set', 'listen'] as const) {
+                const item = binding[key];
+                if (item) (item as Expression).content = parse_snippet(item, masked, `bind 的 ${key}`);
+            }
+
+            return;
+        }
+
+        visit_chunk(value as RawExpression);
     }
 
     function visit(nodes: RawTemplateNode[]): void {

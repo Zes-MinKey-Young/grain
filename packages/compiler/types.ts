@@ -27,15 +27,50 @@ export type TSExpression = TSESTree.Expression;
 export type Attributes = Record<string, string | true>;
 
 /**
+ * `bind:` 的绑定值。这是 grain 自己的语法，不是 TS 表达式：
+ *
+ * - `{count}` / `{count, active}` —— 变量形式
+ * - `{ get: () => x, set: (v) => x = v, listen: ..., active }` —— 完整形式
+ *
+ * 各项之间按顶层逗号断开，由专门的解析器读出来（不交给 TS 猜）。
+ * `get` / `set` / `listen` 存的是它们**值**的源码片段，第二阶段再用 TS 解析。
+ */
+export interface RawBindingValue {
+    /** 整个 `{ ... }` 的区间（含花括号） */
+    start: number;
+    end: number;
+    /** 变量形式：`{count}` 里的 `count` */
+    expression: RawExpression | null;
+    get: RawExpression | null;
+    set: RawExpression | null;
+    listen: RawExpression | null;
+    /** 写了 `active`（简写）或者 `active: true` */
+    active: boolean;
+}
+
+/** 绑定值里该用 TS 解析的部分都解析完了 */
+export interface BindingValue extends Omit<RawBindingValue, 'expression' | 'get' | 'set' | 'listen'> {
+    expression: Expression | null;
+    get: Expression | null;
+    set: Expression | null;
+    listen: Expression | null;
+}
+
+/**
  * 元素属性值：
  * - 纯文本 `class="btn"`
  * - 单个表达式 `onclick={increment}`
+ * - 绑定值 `bind:value={count, active}`
  * - 文本与表达式混合 `class="btn {extra}"`
  */
-export type AttributeValue = string | Expression | Array<string | Expression>;
+export type AttributeValue = string | Expression | BindingValue | Array<string | Expression>;
 
 /** Root 阶段的属性值，表达式还没解析 */
-export type RawAttributeValue = string | RawExpression | Array<string | RawExpression>;
+export type RawAttributeValue =
+    | string
+    | RawExpression
+    | RawBindingValue
+    | Array<string | RawExpression>;
 
 export interface Position {
     /** 相对整个 SFC 源文本的起始偏移 */

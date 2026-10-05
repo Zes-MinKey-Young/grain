@@ -29,11 +29,12 @@ export interface ScanResult {
     end: number;
 }
 
-/** 普通代码；`expr` 表示需要配对花括号（`${ ... }` 或 `{ ... }`），`braces` 是已嵌套的层数 */
+/** 普通代码；`expr` 表示需要配对花括号（`${ ... }` 或 `{ ... }`），`braces` / `parens` 是已嵌套的层数 */
 interface CodeFrame {
     kind: 'code';
     expr: boolean;
     braces: number;
+    parens: number;
 }
 
 type Frame =
@@ -163,7 +164,7 @@ function scan_code(
     stop: StopFn,
     options: ScanCodeOptions
 ): ScanResult {
-    const stack: Frame[] = [{ kind: 'code', expr: options.expr ?? false, braces: 0 }];
+    const stack: Frame[] = [{ kind: 'code', expr: options.expr ?? false, braces: 0, parens: 0 }];
     let previous: string | null = null;
     let i = start;
 
@@ -210,7 +211,7 @@ function scan_code(
 
             // `${` 里是普通代码，可能嵌套 `{}` 甚至再嵌套模板字符串
             if (char === '$' && source[i + 1] === '{') {
-                stack.push({ kind: 'code', expr: true, braces: 0 });
+                stack.push({ kind: 'code', expr: true, braces: 0, parens: 0 });
                 previous = null;
                 i += 2;
                 continue;
@@ -279,6 +280,10 @@ function scan_code(
             }
         }
 
+        // 圆括号也要记：`listen(bus, "do", guard)` 里的逗号不是项分隔
+        if (char === '(') frame.parens += 1;
+        else if (char === ')') frame.parens -= 1;
+
         if (!is_whitespace(char)) previous = char;
         i += 1;
     }
@@ -309,8 +314,33 @@ export function scan_expression(source: string, start: number, locate?: Locator)
         start,
         // 只在最外层、且没有未闭合的 `{` 时才认这个 `}`（模板字符串的 `${ ... }` 深度 > 1）
         (source, index, frame, depth) =>
-            depth === 1 && frame.braces === 0 && source[index] === '}' ? index + 1 : -1,
+            depth === 1 && frame.braces === 0 && frame.parens === 0 && source[index] === '}'
+                ? index + 1
+                : -1,
         { locate, expr: true, message: '表达式' }
+    );
+}
+
+/**
+ * 扫描绑定值里的一项：`bind:value={ ... }` 里按**顶层逗号**断开。
+ *
+ * 括号里的逗号（`listen(bus, "do", guard)`）、字符串里的逗号都不算。
+ * 返回这一项之后的位置；遇到 `}` 说明这是最后一项。
+ *
+ * @param start 这一项的起始偏移
+ */
+export function scan_binding_item(source: string, start: number, locate?: Locator): ScanResult {
+    return scan_code(
+        source,
+        start,
+        (source, index, frame, depth) => {
+            if (depth !== 1 || frame.braces !== 0 || frame.parens !== 0) return -1;
+
+            const char = source[index];
+
+            return char === ',' || char === '}' ? index + 1 : -1;
+        },
+        { locate, expr: true, message: '绑定值' }
     );
 }
 

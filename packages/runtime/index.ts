@@ -32,6 +32,16 @@ export interface Binding<T = unknown> {
      * true = 听外面的（父改了值，子组件跟着变）；false = 里面自己搞（父传的只当初始值）
      */
     external?: boolean;
+    /**
+     * 挂载时跑一次，拿到一个 `update` 回调。
+     * 用在"非响应式但有事件总线"的源上：外部事件来了调一下 `update()`，getter 就重新求值。
+     */
+    listen?: (update: () => void) => void;
+    /**
+     * setter 跑完之后主动跑一次 getter。
+     * 源不是响应式变量时才需要标记它 —— 编译期算不出谁依赖它，只能整棵子树刷新。
+     */
+    active?: boolean;
 }
 
 type Props = Record<string, unknown>;
@@ -135,16 +145,8 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
     const nested: Updater[] = [];
 
     for (const [key, value] of Object.entries(props)) {
-        const binding_prefix = key.startsWith('bindactive:')
-            ? 'bindactive:'
-            : key.startsWith('bind:')
-              ? 'bind:'
-              : null;
-
-        if (binding_prefix) {
-            // bind:        源是响应式变量，编译器已经把 update 写进 setter 里了
-            // bindactive:  源不是响应式变量（README 第 4 条），setter 跑完由运行时主动全量刷新
-            const name = key.slice(binding_prefix.length);
+        if (key.startsWith('bind:')) {
+            const name = key.slice('bind:'.length);
             const binding = value as Binding;
 
             // 注册成属性片段，`update()` 全量刷新时会重新跑 getter
@@ -152,9 +154,14 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
             prop_slots.push(apply);
             apply();
 
+            // 外部事件源的钩子：挂载时跑一次，它自己决定什么时候叫 update
+            binding.listen?.(apply);
+
             element.addEventListener(event_for(element, name), () => {
                 binding.set(read_prop(element, name));
-                if (binding_prefix === 'bindactive:') update();
+
+                // 源不是响应式变量，编译期没写死任何 update 调用，只能这里主动全量刷一次
+                if (binding.active) update();
             });
         } else if (key.startsWith('on') && typeof value === 'function') {
             element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);

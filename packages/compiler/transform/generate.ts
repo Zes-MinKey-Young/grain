@@ -3,6 +3,7 @@ import type { TSESTree } from '@typescript-eslint/typescript-estree';
 
 import type {
     AttributeValue,
+    BindingValue,
     Element,
     Expression,
     ForBlock,
@@ -64,9 +65,7 @@ function template_reads(node: TemplateNode): Set<string> {
 
             case 'element':
                 for (const value of Object.values(current.attributes)) {
-                    if (value === true || typeof value === 'string') continue;
-                    const chunks = Array.isArray(value) ? value : [value];
-                    for (const chunk of chunks) {
+                    for (const chunk of chunks_of(value)) {
                         if (typeof chunk !== 'string') add_all(names, collect_reads(chunk.content));
                     }
                 }
@@ -246,6 +245,31 @@ function binary_operator(operator: string): string {
     return operator.slice(0, -1);
 }
 
+function is_function_like(node: TSESTree.Node): node is FunctionLike {
+    return (
+        node.type === 'ArrowFunctionExpression' ||
+        node.type === 'FunctionExpression' ||
+        node.type === 'FunctionDeclaration'
+    );
+}
+
+/** 绑定值没有 `type` 字段，表达式有 */
+function is_binding_value(value: string | Expression | BindingValue): value is BindingValue {
+    return typeof value === 'object' && value !== null && !('type' in value);
+}
+
+/**
+ * 属性值里的文本 / 表达式片段。
+ * 绑定值不算在里面 —— 它走 `binding_attribute` 那条路。
+ */
+function chunks_of(value: AttributeValue | true): Array<string | Expression> {
+    if (value === true || typeof value === 'string') return [];
+    if (Array.isArray(value)) return value.filter((chunk) => !is_binding_value(chunk));
+    if (is_binding_value(value)) return [];
+
+    return [value];
+}
+
 /**
  * 去掉类型标注：`<script>` 里写的是 TS，产物必须是纯 JS。
  *
@@ -280,7 +304,15 @@ class Generator {
     private statements: string[] = [];
     private slots: Slot[] = [];
     private wrappers: PendingWrapper[] = [];
-    private pending_binds: Array<{ name: string; target: string; writes: Set<string> }> = [];
+    /**
+     * `bind:` 的 setter。要等所有片段都收集完才知道刷新哪些，
+     * 所以先记下"拿到 update 调用之后怎么渲染"。
+     */
+    private pending_binds: Array<{
+        name: string;
+        render: (updates: string) => string;
+        writes: Set<string>;
+    }> = [];
     private counter = 0;
     private wrapper_counter = 0;
     private root_name = 'update$0';
@@ -616,8 +648,7 @@ class Generator {
         return this.pending_binds.map((bind) => {
             const updates = this.update_calls(bind.writes);
 
-            // setter 把最终值返回：子组件那边 `x = binding.set(v)` 拿到的就是父组件的值
-            return `const ${bind.name} = ($value) => { ${bind.target} = $value;${updates ? ` ${updates}` : ''} return (${bind.target}); };`;
+            return `const ${bind.name} = ${bind.render(updates)};`;
         });
     }
 
@@ -709,8 +740,14 @@ class Generator {
 
         if (existing === undefined || existing === true) return { ...attributes, class: scope };
         if (typeof existing === 'string') return { ...attributes, class: `${existing} ${scope}` };
+        // class 不会是绑定值
+        if (!Array.isArray(existing) && is_binding_value(existing)) {
+            return { ...attributes, class: scope };
+        }
 
-        const chunks = Array.isArray(existing) ? existing : [existing];
+        const chunks = (Array.isArray(existing) ? existing : [existing]).filter(
+            (chunk) => !is_binding_value(chunk)
+        );
 
         return { ...attributes, class: [...chunks, ` ${scope}`] };
     }
@@ -734,9 +771,16 @@ class Generator {
         for (const [key, value] of Object.entries(this.scoped_attributes(node.attributes))) {
             parts.push(this.component_attribute(key, value));
 
-            if (value === true || typeof value === 'string') continue;
+            // 绑定值走的是 binding_attribute，但它 getter 读的变量同样是依赖：
+            // 那些变量变了，父组件要把新的绑定推给子组件
+            if (value !== true && !Array.isArray(value) && is_binding_value(value)) {
+                const getter = value.get ?? value.expression;
+                if (getter) add_all(deps, collect_reads(getter.content));
 
-            for (const chunk of Array.isArray(value) ? value : [value]) {
+                continue;
+            }
+
+            for (const chunk of chunks_of(value)) {
                 if (typeof chunk !== 'string') add_all(deps, collect_reads(chunk.content));
             }
         }
@@ -797,8 +841,9 @@ class Generator {
     private component_attribute(key: string, value: AttributeValue | true): string {
         const name = JSON.stringify(key);
 
-        if (key.startsWith('bind:') || key.startsWith('bindactive:')) {
-            const plain = key.slice(key.indexOf(':') + 1);
+        if (key.startsWith('bind:')) {
+            // 子组件那边就是个普通 prop，前缀去掉（前缀只有 creEle 才认）
+            const plain = key.slice('bind:'.length);
 
             return this.attribute(key, value, null, 0, plain).code;
         }
@@ -806,7 +851,7 @@ class Generator {
         if (value === true) return `${name}: true`;
         if (typeof value === 'string') return `${name}: ${JSON.stringify(value)}`;
 
-        const chunks = Array.isArray(value) ? value : [value];
+        const chunks = chunks_of(value);
 
         // 单个表达式直接传值，混合的用模板字符串
         if (chunks.length === 1 && typeof chunks[0] !== 'string') {
@@ -818,6 +863,133 @@ class Generator {
         );
 
         return `${name}: \`${parts.join('')}\``;
+    }
+
+    /** 注册一个动态片段。`owner` 为 null 时（组件属性、for 块内）不用注册 */
+    private register_slot(owner: string | null, index: number, deps: Set<string>): void {
+        if (owner) this.slots.push({ update: owner, index, deps });
+    }
+
+    /**
+     * 生成 `bind:` 属性。
+     *
+     * 绑定值是 grain 自己的语法，解析阶段已经拆成 { expression, get, set, listen, active }：
+     * - `get` 当 getter；没写就用变量形式自动生成（`{count}` -> `() => (count)`）
+     * - `set` 的主体内联进产物，末尾追加 update 调用（跟事件包装一个套路）；
+     *   没写就生成一个赋值（`{count}` -> `count = $value`）
+     * - `listen` 原样传下去；`listen(bus, name, guard)` 展开成挂事件监听的代码
+     * - `active` 传给运行时：setter 跑完之后主动跑一次 getter
+     *
+     * 两种形式可以混着写：`{count, active}` 就是"变量 + 主动 getter"。
+     */
+    private binding_attribute(
+        name: string,
+        binding: BindingValue,
+        owner: string | null,
+        slot_index: number
+    ): { code: string; slot: boolean } {
+        const get = binding.get ?? binding.expression;
+
+        if (!get) {
+            // 连值都没有：只剩个监听，照挂不误
+            const empty = ['get: () => undefined', 'set: ($value) => $value'];
+
+            if (binding.listen) empty.push(`listen: ${this.listen_source(binding.listen.content)}`);
+            if (binding.active) empty.push('active: true');
+
+            return { code: `${name}: { ${empty.join(', ')} }`, slot: false };
+        }
+
+        const getter = this.getter_source(get.content);
+        const setter = `__bind$${this.counter++}`;
+        const written = binding.set
+            ? this.setter_from(binding.set)
+            : { param: '$value', body: `${get.raw} = $value; `, writes: collect_reads(get.content) };
+
+        this.pending_binds.push({
+            name: setter,
+            // setter 把最终值返回：子组件 `x = binding.set(v)` 拿到的就是父组件的值
+            render: (updates) =>
+                `(${written.param}) => { ${written.body}${updates ? ` ${updates}` : ''} return (${getter})(); }`,
+            writes: written.writes
+        });
+
+        const parts = ['external: true', `get: ${getter}`, `set: ${setter}`];
+
+        if (binding.listen) parts.push(`listen: ${this.listen_source(binding.listen.content)}`);
+        if (binding.active) parts.push('active: true');
+
+        // get 读了哪些变量 -> 那些变量变化时精确重跑这个 getter
+        this.register_slot(owner, slot_index, collect_reads(get.content));
+
+        return { code: `${name}: { ${parts.join(', ')} }`, slot: true };
+    }
+
+    /** 用户自己写的 `set`：参数名和主体都搬进产物，写过的变量拿去算 update 调用 */
+    private setter_from(set: Expression): { param: string; body: string; writes: Set<string> } {
+        const node = set.content;
+
+        if (!is_function_like(node)) {
+            // 不是函数就当成一个可调用的 setter
+            return { param: '$value', body: `(${set.raw})($value); `, writes: new Set() };
+        }
+
+        const { param, body } = this.setter_source(node);
+
+        return { param, body, writes: collect_writes(node) };
+    }
+
+    /** getter：`() => target.value` 这样的箭头函数，或者干脆就是一个表达式 */
+    private getter_source(get: TSESTree.Node): string {
+        if (!is_function_like(get)) return `() => (${this.slice(get.range)})`;
+
+        const body = get.body;
+
+        return body.type === 'BlockStatement'
+            ? `() => ${this.slice(body.range)}`
+            : `() => (${this.slice(body.range)})`;
+    }
+
+    /** setter：参数名用用户写的那个，主体搬进产物 */
+    private setter_source(set: FunctionLike): { param: string; body: string } {
+        const first = set.params[0];
+        const param = first?.type === 'Identifier' ? first.name : '$value';
+        const body = set.body;
+
+        // 块体：去掉花括号，语句原样搬进来（update 调用会追加在后面）
+        if (body.type === 'BlockStatement') {
+            return { param, body: this.slice([body.range[0] + 1, body.range[1] - 1]) };
+        }
+
+        return { param, body: `${this.slice(body.range)}; ` };
+    }
+
+    /**
+     * `listen`：
+     * - 自己写的 `(update) => {...}` 原样传下去
+     * - `listen(eventBus, eventName, guard)` 展开成挂事件监听的代码，
+     *   没有 `addEventListener` 就用 `on`
+     */
+    private listen_source(listen: TSESTree.Node): string {
+        const call = listen.type === 'CallExpression' ? listen : null;
+
+        if (!call || call.callee.type !== 'Identifier' || call.callee.name !== 'listen') {
+            return this.slice(listen.range);
+        }
+
+        const [bus, event, guard] = call.arguments;
+        if (!bus || !event) return this.slice(listen.range);
+
+        // guard 存成函数再调用，这样表达式体和块体都支持
+        const guard_code = guard ? `const $guard = (${this.slice(guard.range)}); ` : '';
+        const handler = guard ? '($event) => { if ($guard($event)) update(); }' : '() => update()';
+
+        return (
+            `(update) => { ` +
+            `const $bus = (${this.slice(bus.range)}); ${guard_code}` +
+            `($bus.addEventListener ?? $bus.on).call($bus, ${this.slice(event.range)}, ${handler}); ` +
+            `}`
+        );
     }
 
     private plain_element(node: Element): string {
@@ -857,45 +1029,11 @@ class Generator {
         if (value === true) return { code: `${name}: true`, slot: false };
         if (typeof value === 'string') return { code: `${name}: ${JSON.stringify(value)}`, slot: false };
 
-        const chunks = Array.isArray(value) ? value : [value];
+        const chunks = chunks_of(value);
         const expressions = chunks.filter((chunk): chunk is Expression => typeof chunk !== 'string');
 
-        const bind_prefix = key.startsWith('bindactive:')
-            ? 'bindactive:'
-            : key.startsWith('bind:')
-              ? 'bind:'
-              : null;
-
-        if (bind_prefix) {
-            const expression = expressions[0];
-
-            if (!expression) {
-                return { code: `${name}: { get: () => undefined, set: ($value) => $value }`, slot: false };
-            }
-
-            if (bind_prefix === 'bindactive:') {
-                // README 第 4 条：源不是响应式变量，编译期算不出谁依赖它，
-                // setter 之后让根调度器全量刷新，运行时也会重跑 getter
-                return {
-                    code: `${name}: { external: true, get: () => (${expression.raw}), set: ($value) => { ${expression.raw} = $value; ${this.root_name}(); return (${expression.raw}); } }`,
-                    slot: false
-                };
-            }
-
-            // bind: 源是响应式变量，编译期就知道要刷哪些片段 —— 但得等所有片段收集完才能算，
-            // 所以 setter 先留个名字，最后统一生成
-            const setter = `__bind$${this.counter++}`;
-            this.pending_binds.push({
-                name: setter,
-                target: expression.raw,
-                writes: collect_reads(expression.content)
-            });
-
-            // external: true —— 子组件那边看到这个标记就知道值要听外面的
-            return {
-                code: `${name}: { external: true, get: () => (${expression.raw}), set: ${setter} }`,
-                slot: false
-            };
+        if (key.startsWith('bind:')) {
+            return this.binding_attribute(name, value as BindingValue, owner, slot_index);
         }
 
         if (key.startsWith('on')) {
