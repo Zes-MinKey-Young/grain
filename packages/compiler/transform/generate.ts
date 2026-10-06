@@ -645,7 +645,7 @@ class Generator {
         for (const wrapper of this.wrappers) {
             const node = wrapper.node;
             const params = node.params.map((param) => this.slice(param.range)).join(', ');
-            const updates = this.update_calls(wrapper.writes);
+            const updates = this.update_calls(this.reactive_writes(wrapper.writes));
 
             const head =
                 node.type === 'ArrowFunctionExpression'
@@ -670,7 +670,7 @@ class Generator {
     /** `bind:` 的 setter：赋值 + 刷新受影响的片段（延迟到这里才能算全片段） */
     private bind_statements(): string[] {
         return this.pending_binds.map((bind) => {
-            const updates = this.update_calls(bind.writes);
+            const updates = this.update_calls(this.reactive_writes(bind.writes));
 
             return `const ${bind.name} = ${bind.render(updates)};`;
         });
@@ -719,6 +719,19 @@ class Generator {
         if (body.length === 0) return [];
 
         return [`${this.root_name}.set_props = ($props, $children) => {`, ...body, '};'];
+    }
+
+    /**
+     * 只有 `$state` 变量的变化才由编译期写死刷新调用。
+     *
+     * 普通变量（比如 counter 里的 `draft`）编译期不知道它什么时候变，
+     * 交给 `active` 在运行时全量 update —— 否则会多出这些没用的 update。
+     */
+    private reactive_writes(writes: Set<string>): Set<string> {
+        const states = this.analysis?.states;
+        if (!states) return new Set();
+
+        return new Set([...writes].filter((name) => states.has(name)));
     }
 
     /** 写了 `writes` 里的 state 之后，需要刷新哪些片段 */
