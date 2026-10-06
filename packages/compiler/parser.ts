@@ -56,6 +56,7 @@ export class Parser {
         const stylesheet = root.stylesheet ? parse_style(root.stylesheet, this.locate) : null;
         const module = root.module ? parse_script(root.module, masked) : null;
         const script = root.script ? parse_script(root.script, masked) : null;
+        const onmount = root.onmount ? parse_script(root.onmount, masked) : null;
 
         // 模板里的 `{ ... }` 表达式同样交给 TS 解析器
         parse_expressions(root.template, masked);
@@ -65,6 +66,7 @@ export class Parser {
             stylesheet,
             module,
             script,
+            onmount,
             template: root.template as Template<TemplateNode>
         };
 
@@ -83,6 +85,7 @@ export class Parser {
     parse_root(): RootStage {
         let script: RawScript | null = null;
         let module: RawScript | null = null;
+        let onmount: RawScript | null = null;
         let stylesheet: RawStyle | null = null;
 
         const children: RawTemplateNode[] = [];
@@ -92,10 +95,13 @@ export class Parser {
                 const block = this.read_script();
 
                 if (block.context === 'module') {
-                    if (module) this.error('一个组件只能有一个 `<script module>`', block.start, block.end);
+                    if (module) this.error('A component can only have one `<script module>`', block.start, block.end);
                     module = block;
+                } else if (block.context === 'onmount') {
+                    if (onmount) this.error('A component can only have one `<script onmount>`', block.start, block.end);
+                    onmount = block;
                 } else {
-                    if (script) this.error('一个组件只能有一个 `<script>`', block.start, block.end);
+                    if (script) this.error('A component can only have one `<script>`', block.start, block.end);
                     script = block;
                 }
 
@@ -104,7 +110,7 @@ export class Parser {
 
             if (this.is_block('style')) {
                 const block = this.read_style();
-                if (stylesheet) this.error('一个组件只能有一个 `<style>`', block.start, block.end);
+                if (stylesheet) this.error('A component can only have one `<style>`', block.start, block.end);
                 stylesheet = block;
                 continue;
             }
@@ -121,6 +127,7 @@ export class Parser {
             end: this.length,
             module,
             script,
+            onmount,
             stylesheet,
             template: { type: 'Template', start, end, children }
         };
@@ -151,19 +158,19 @@ export class Parser {
         let context: ScriptContext = 'default';
 
         for (const [name, value] of Object.entries(attributes)) {
-            if (name !== 'module') {
+            if (name !== 'module' && name !== 'onmount') {
                 this.error(
-                    `\`<script>\` 不支持 \`${name}\` 属性（grain 只用 TS，只有 \`<script>\` 和 \`<script module>\` 两种）`,
+                    `\`<script>\` does not support the \`${name}\` attribute (only \`<script>\`, \`<script module>\` and \`<script onmount>\` are valid)`,
                     start,
                     this.index
                 );
             }
 
             if (value !== true) {
-                this.error('`module` 属性不需要值，写成 `<script module>` 即可', start, this.index);
+                this.error(`The \`${name}\` attribute takes no value — write \`<script ${name}>\``, start, this.index);
             }
 
-            context = 'module';
+            context = name;
         }
 
         return {
@@ -213,7 +220,7 @@ export class Parser {
             return true;
         }
 
-        if (required) this.error(`期望 "${str}"`);
+        if (required) this.error(`Expected "${str}"`);
 
         return false;
     }

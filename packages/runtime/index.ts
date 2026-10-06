@@ -18,6 +18,8 @@ export interface Updater {
     (...indices: number[]): void;
     el: Node;
     set_props?: (props: Props, children?: (() => unknown) | null) => void;
+    /** `<script onmount>`：元素挂上之后跑。根组件由生成出来的 mount 调，子组件由这里调 */
+    onmount?: () => void;
 }
 
 export interface Binding<T = unknown> {
@@ -163,6 +165,9 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
                 // 源不是响应式变量，编译期没写死任何 update 调用，只能这里主动全量刷一次
                 if (binding.active) update();
             });
+        } else if (key === 'this' && typeof value === 'function') {
+            // `bind:this`：元素建好就把元素交出去（变量赋值 / 回调都由编译器生成）
+            (value as (element: Element) => void)(element);
         } else if (key.startsWith('on') && typeof value === 'function') {
             element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
         } else if (typeof value === 'function') {
@@ -187,6 +192,10 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
             if (child_el) {
                 el.appendChild(child_el);
                 nested.push(child as Updater);
+
+                // 子组件挂上了（根组件由生成出来的 mount 负责）
+                (child as Partial<Updater>).onmount?.();
+
                 return;
             }
 

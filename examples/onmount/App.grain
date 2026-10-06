@@ -1,0 +1,50 @@
+<script>
+    let grabbed = $state('（还没）');
+
+    /** 回调形式：元素挂上时把它当参数传进来 */
+    function grab(el: HTMLElement) {
+        el.setAttribute('data-grabbed', 'yes');
+        grabbed = el.tagName;
+    }
+
+    function reset() {
+        grabbed = '（还没）';
+    }
+    
+</script>
+
+<script onmount>
+    // 只有这里能访问 bind:this 声明的变量，别处用会报错。
+    // 跑的时候元素已经挂上了，可以直接操作它
+    box.focus();
+    box.placeholder = 'placeholder 是 onmount 里设的';
+    box.value = '挂载时填进去的';
+</script>
+
+<h2>bind:this = 变量</h2>
+<p>
+    <input bind:this={box} />
+</p>
+
+<h2>bind:this = 函数</h2>
+<p bind:this={grab}>这个 p 挂上时调了 grab(el)</p>
+<p>grab 收到的是：{grabbed}</p>
+
+<p>
+    <button onclick={reset}>重置</button>
+</p>
+
+<style>
+    input {
+        padding: 0.3rem 0.5rem;
+    }
+
+    [data-grabbed] {
+        color: #0a6;
+    }
+
+    h2 {
+        font-size: 1rem;
+        margin: 1.5rem 0 0.5rem;
+    }
+</style>

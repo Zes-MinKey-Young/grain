@@ -36,13 +36,17 @@ export function parse_expression(node: RawExpression, masked: string): TSExpress
         const message = error instanceof Error ? error.message : String(error);
         const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
 
-        throw new ParseError(`表达式 \`{${node.raw}}\` 解析失败：${message}`, start, end);
+        throw new ParseError(`Failed to parse expression \`{${node.raw}}\`: ${message}`, start, end);
     }
 
     const statement = program.body[0];
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ExpressionStatement') {
-        throw new ParseError(`\`{${node.raw}}\` 里必须正好是一个表达式`, node.contentStart, node.contentEnd);
+        throw new ParseError(
+            `\`{${node.raw}}\` must contain exactly one expression`,
+            node.contentStart,
+            node.contentEnd
+        );
     }
 
     return statement.expression;
@@ -72,13 +76,13 @@ export function parse_snippet(node: RawExpression, masked: string, label: string
         const message = error instanceof Error ? error.message : String(error);
         const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
 
-        throw new ParseError(`${label} \`${raw}\` 解析失败：${message}`, start, end);
+        throw new ParseError(`Failed to parse ${label} \`${raw}\`: ${message}`, start, end);
     }
 
     const statement = program.body[0];
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ExpressionStatement') {
-        throw new ParseError(`${label} \`${raw}\` 必须是一个表达式`, node.contentStart, node.contentEnd);
+        throw new ParseError(`${label} \`${raw}\` must be an expression`, node.contentStart, node.contentEnd);
     }
 
     return statement.expression;
@@ -97,7 +101,7 @@ export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
 
     if (from < 0 || masked.slice(from, node.contentStart) !== ' '.repeat(prefix.length)) {
         throw new ParseError(
-            `循环头 \`{${node.raw}}\` 前面没有地方放 \`for (\`，\`{#for\` 后面留个空格再写循环变量`,
+            `No room for \`for (\` before the loop head \`{${node.raw}}\` — leave a space after \`{#for\``,
             node.contentStart,
             node.contentEnd
         );
@@ -119,14 +123,14 @@ export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
         const message = error instanceof Error ? error.message : String(error);
         const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
 
-        throw new ParseError(`循环头 \`${node.raw}\` 解析失败：${message}`, start, end);
+        throw new ParseError(`Failed to parse the loop head \`${node.raw}\`: ${message}`, start, end);
     }
 
     const statement = program.body[0];
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ForOfStatement') {
         throw new ParseError(
-            `\`{${node.raw}}\` 里必须是 \`循环变量 of 可迭代对象\``,
+            `\`{${node.raw}}\` must be \`binding of iterable\``,
             node.contentStart,
             node.contentEnd
         );
@@ -160,7 +164,7 @@ export function parse_expressions(template: Template<RawTemplateNode>, masked: s
 
             for (const key of ['expression', 'get', 'set', 'listen'] as const) {
                 const item = binding[key];
-                if (item) (item as Expression).content = parse_snippet(item, masked, `bind 的 ${key}`);
+                if (item) (item as Expression).content = parse_snippet(item, masked, `the ${key} of bind`);
             }
 
             return;

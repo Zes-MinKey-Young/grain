@@ -1,8 +1,8 @@
 {
     "name": "grain-vscode",
     "displayName": "Grain",
-    "description": "Grain 语言支持：语法高亮、诊断、跳转定义、悬停、补全、组件属性智能提示",
-    "version": "0.1.0",
+    "description": "Grain language support: syntax highlighting, diagnostics, go-to-definition, hover, completion and component prop hints",
+    "version": "0.1.2",
     "publisher": "grain",
     "license": "MIT",
     "icon": "images/icon.png",
@@ -58,11 +58,11 @@
         "commands": [
             {
                 "command": "grain.compileJs",
-                "title": "Grain: 编译当前文件 → JS"
+                "title": "Grain: Compile current file → JS"
             },
             {
                 "command": "grain.compileCss",
-                "title": "Grain: 编译当前文件 → CSS"
+                "title": "Grain: Compile current file → CSS"
             }
         ],
         "configuration": {
@@ -71,12 +71,12 @@
                 "grain.semanticDiagnostics": {
                     "type": "boolean",
                     "default": true,
-                    "description": "用 TypeScript 语言服务报告类型错误（关闭后只报语法错误）"
+                    "description": "Report type errors from the TypeScript language service (turn off to only report syntax errors)"
                 },
                 "grain.debug": {
                     "type": "boolean",
                     "default": false,
-                    "description": "调试日志：额外打一份到「输出 → Log (Extension Host)」，并自动显示「输出 → Grain」通道（Grain 通道里的日志跟这个开关无关，一直都在）"
+                    "description": "Debug log: also writes to Output → Log (Extension Host) and reveals the Output → Grain channel (the Grain channel always logs, this only adds the extra copy)"
                 }
             }
         }

@@ -249,15 +249,15 @@ export function register_providers(
             {
                 provideCompletionItems(document, position, token, context) {
                     log(
-                        '补全请求',
+                        'completion request',
                         'language', document.languageId,
-                        '触发字符', JSON.stringify(context?.triggerCharacter ?? null),
+                        'trigger', JSON.stringify(context?.triggerCharacter ?? null),
                         'offset', offset_at(document, position)
                     );
 
                     const analysis = get_analysis(document) ?? ensure_analysis(document);
 
-                    log('补全请求 analysis', analysis ? '有' : '没有');
+                    log('completion request analysis', analysis ? 'yes' : 'no');
 
                     if (!analysis) return null;
 
@@ -266,7 +266,7 @@ export function register_providers(
                     // script 里：交给 TS 语言服务，补全什么它说了算
                     const entries = analysis.completions(offset);
 
-                    log('补全请求 条目', entries.length);
+                    log('completion request entries', entries.length);
 
                     if (entries.length > 0) {
                         return entries.map((entry) => {

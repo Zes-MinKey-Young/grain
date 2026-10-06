@@ -5,7 +5,7 @@
 <script>
     import B from "./B.grain";
     let count = $state(0);
-    let history = $state([]);
+    let history: number[] = $state([]);
     let draft: string = '';
 
     function increment() {

@@ -149,7 +149,7 @@ interface ScanCodeOptions {
 
 function unclosed(message: string, start: number, end: number, locate?: Locator): never {
     const at = locate ? ` (${locate(start).line}:${locate(start).column})` : '';
-    throw new ParseError(`${message} 未闭合${at}`, start, end);
+    throw new ParseError(`${message} is not closed${at}`, start, end);
 }
 
 /**
@@ -317,7 +317,7 @@ export function scan_expression(source: string, start: number, locate?: Locator)
             depth === 1 && frame.braces === 0 && frame.parens === 0 && source[index] === '}'
                 ? index + 1
                 : -1,
-        { locate, expr: true, message: '表达式' }
+        { locate, expr: true, message: 'Expression' }
     );
 }
 
@@ -340,7 +340,7 @@ export function scan_binding_item(source: string, start: number, locate?: Locato
 
             return char === ',' || char === '}' ? index + 1 : -1;
         },
-        { locate, expr: true, message: '绑定值' }
+        { locate, expr: true, message: 'Binding value' }
     );
 }
 

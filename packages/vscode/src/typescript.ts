@@ -21,27 +21,29 @@ function get_ts(): TypeScript {
  */
 const GRAIN_TYPES = 'grain-runtime.d.ts';
 const GRAIN_TYPE_SOURCE = `/**
- * 响应式状态。编译期展开成普通变量，写了它的函数会自动接上 update 调用。
+ * Reactive state. Compiled down to a plain variable; functions that write to it
+ * get the matching update calls appended.
  */
 declare function $state<T>(initial: T): T;
 
 /**
- * 组件 props —— 泛型就是 props 的类型。
+ * Component props — the type parameter is the props type.
  * \`let { label, children } = $props<{ label: string; children?: () => unknown }>();\`
  */
 declare function $props<T extends Record<string, unknown> = Record<string, unknown>>(): T;
 
 /**
- * 可双向绑定的 prop。父组件写 \`bind:name={x}\` 时，
- * 子组件里对它的赋值会写回父组件的 \`x\`；参数是父组件没传值也没绑定时的兜底。
+ * A prop that supports two-way binding. When the parent writes \`bind:name={x}\`,
+ * assigning to it in the child writes back to the parent's \`x\`.
+ * The parameter is the fallback used when the parent passes nothing and binds nothing.
  */
 declare function $bindable<T>(fallback?: T): T;
 
 declare module "*.grain" {
     interface GrainComponent {
-        /** 挂到目标元素上（根组件用法） */
+        /** Mounts into the target element (top-level usage) */
         (target: Element): unknown;
-        /** 作为子组件被父组件调用 */
+        /** Called by the parent component to create a child instance */
         create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
     }
 
@@ -305,7 +307,7 @@ class TypeScriptService {
     /** 丢掉已建好的语言服务，下次用到时按新配置重建 */
     reset(): void {
         this.service = null;
-        log('语言服务已重置');
+        log('language service reset');
     }
 
     /** script 里的补全，交给 TS 语言服务 */
@@ -315,7 +317,7 @@ class TypeScriptService {
             includeCompletionsWithInsertText: true
         });
 
-        log('TS 补全', file, offset, '->', info ? `${info.entries.length} 项` : 'undefined');
+        log('ts completions', file, offset, '->', info ? `${info.entries.length} entries` : 'undefined');
 
         if (!info) return [];
 
@@ -346,7 +348,7 @@ class TypeScriptService {
         log(
             'member_completions',
             'dot', dot,
-            '字符', source_file ? JSON.stringify(source_file.text[dot] ?? '') : '虚拟文件不在'
+            'char', source_file ? JSON.stringify(source_file.text[dot] ?? '') : 'no virtual file'
         );
 
         if (!program || !source_file || source_file.text[dot] !== '.') return [];
@@ -361,7 +363,7 @@ class TypeScriptService {
 
         visit(source_file);
 
-        log('member_completions 左边', target ? `"${target.getText(source_file)}"` : '没找到');
+        log('member_completions left', target ? `"${target.getText(source_file)}"` : 'not found');
 
         if (!target) return [];
 
@@ -374,13 +376,12 @@ class TypeScriptService {
         const visible = properties.filter((symbol) => !symbol.getName().startsWith('__'));
 
         log(
-            'member_completions 类型',
+            'member_completions type',
             checker.typeToString(type),
-            '成员',
+            'members',
             visible.length,
-            '（共',
-            properties.length,
-            '）'
+            'of',
+            properties.length
         );
 
         return visible.map((symbol, index) => {
@@ -454,9 +455,9 @@ class TypeScriptService {
     warmup(): void {
         try {
             this.get();
-            log('语言服务就绪');
+            log('language service ready');
         } catch (error) {
-            console.error('[grain] 语言服务启动失败', error);
+            console.error('[grain] failed to start the language service', error);
         }
     }
 
@@ -478,7 +479,7 @@ class TypeScriptService {
     quick_info(file: string, offset: number): QuickInfo | null {
         const key = normalize(file);
         const info = this.get().getQuickInfoAtPosition(key, offset);
-        log('quick_info', key, offset, '->', info ? '命中' : '没命中');
+        log('quick_info', key, offset, '->', info ? 'hit' : 'miss');
 
         if (!info) return null;
 
@@ -502,7 +503,7 @@ class TypeScriptService {
                 return { start, end: start + (diagnostic.length ?? 1), message };
             });
 
-        log('semantic', file, '->', problems.length, '条');
+        log('semantic', file, '->', problems.length, 'problems');
 
         return problems;
     }

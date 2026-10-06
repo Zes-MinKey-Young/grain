@@ -192,6 +192,143 @@ function collect_loop_names(nodes: readonly unknown[]): string[] {
     return [...names];
 }
 
+/** 常见标签 -> DOM 类型，给 `bind:this` 声明的变量用（认不出的退成 HTMLElement） */
+const ELEMENT_TYPES: Record<string, string> = {
+    a: 'HTMLAnchorElement',
+    br: 'HTMLBRElement',
+    button: 'HTMLButtonElement',
+    canvas: 'HTMLCanvasElement',
+    div: 'HTMLDivElement',
+    form: 'HTMLFormElement',
+    h1: 'HTMLHeadingElement',
+    h2: 'HTMLHeadingElement',
+    h3: 'HTMLHeadingElement',
+    h4: 'HTMLHeadingElement',
+    h5: 'HTMLHeadingElement',
+    h6: 'HTMLHeadingElement',
+    img: 'HTMLImageElement',
+    input: 'HTMLInputElement',
+    label: 'HTMLLabelElement',
+    li: 'HTMLLIElement',
+    ol: 'HTMLOListElement',
+    option: 'HTMLOptionElement',
+    p: 'HTMLParagraphElement',
+    pre: 'HTMLPreElement',
+    select: 'HTMLSelectElement',
+    span: 'HTMLSpanElement',
+    table: 'HTMLTableElement',
+    textarea: 'HTMLTextAreaElement',
+    ul: 'HTMLUListElement',
+    video: 'HTMLVideoElement'
+};
+
+/**
+ * `bind:this={x}` 声明的变量。
+ *
+ * 只有写标识符时才声明——写函数的是回调形式，不声明变量。
+ */
+/** `bind:this={x}` 声明的一个变量 */
+interface ThisName {
+    name: string;
+    type: string;
+    /** 声明处（`x` 本身）的区间，别把它自己当成"在别处引用" */
+    start: number;
+    end: number;
+}
+
+function collect_this_names(
+    nodes: readonly unknown[],
+    /** script 里的声明，用来判断某个名字是不是函数 */
+    all: Map<string, Declaration>
+): ThisName[] {
+    const found: ThisName[] = [];
+
+    const visit = (node: unknown): void => {
+        const current = node as Record<string, unknown>;
+
+        if (current?.type === 'element') {
+            for (const [key, value] of Object.entries((current.attributes ?? {}) as Record<string, unknown>)) {
+                if (key !== 'bind:this' || typeof value !== 'object' || value === null || 'type' in value) continue;
+
+                const expression = (value as Record<string, unknown>).expression as
+                    | { content?: { type?: string; name?: string }; contentStart?: number; contentEnd?: number }
+                    | null
+                    | undefined;
+
+                // 解析失败时没有 AST，认不出是不是标识符，那就不声明
+                if (expression?.content?.type !== 'Identifier' || !expression.content.name) continue;
+
+                // 指向函数的是回调形式（`bind:this={grab}`），不声明变量
+                if (all.get(expression.content.name)?.kind === 'function') continue;
+
+                const tag = String(current.name ?? '');
+
+                found.push({
+                    name: expression.content.name,
+                    type: ELEMENT_TYPES[tag] ?? 'HTMLElement',
+                    start: expression.contentStart ?? 0,
+                    end: expression.contentEnd ?? 0
+                });
+            }
+        }
+
+        for (const next of ['children', 'alternates', 'fallback'] as const) {
+            const value = current?.[next];
+
+            if (Array.isArray(value)) value.forEach(visit);
+            else if (value) visit(value);
+        }
+    };
+
+    nodes.forEach(visit);
+
+    return found;
+}
+
+/**
+ * `bind:this` 声明的变量只在 `<script onmount>` 里有效，别处引用就该报错。
+ *
+ * TS 那边没法用作用域表达（变量是编译期才声明的，虚拟文件里只能全局声明），
+ * 所以自己扫一遍：不在 onmount 里、也不是声明处本身的引用都报出来。
+ */
+function this_leaks(
+    root: Root | null,
+    expressions: Expression[],
+    names: ThisName[]
+): SemanticProblem[] {
+    if (!root || names.length === 0) return [];
+
+    const wanted = new Map(names.map((item) => [item.name, item]));
+    const onmount = root.onmount;
+    const problems: SemanticProblem[] = [];
+
+    const check = (node: any): void => {
+        if (node?.type !== 'Identifier' || !node.range) return;
+
+        const item = wanted.get(node.name);
+        if (!item) return;
+
+        const [start, end] = node.range;
+
+        // 声明处本身（`bind:this={box}` 里的 box）不算
+        if (start >= item.start && start <= item.end) return;
+
+        // onmount 里可以用
+        if (onmount && start >= onmount.contentStart && start <= onmount.contentEnd) return;
+
+        problems.push({
+            start,
+            end,
+            message: `\`${node.name}\` is declared by \`bind:this\` and can only be used inside \`<script onmount>\``
+        });
+    };
+
+    for (const script of [root.script, root.module]) if (script) walk(script.content, check);
+    for (const expression of expressions) walk(expression.content, check);
+
+    return problems;
+}
+
 /** `(value) => ...` / `(ev) => ...` 这种参数，类型不在我们手里，不报 */
 const REGEX_IMPLICIT_ANY = /implicitly has an 'any' type/;
 
@@ -517,9 +654,17 @@ export function analyze(source: string, filename: string): Analysis {
     const expressions = (root ? collect_expressions(root.template.children) : []) as Expression[];
     const components = imported_components(root?.script ?? null, filename);
 
+    // `bind:this={x}` 声明的变量（写函数的是回调形式，不声明）
+    const this_names = root ? collect_this_names(root.template.children, all) : [];
+
     // 把 script 铺到虚拟 .ts 文件里交给 TS 语言服务
     // 注意用 `!=`：解析失败时 root 为 null，root?.script 是 undefined，用 !== 会漏过去
-    const parsed = [root?.module, root?.script].filter((script): script is Script => script != null);
+    const parsed: VirtualScript[] = [root?.module, root?.script].filter(
+        (script): script is Script => script != null
+    );
+
+    // onmount 跟 script 一样铺进虚拟文件
+    if (root?.onmount) parsed.push(root.onmount);
     // 解析失败时第一阶段那两个块只有原文，照样能铺；再不行才用正则抠
     const scripts: VirtualScript[] =
         parsed.length > 0
@@ -538,7 +683,12 @@ export function analyze(source: string, filename: string): Analysis {
         ? collect_loop_names(stage.template.children).filter((name) => !all.has(name))
         : [];
 
-    const declared = loops.map((name) => `declare let ${name}: any;`).join('\n');
+    // bind:this 声明的变量也补上声明（元素类型），这样 onmount 里能正常用；
+    // "只有 onmount 能用"由 this_leaks 单独查
+    const declared = [
+        ...loops.map((name) => `declare let ${name}: any;`),
+        ...this_names.map((item) => `declare let ${item.name}: ${item.type};`)
+    ].join('\n');
 
     typescript_service.update(virtual, build_virtual(source, scripts, regions, declared));
 
@@ -557,7 +707,7 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         script_at(offset: number): Script | null {
-            for (const script of [root?.script, root?.module]) {
+            for (const script of [root?.script, root?.module, root?.onmount]) {
                 if (script && offset >= script.contentStart && offset <= script.contentEnd) return script;
             }
 
@@ -590,8 +740,8 @@ export function analyze(source: string, filename: string): Analysis {
             log(
                 'completions',
                 'offset', offset,
-                '在 script 里吗', in_script,
-                '在表达式里吗', in_expression
+                'in script', in_script,
+                'in expression', in_expression
             );
 
             if (!in_script && !in_expression) return [];
@@ -616,7 +766,7 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         semantic(): SemanticProblem[] {
-            return typescript_service.semantic_problems(virtual).filter((problem) => {
+            const problems = typescript_service.semantic_problems(virtual).filter((problem) => {
                 // script 里：全部照报
                 if (
                     scripts.some(
@@ -640,6 +790,9 @@ export function analyze(source: string, filename: string): Analysis {
                 // 硬报的话每个 grain 绑定和事件处理器都会挂红线
                 return !REGEX_IMPLICIT_ANY.test(problem.message);
             });
+
+            // bind:this 声明的变量只在 onmount 里有效
+            return [...problems, ...this_leaks(root, expressions, this_names)];
         },
 
         warmup(): void {

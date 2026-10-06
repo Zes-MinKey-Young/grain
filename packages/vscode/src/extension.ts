@@ -76,7 +76,7 @@ function describe_tsconfig(status: vscode.LanguageStatusItem, document: vscode.T
         status.detail = `tsconfig: ${vscode.workspace.asRelativePath(file, false)}`;
         status.command = {
             command: 'vscode.open',
-            title: '打开 tsconfig.json',
+            title: 'Open tsconfig.json',
             arguments: [vscode.Uri.file(file)]
         };
 
@@ -85,7 +85,7 @@ function describe_tsconfig(status: vscode.LanguageStatusItem, document: vscode.T
 
     const from = vscode.workspace.asRelativePath(dirname(document.uri.fsPath), false);
 
-    status.detail = `tsconfig: 没找到（从 ${from} 往上到工作区根都没有），用插件自带的配置（含 DOM）`;
+    status.detail = `tsconfig: not found (searched up from ${from} to the workspace root) — using the built-in config (includes DOM)`;
     status.command = undefined;
 }
 
@@ -102,7 +102,7 @@ function refresh(document: vscode.TextDocument, collection: vscode.DiagnosticCol
         const { analyze } = get_analysis_module();
         const analysis = analyze(document.getText(), document.uri.fsPath);
 
-        log('分析', document.uri.fsPath, 'script', analysis.root?.script ? '有' : '没有');
+        log('analyze', document.uri.fsPath, 'script', analysis.root?.script ? 'yes' : 'no');
 
         analyses.set(document.uri.toString(), { analysis, version: document.version });
         update_diagnostics(document, collection, analysis);
@@ -111,7 +111,7 @@ function refresh(document: vscode.TextDocument, collection: vscode.DiagnosticCol
         setTimeout(() => analysis.warmup(), 0);
     } catch (error) {
         // 分析炸了也要把旧的诊断清掉，否则红线会一直挂着
-        console.error('[grain] 分析失败', error);
+        console.error('[grain] analysis failed', error);
         collection.delete(document.uri);
     }
 }
@@ -154,14 +154,14 @@ async function show_compiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Pro
     const result = analyze(editor.document.getText(), editor.document.uri.fsPath).compiled();
 
     if (!result) {
-        vscode.window.showErrorMessage('编译失败，先看问题面板里的错误');
+        vscode.window.showErrorMessage('Compilation failed — check the Problems panel for errors');
         return;
     }
 
     const content = kind === 'js' ? result.js : result.css;
 
     if (kind === 'css' && !content.trim()) {
-        vscode.window.showInformationMessage('这个组件没有 <style>');
+        vscode.window.showInformationMessage('This component has no <style>');
         return;
     }
 
@@ -174,7 +174,7 @@ async function show_compiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Pro
 
 export function activate(context: vscode.ExtensionContext): void {
     // 无条件的：用来确认扩展到底有没有激活（「输出 → Grain」里看）
-    log('扩展激活', '版本', String(context.extension.packageJSON?.version ?? '?'));
+    log('extension activated', 'version', String(context.extension.packageJSON?.version ?? '?'));
 
     const collection = vscode.languages.createDiagnosticCollection('grain');
     context.subscriptions.push(collection);
@@ -197,7 +197,7 @@ export function activate(context: vscode.ExtensionContext): void {
     status_item = vscode.languages.createLanguageStatusItem('grain.status', SELECTOR);
     status_item.name = 'Grain';
     status_item.text = 'Grain';
-    status_item.detail = 'tsconfig: 还没分析过文件';
+    status_item.detail = 'tsconfig: no file analyzed yet';
 
     context.subscriptions.push(status_item);
 
@@ -211,7 +211,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const editor = vscode.workspace.getConfiguration('editor', { languageId: 'grain' });
 
     log(
-        '补全设置生效值',
+        'effective suggestion settings',
         'inlineSuggest.enabled', editor.get('inlineSuggest.enabled'),
         '| inlineSuggest.suppressSuggestions', editor.get('inlineSuggest.suppressSuggestions'),
         '| quickSuggestions', JSON.stringify(editor.get('quickSuggestions')),
@@ -289,7 +289,7 @@ export function activate(context: vscode.ExtensionContext): void {
                 const editor = vscode.window.activeTextEditor;
 
                 if (!editor || !is_grain(editor.document)) {
-                    vscode.window.showWarningMessage('当前文件不是 .grain');
+                    vscode.window.showWarningMessage('The current file is not a .grain file');
                     return;
                 }
 

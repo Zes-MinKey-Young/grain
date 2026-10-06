@@ -334,6 +334,14 @@ class Generator {
     private needs_text = false;
     /** `$props()` 解构出来的变量，生成 `set_props` 要用 */
     private prop_names: Array<{ name: string; key: string }> = [];
+    /**
+     * `bind:this={x}` 里由它自己声明的变量名。
+     *
+     * 写标识符时不需要（也不该）在 `<script>` 里先声明；只有 `<script onmount>` 能看见。
+     */
+    private this_names = new Set<string>();
+    /** script / module 里声明过的名字（算一次就够） */
+    private declared: Set<string> | null = null;
     /** `$bindable` 变量 -> 它的刷新函数名 */
     private refresh_names = new Map<string, string>();
     /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
@@ -358,6 +366,8 @@ class Generator {
 
         // script 要先处理：`$bindable` 会决定要不要 import to_binding
         const parts = this.root.script ? this.script(this.root.script) : { head: [], body: '' };
+        // onmount 跟 script 走同一套处理（`$state` 展开、`$props()` 换成 props）
+        const onmount = this.root.onmount ? this.script(this.root.onmount) : null;
 
         const imported = ['creEle', 'creFragment'];
         if (this.bindables.length > 0) imported.push('to_binding');
@@ -371,6 +381,8 @@ class Generator {
 
         // import / export 留在模块顶层
         if (parts.head.length > 0) output.push('', ...parts.head);
+        if (onmount && onmount.head.length > 0)
+            output.push('', '/* <script onmount> 的 import */', ...onmount.head);
 
         // 实例代码：每个组件实例各跑一遍，所以放进 create()
         const instance: string[] = [];
@@ -391,11 +403,21 @@ class Generator {
         const refreshes = this.refresh_statements();
         if (refreshes.length > 0) instance.push('', ...refreshes);
 
+        // `bind:this={x}` 声明的变量：放在这里，模板里的赋值才够得着
+        if (this.this_names.size > 0) {
+            instance.push('', `/* bind:this 声明的变量 */`, `let ${[...this.this_names].join(', ')};`);
+        }
+
         instance.push('', '/* template */', ...this.statements);
 
         // 属性修改触发器：得等所有片段都收集完，才知道 props 变了要刷哪些
         const set_props = this.props_statements();
         if (set_props.length > 0) instance.push('', ...set_props);
+
+        // 挂上之后才跑：这时候 bind:this 的变量已经被赋上元素了
+        if (onmount && onmount.body) {
+            instance.push('', '/* <script onmount> */', `${root_name}.onmount = () => {`, onmount.body, '};');
+        }
 
         instance.push('', `return ${root_name};`);
 
@@ -414,6 +436,8 @@ class Generator {
             '  mount.target = target;',
             '  const update = create();',
             '  target.appendChild(update.el);',
+            // 子组件那一份由运行时在挂上时调（见 runtime 的 create）
+            '  update.onmount?.();',
             '  return update;',
             '}',
             'mount.create = create;'
@@ -871,6 +895,66 @@ class Generator {
     }
 
     /**
+     * 生成 `bind:this`：把元素交给一个变量或者回调。
+     *
+     * - `bind:this={x}` —— x 由 bind:this 自己声明（`let x;`），不用在 `<script>` 里先写；
+     *   只有 `<script onmount>` 能看见它
+     * - `bind:this={(el) => ...}` —— 不声明变量，元素挂上时把它当参数传进去跑
+     */
+    private this_attribute(binding: BindingValue): { code: string; slot: boolean } {
+        const expression = binding.expression;
+
+        if (!expression) return { code: '"this": undefined', slot: false };
+
+        const node = expression.content;
+
+        if (node.type === 'Identifier') {
+            // 标识符指向一个函数时是回调形式：`bind:this={grab}` 会在建好元素时调 grab(el)。
+            // 注意不能用 handler() 的包装版：回调是建树过程中跑的，那时候根调度器还没建出来，
+            // 包装里追加的刷新调用会踩 TDZ（"Cannot access ... before initialization"）
+            if (this.analysis?.functions.has(node.name)) {
+                return { code: `"this": ${node.name}`, slot: false };
+            }
+
+            // 否则由 bind:this 自己声明这个变量（script 里已经声明过就只赋值）
+            if (!this.script_names().has(node.name)) this.this_names.add(node.name);
+
+            return { code: `"this": ($el) => { ${node.name} = $el; }`, slot: false };
+        }
+
+        // 别的写法都当成回调：元素建好时传进去
+        return { code: `"this": (${expression.raw})`, slot: false };
+    }
+
+    /** `<script>` / `<script module>` 里已经声明过的名字 */
+    private script_names(): Set<string> {
+        if (this.declared) return this.declared;
+
+        const names = new Set<string>();
+
+        for (const block of [this.root.script, this.root.module]) {
+            if (!block) continue;
+
+            simpleTraverse(block.content as unknown as TSESTree.Node, {
+                enter: (node) => {
+                    if (node.type === 'VariableDeclarator' && node.id.type === 'Identifier') {
+                        names.add(node.id.name);
+                    } else if (
+                        (node.type === 'FunctionDeclaration' || node.type === 'ClassDeclaration') &&
+                        node.id?.type === 'Identifier'
+                    ) {
+                        names.add(node.id.name);
+                    } else if (node.type === 'ImportDefaultSpecifier' || node.type === 'ImportSpecifier') {
+                        names.add(node.local.name);
+                    }
+                }
+            });
+        }
+
+        return (this.declared = names);
+    }
+
+    /**
      * 生成 `bind:` 属性。
      *
      * 绑定值是 grain 自己的语法，解析阶段已经拆成 { expression, get, set, listen, active }：
@@ -1032,6 +1116,10 @@ class Generator {
 
         const chunks = chunks_of(value);
         const expressions = chunks.filter((chunk): chunk is Expression => typeof chunk !== 'string');
+
+        if (key === 'bind:this') {
+            return this.this_attribute(value as BindingValue);
+        }
 
         if (key.startsWith('bind:')) {
             return this.binding_attribute(name, value as BindingValue, owner, slot_index);
@@ -1215,9 +1303,36 @@ class Generator {
     }
 }
 
+/**
+ * 把几个 script 的分析结果并起来（`<script>` 和 `<script onmount>`）。
+ * 区间都是绝对偏移，所以并一份用不会串；同名保留先出现的那个。
+ */
+function merge_analyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
+    if (list.length === 0) return null;
+
+    const merged: ScriptAnalysis = { states: new Map(), functions: new Map() };
+
+    for (const item of list) {
+        for (const [name, info] of item.states) {
+            if (!merged.states.has(name)) merged.states.set(name, info);
+        }
+
+        for (const [name, info] of item.functions) {
+            if (!merged.functions.has(name)) merged.functions.set(name, info);
+        }
+    }
+
+    return merged;
+}
+
 /** 把 Root 变成可执行的 JS（以及 CSS） */
 export function generate(root: Root, source: string, options: CompileOptions = {}): CompileResult {
-    const analysis = root.script ? analyze_script(root.script.content, source) : null;
+    // onmount 里也能写 $state / 事件处理函数，所以一起分析
+    const analysis = merge_analyses(
+        [root.script, root.onmount]
+            .filter((block): block is Script => block != null)
+            .map((block) => analyze_script(block.content, source))
+    );
 
     // `<style global>` 和没有样式的组件都不需要 scope 类名
     const scope_id =

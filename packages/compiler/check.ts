@@ -29,7 +29,7 @@ function check_get(get: Expression): void {
 
     if (!is_function_like(node) || node.params.length === 0) return;
 
-    fail(get, '`get` 不接受参数，写成 `get: () => ...`');
+    fail(get, '`get` takes no parameters — write `get: () => ...`');
 }
 
 /**
@@ -44,7 +44,10 @@ function check_set(set: Expression): void {
 
     if (node.params.length === 1) return;
 
-    fail(set, `\`set\` 必须正好一个参数（新值），写成 \`set: (value) => ...\`；现在有 ${node.params.length} 个`);
+    fail(
+        set,
+        `\`set\` must take exactly one parameter (the new value) — write \`set: (value) => ...\`; got ${node.params.length}`
+    );
 }
 
 /**
@@ -59,36 +62,48 @@ function check_listen(listen: Expression): void {
 
     if (is_function_like(node)) {
         if (node.params.length !== 1) {
-            fail(listen, '`listen` 必须正好一个参数（update 回调），写成 `listen: (update) => ...`');
+            fail(
+                listen,
+                '`listen` must take exactly one parameter (the update callback) — write `listen: (update) => ...`'
+            );
         }
 
         return;
     }
 
     if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier' || node.callee.name !== 'listen') {
-        fail(listen, '`listen` 要么是 `(update) => ...`，要么是 `listen(事件总线, "事件名")`');
+        fail(listen, '`listen` must be either `(update) => ...` or `listen(eventBus, "eventName")`');
     }
 
     const args = node.arguments;
 
     if (args.some((argument) => argument.type === 'SpreadElement')) {
-        fail(listen, '`listen(...)` 不支持展开参数');
+        fail(listen, '`listen(...)` does not support spread arguments');
     }
 
     if (args.length < 2 || args.length > 3) {
-        fail(listen, '`listen(...)` 要两个或三个参数：`listen(事件总线, "事件名")`，谓词可省');
+        fail(
+        listen,
+        '`listen(...)` takes two or three arguments: `listen(eventBus, "eventName")` — the predicate is optional'
+    );
     }
 
     const event = args[1];
 
     if (event.type !== 'Literal' || typeof event.value !== 'string') {
-        fail(listen, '`listen` 的第二个参数必须是事件名的字符串字面量，比如 `listen(bus, "tick")`');
+        fail(
+        listen,
+        'The second argument of `listen` must be a string literal with the event name, e.g. `listen(bus, "tick")`'
+    );
     }
 
     const guard = args[2];
 
     if (guard && !is_callable(guard)) {
-        fail(listen, '`listen` 的第三个参数是谓词，得是个函数：`listen(bus, "tick", (ev) => ...)`');
+        fail(
+        listen,
+        'The third argument of `listen` is a predicate and must be a function: `listen(bus, "tick", (ev) => ...)`'
+    );
     }
 }
 
@@ -98,15 +113,39 @@ function check_binding(binding: BindingValue): void {
     if (binding.listen) check_listen(binding.listen);
 }
 
+/**
+ * `bind:this`：
+ * - 写标识符 —— 变量由它自己声明（不用在 `<script>` 里先写）
+ * - 写函数 / 别的表达式 —— 不声明变量，元素挂上时把元素当参数传进去跑
+ */
+function check_this(item: Expression): void {
+    if (is_callable(item.content)) return;
+
+    fail(
+        item,
+        '`bind:this` takes either a variable name (which it declares) or a function receiving the element when it mounts'
+    );
+}
+
 function is_binding(value: string | Expression | BindingValue): value is BindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
 }
 
-function check_value(value: AttributeValue | true): void {
+function check_value(key: string, value: AttributeValue | true): void {
     if (value === true || typeof value === 'string') return;
 
     if (Array.isArray(value)) return;
-    if (is_binding(value)) check_binding(value);
+
+    if (is_binding(value)) {
+        // `bind:this` 不是读写对，单独按"变量 or 回调"查
+        if (key === 'bind:this') {
+            if (value.expression) check_this(value.expression);
+
+            return;
+        }
+
+        check_binding(value);
+    }
 }
 
 /**
@@ -119,7 +158,7 @@ export function check_bindings(root: Root): void {
         for (const node of nodes) {
             switch (node.type) {
                 case 'element':
-                    for (const value of Object.values(node.attributes)) check_value(value);
+                    for (const [key, value] of Object.entries(node.attributes)) check_value(key, value);
                     visit(node.children);
                     break;
 

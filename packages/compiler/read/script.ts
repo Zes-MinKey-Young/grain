@@ -30,7 +30,7 @@ export function parse_script(block: RawScript, masked: string): Script {
         // 只勾出错的那一段，不是整个 script
         const [start, end] = error_range(error, [block.contentStart, block.contentEnd]);
 
-        throw new ParseError(`${tag} 解析失败：${message}`, start, end);
+        throw new ParseError(`Failed to parse ${tag}: ${message}`, start, end);
     }
 
     return { ...block, content };

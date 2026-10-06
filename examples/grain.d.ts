@@ -1,32 +1,35 @@
 /**
- * grain 项目里要有一份这个（或者由 `grain` 包提供）。
- * 改动时同步 `packages/vscode/src/typescript.ts` 里的 GRAIN_TYPE_SOURCE —— 那边管编辑器里的提示。
+ * Every grain project needs this file (or an equivalent shipped by the `grain` package).
+ * Keep it in sync with GRAIN_TYPE_SOURCE in `packages/vscode/src/typescript.ts`,
+ * which drives the editor experience.
  */
 
 /**
- * 响应式状态。编译期展开成普通变量，写了它的函数会自动接上 update 调用。
+ * Reactive state. Compiled down to a plain variable; functions that write to it
+ * get the matching update calls appended.
  */
 declare function $state<T>(initial: T): T;
 
 /**
- * 组件 props —— 泛型就是 props 的类型。
+ * Component props — the type parameter is the props type.
  * `let { label, children } = $props<{ label: string; children?: () => unknown }>();`
  */
 declare function $props<T extends Record<string, unknown> = Record<string, unknown>>(): T;
 
 /**
- * 可双向绑定的 prop。父组件写 `bind:name={x}` 时，
- * 子组件里对它的赋值会写回父组件的 `x`；参数是父组件没传值也没绑定时的兜底。
+ * A prop that supports two-way binding. When the parent writes `bind:name={x}`,
+ * assigning to it in the child writes back to the parent's `x`.
+ * The parameter is the fallback used when the parent passes nothing and binds nothing.
  */
 declare function $bindable<T>(fallback?: T): T;
 
 declare module '*.grain' {
     interface GrainComponent {
-        /** 挂到目标元素上（根组件用法） */
+        /** Mounts into the target element (top-level usage) */
         (target: Element): unknown;
-        /** HMR 重新挂载用 */
+        /** Kept for HMR re-mounting */
         target?: Element;
-        /** 作为子组件被父组件调用 */
+        /** Called by the parent component to create a child instance */
         create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
     }
 
@@ -35,7 +38,7 @@ declare module '*.grain' {
 }
 
 declare module '*?grain-ast' {
-    /** `App.grain?grain-ast` 返回该组件的解析结果（Root） */
+    /** `App.grain?grain-ast` returns the parse result (Root) of that component */
     const root: unknown;
     export default root;
 }

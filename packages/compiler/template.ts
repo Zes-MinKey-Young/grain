@@ -26,7 +26,7 @@ export function read_fragment(parser: Parser): RawTemplateNode[] {
 
     while (parser.index < parser.length) {
         if (parser.is_block('script') || parser.is_block('style')) break;
-        if (is_closing_tag(parser)) parser.error('意外的闭合标签');
+        if (is_closing_tag(parser)) parser.error('Unexpected closing tag');
 
         nodes.push(...read_nodes(parser, true));
     }
@@ -145,7 +145,7 @@ function read_nodes(parser: Parser, top_level: boolean): RawTemplateNode[] {
     if (parser.match('<!--')) return [read_comment(parser)];
 
     if (parser.is_block('script') || parser.is_block('style')) {
-        if (!top_level) parser.error('`<script>` 和 `<style>` 只能出现在组件顶层');
+        if (!top_level) parser.error('`<script>` and `<style>` are only allowed at the top level of a component');
         // top_level 时 read_fragment 已经 break，不会走到这里
         return [];
     }
@@ -160,10 +160,10 @@ function read_nodes(parser: Parser, top_level: boolean): RawTemplateNode[] {
         for (const keyword of ['if', 'for'] as const) {
             if (!is_keyword_at(parser.source, parser.index + 1, keyword)) continue;
 
-            parser.error(`块标记要带 \`#\`：写成 \`{#${keyword} ...}\``);
+            parser.error(`Block tags need a \`#\`: write \`{#${keyword} ...}\``);
         }
         // 分支 / 结束标记应由对应的块读取器消费，出现在这里说明没有可配对的块
-        if (parser.match('{:') || parser.match('{/')) parser.error('没有可以闭合的块');
+        if (parser.match('{:') || parser.match('{/')) parser.error('There is no block to close');
 
         return [read_expression(parser)];
     }
@@ -211,7 +211,7 @@ function read_for_block(parser: Parser): RawForBlock {
 
     if (!parts || parts.binding === '' || parts.iterable === '') {
         parser.error(
-            '`{#for ...}` 里必须是 `循环变量 of 可迭代对象`，比如 `{#for item of list}`',
+            '`{#for ...}` must be `binding of iterable`, for example `{#for item of list}`',
             start,
             end
         );
@@ -243,7 +243,7 @@ function read_else(parser: Parser): RawElseBlock {
     parser.eat('{:', true);
     parser.allow_whitespace();
 
-    if (!parser.eat('else')) parser.error('期望 `else`', start);
+    if (!parser.eat('else')) parser.error('Expected `else`', start);
     parser.allow_whitespace();
 
     let test: RawExpression | null = null;
@@ -278,9 +278,9 @@ function read_branch_children(parser: Parser): RawTemplateNode[] {
 function expect_close(parser: Parser, name: string): void {
     const start = parser.index;
 
-    if (!parser.eat('{/')) parser.error(`期望 \`{/${name}}\``, start);
+    if (!parser.eat('{/')) parser.error(`Expected \`{/${name}}\``, start);
     parser.allow_whitespace();
-    if (!parser.eat(name)) parser.error(`期望 \`{/${name}}\``, start);
+    if (!parser.eat(name)) parser.error(`Expected \`{/${name}}\``, start);
     parser.allow_whitespace();
     parser.eat('}', true);
 }
@@ -303,7 +303,7 @@ function read_tag_expression(parser: Parser, open_start: number): RawExpression 
     const content_start = parser.index;
     const { contentEnd, end } = scan_expression(parser.source, content_start, parser.locate);
 
-    if (contentEnd === content_start) parser.error('表达式为空', open_start, end);
+    if (contentEnd === content_start) parser.error('Empty expression', open_start, end);
 
     const raw = parser.source.slice(content_start, contentEnd);
     parser.index = end;
@@ -325,7 +325,7 @@ function read_element(parser: Parser): RawTemplateNode {
     parser.eat('<', true);
 
     const name = parser.read(REGEX_TAG_NAME);
-    if (!name) parser.error('期望标签名');
+    if (!name) parser.error('Expected a tag name');
 
     const attributes = read_attributes(parser);
     parser.allow_whitespace();
@@ -342,12 +342,12 @@ function read_element(parser: Parser): RawTemplateNode {
 
         parser.eat('</', true);
         const closing = parser.read(REGEX_TAG_NAME);
-        if (!closing) parser.error('期望标签名');
+        if (!closing) parser.error('Expected a tag name');
         parser.allow_whitespace();
         parser.eat('>', true);
 
         if (closing.toLowerCase() !== name.toLowerCase()) {
-            parser.error(`闭合标签 \`</${closing}>\` 与 \`<${name}>\` 不匹配`, start, parser.index);
+            parser.error(`Closing tag \`</${closing}>\` does not match \`<${name}>\``, start, parser.index);
         }
     }
 
@@ -363,7 +363,7 @@ function read_children(parser: Parser): RawTemplateNode[] {
         children.push(...read_nodes(parser, false));
     }
 
-    parser.error('元素未闭合');
+    parser.error('Unclosed element');
 }
 
 /** 读取一段文本，其中的 `{ ... }` 会被切成表达式节点；遇到块标记则停下 */
@@ -533,15 +533,15 @@ export function read_attributes(
     while (true) {
         parser.allow_whitespace();
 
-        if (parser.index >= parser.length) parser.error('属性列表未结束');
+        if (parser.index >= parser.length) parser.error('Unterminated attribute list');
 
         const char = parser.source[parser.index];
         if (char === '>') return attributes;
         if (char === '/' && parser.source[parser.index + 1] === '>') return attributes;
 
         const name = parser.read(REGEX_ATTRIBUTE_NAME);
-        if (!name) parser.error('期望属性名');
-        if (name in attributes) parser.error(`重复的属性 \`${name}\``);
+        if (!name) parser.error('Expected an attribute name');
+        if (name in attributes) parser.error(`Duplicate attribute \`${name}\``);
 
         parser.allow_whitespace();
 
@@ -565,7 +565,7 @@ function read_plain_value(parser: Parser): string {
         parser.index += 1;
         const start = parser.index;
         const end = parser.source.indexOf(quote, start);
-        if (end === -1) parser.error('属性值未闭合', start);
+        if (end === -1) parser.error('Unterminated attribute value', start);
 
         parser.index = end + 1;
         return decode_entities(parser.source.slice(start, end));
@@ -578,7 +578,7 @@ function read_plain_value(parser: Parser): string {
         i += 1;
     }
 
-    if (i === start) parser.error('期望属性值');
+    if (i === start) parser.error('Expected an attribute value');
 
     parser.index = i;
     return decode_entities(parser.source.slice(start, i));
@@ -642,7 +642,7 @@ function read_comment(parser: Parser): Comment {
 
     const content_start = parser.index;
     const end = source.indexOf('-->', content_start);
-    if (end === -1) parser.error('注释未闭合', start);
+    if (end === -1) parser.error('Unterminated comment', start);
 
     parser.index = end + 3;
 

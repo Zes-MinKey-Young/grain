@@ -207,7 +207,13 @@ export interface BlockBase extends Position {
     raw: string;
 }
 
-export type ScriptContext = 'default' | 'module';
+/**
+ * script 的三种：
+ * - `default`：组件实例脚本
+ * - `module`：模块级，随模块只跑一次
+ * - `onmount`：组件元素挂载后跑，能看见 `bind:this` 声明的变量
+ */
+export type ScriptContext = 'default' | 'module' | 'onmount';
 
 /** Root 阶段产出的原始 script 块，尚未解析 TS */
 export interface RawScript extends BlockBase {
@@ -246,6 +252,7 @@ export interface RootStage extends Position {
     type: 'Root';
     module: RawScript | null;
     script: RawScript | null;
+    onmount: RawScript | null;
     stylesheet: RawStyle | null;
     template: Template<RawTemplateNode>;
 }
@@ -255,6 +262,7 @@ export interface Root extends Position {
     type: 'Root';
     module: Script | null;
     script: Script | null;
+    onmount: Script | null;
     stylesheet: Stylesheet | null;
     template: Template<TemplateNode>;
 }
