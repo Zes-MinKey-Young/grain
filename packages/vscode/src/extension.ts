@@ -206,6 +206,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
     sync_debug();
 
+    // 有 AI 补全时我们的列表可能被压住。把这几个设置的**生效值**打出来
+    // （用户设置 / 别的扩展的默认值都会盖过 package.json 里的 configurationDefaults）
+    const editor = vscode.workspace.getConfiguration('editor', { languageId: 'grain' });
+
+    log(
+        '补全设置生效值',
+        'inlineSuggest.enabled', editor.get('inlineSuggest.enabled'),
+        '| inlineSuggest.suppressSuggestions', editor.get('inlineSuggest.suppressSuggestions'),
+        '| quickSuggestions', JSON.stringify(editor.get('quickSuggestions')),
+        '| wordBasedSuggestions', editor.get('wordBasedSuggestions')
+    );
+
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('grain')) sync_debug();

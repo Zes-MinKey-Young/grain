@@ -275,6 +275,9 @@ export function register_providers(
                             item.sortText = entry.sortText;
                             if (entry.detail) item.detail = entry.detail;
 
+                            // 名字和实际要输入的不一样时（`a-b` -> `["a-b"]`），靠它才匹配得上
+                            if (entry.filterText) item.filterText = entry.filterText;
+
                             if (entry.insertText) {
                                 item.insertText = new vscode.SnippetString(entry.insertText);
                             }

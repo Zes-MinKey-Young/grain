@@ -145,7 +145,9 @@ export interface VirtualExpression {
 export function build_virtual(
     source: string,
     scripts: VirtualScript[],
-    expressions: VirtualExpression[]
+    expressions: VirtualExpression[],
+    /** 追加在文件末尾的声明（循环变量之类）；放在末尾是为了不影响任何已有偏移 */
+    tail = ''
 ): string {
     let virtual = source.replace(/[^\n\r]/g, ' ');
 
@@ -179,7 +181,7 @@ export function build_virtual(
             virtual.slice(semicolon ? end + 2 : end + 1);
     }
 
-    return virtual;
+    return tail ? `${virtual}\n${tail}` : virtual;
 }
 
 /**
@@ -203,6 +205,13 @@ export interface CompletionEntry {
     sortText: string;
     /** TS 给的插入文本，可能是 `foo($0)` 这种带占位符的 */
     insertText?: string;
+    /**
+     * 用来跟输入比对 / 决定替换范围的文本。
+     *
+     * 名字不代表实际输入时（比如 `a-b` 要写成 `["a-b"]`）TS 会给一个不一样的值；
+     * 不给的话 VS Code 拿 label 去比，这类候选就永远匹配不上。
+     */
+    filterText?: string;
     /** 类型文本，如 `(x: number) => number` */
     detail?: string;
     documentation?: string;
@@ -314,7 +323,8 @@ class TypeScriptService {
             name: entry.name,
             kind: String(entry.kind),
             sortText: entry.sortText ?? entry.name,
-            insertText: entry.insertText
+            insertText: entry.insertText,
+            filterText: entry.filterText
         }));
     }
 
@@ -390,6 +400,7 @@ class TypeScriptService {
                 kind,
                 // 排在 TS 给的那些前面
                 sortText: `0${String(index).padStart(4, '0')}`,
+                filterText: symbol.getName(),
                 detail: checker.typeToString(checker.getTypeOfSymbolAtLocation(symbol, target!))
             };
         });

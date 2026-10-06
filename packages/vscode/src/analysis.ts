@@ -1,8 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-import { compile, parse, ParseError } from '../../compiler/index.js';
-import type { Expression, Root, Script, TemplateNode } from '../../compiler/index.js';
+import { compile, parse, parse_root, ParseError } from '../../compiler/index.js';
+import type { Expression, Root, RootStage, Script, TemplateNode } from '../../compiler/index.js';
 import { log } from './log.js';
 import {
     build_virtual,
@@ -55,7 +55,7 @@ export interface Analysis {
     declarations: Map<string, Declaration>;
     /** 所有层级的声明（含函数内部），script 里 hover / 跳转用 */
     all: Map<string, Declaration>;
-    /** 找出覆盖某个偏移的模板表达式 */
+    /** 找出覆盖某个偏移的模板表达式（要拿它的 TS AST 时才用得到） */
     expression_at(offset: number): Expression | null;
     /** 找出覆盖某个偏移的 script（模板之外、script 内容之内） */
     script_at(offset: number): Script | null;
@@ -153,51 +153,112 @@ function collect_all(source: string, script: Script | null): Map<string, Declara
     return declarations;
 }
 
-function collect_expressions(nodes: TemplateNode[]): Expression[] {
-    const expressions: Expression[] = [];
+/**
+ * `{for (const item of list)}` 里的循环变量。
+ *
+ * 循环头不铺进虚拟文件（它不是表达式），所以模板里一用 `item` 就"找不到名字"——
+ * 补一个声明抵消掉。取的是循环头原文，两个阶段都拿得到。
+ */
+function collect_loop_names(nodes: readonly unknown[]): string[] {
+    const names = new Set<string>();
+    const pattern = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/;
 
-    const visit = (node: TemplateNode): void => {
-        switch (node.type) {
+    const visit = (node: unknown): void => {
+        const current = node as Record<string, unknown>;
+
+        if (current?.type === 'ForBlock' && typeof current.raw === 'string') {
+            const declared = pattern.exec(current.raw);
+            if (declared) names.add(declared[1]);
+        }
+
+        for (const key of ['children', 'fallback'] as const) {
+            const next = current?.[key];
+
+            if (Array.isArray(next)) next.forEach(visit);
+            else if (next) visit(next);
+        }
+    };
+
+    nodes.forEach(visit);
+
+    return [...names];
+}
+
+/** `(value) => ...` / `(ev) => ...` 这种参数，类型不在我们手里，不报 */
+const REGEX_IMPLICIT_ANY = /implicitly has an 'any' type/;
+
+/**
+ * 模板里的表达式 / 绑定项：只要区间和原文。
+ *
+ * 铺虚拟文件、判断光标位置都用这些就够了，所以解析失败（表达式没有 TS AST）
+ * 时照样能收 —— 敲到一半的 `obj.` 不至于把高亮和补全全弄丢。
+ */
+export interface ExpressionRegion {
+    contentStart: number;
+    contentEnd: number;
+    raw: string;
+}
+
+function collect_expressions(nodes: readonly unknown[]): ExpressionRegion[] {
+    const expressions: ExpressionRegion[] = [];
+
+    const push = (value: unknown): void => {
+        if (value) expressions.push(value as ExpressionRegion);
+    };
+
+    const children_of = (node: Record<string, unknown>): unknown[] =>
+        Array.isArray(node.children) ? (node.children as unknown[]) : [];
+
+    const visit = (node: unknown): void => {
+        const current = node as Record<string, unknown>;
+
+        switch (current?.type) {
             case 'expression':
-                expressions.push(node);
+                push(node);
                 break;
 
             case 'element':
-                for (const value of Object.values(node.attributes)) {
+                for (const value of Object.values((current.attributes ?? {}) as Record<string, unknown>)) {
                     if (value === true || typeof value === 'string') continue;
 
                     for (const chunk of Array.isArray(value) ? value : [value]) {
                         if (typeof chunk === 'string') continue;
 
                         // 绑定值（`bind:value={ ... }`）不是表达式；
-                        // 但里面 get / set / listen / 变量这些是 TS 解析出来的，照样要诊断
-                        if (!('type' in chunk)) {
-                            for (const item of [chunk.expression, chunk.get, chunk.set, chunk.listen]) {
-                                if (item) expressions.push(item);
-                            }
+                        // 但里面 get / set / listen / 变量这些照样要铺进虚拟文件
+                        if (typeof chunk === 'object' && chunk !== null && !('type' in chunk)) {
+                            const binding = chunk as Record<string, unknown>;
+
+                            for (const key of ['expression', 'get', 'set', 'listen']) push(binding[key]);
 
                             continue;
                         }
 
-                        expressions.push(chunk);
+                        push(chunk);
                     }
                 }
-                node.children.forEach(visit);
+
+                children_of(current).forEach(visit);
                 break;
 
             case 'IfBlock':
-                expressions.push(node.test);
-                for (const alternate of node.alternates) {
-                    if (alternate.test) expressions.push(alternate.test);
-                    alternate.children.forEach(visit);
+                push(current.test);
+                for (const alternate of (current.alternates ?? []) as Array<Record<string, unknown>>) {
+                    if (alternate.test) push(alternate.test);
+                    children_of(alternate).forEach(visit);
                 }
-                node.children.forEach(visit);
+
+                children_of(current).forEach(visit);
                 break;
 
-            case 'ForBlock':
-                node.fallback?.children.forEach(visit);
-                node.children.forEach(visit);
+            case 'ForBlock': {
+                // 循环头（`for (const x of y)`）不是表达式，不铺
+                const fallback = current.fallback as Record<string, unknown> | null | undefined;
+                if (fallback) children_of(fallback).forEach(visit);
+
+                children_of(current).forEach(visit);
                 break;
+            }
         }
     };
 
@@ -416,6 +477,19 @@ export function analyze(source: string, filename: string): Analysis {
         error = caught instanceof ParseError ? caught : new ParseError(String(caught), 0, 0);
     }
 
+    // 解析失败（`obj.` 敲一半、标签没闭合…）就退到第一阶段：
+    // 结构和区间还在，只是表达式没有 TS AST。铺虚拟文件只要区间和原文，
+    // 所以高亮和补全不至于跟着一起没
+    let stage: RootStage | null = root;
+
+    if (!stage) {
+        try {
+            stage = parse_root(source, { filename });
+        } catch {
+            stage = null;
+        }
+    }
+
     const declarations = new Map<string, Declaration>();
     const all = new Map<string, Declaration>();
 
@@ -429,17 +503,36 @@ export function analyze(source: string, filename: string): Analysis {
         }
     }
 
-    const expressions = root ? collect_expressions(root.template.children) : [];
+    // 两份：铺虚拟文件 / 判断光标位置用区间那份（解析失败时也有）；
+    // 模板里 hover 找声明要 TS AST，只有完整解析成功才有
+    const regions = stage ? collect_expressions(stage.template.children) : [];
+    const expressions = (root ? collect_expressions(root.template.children) : []) as Expression[];
     const components = imported_components(root?.script ?? null, filename);
 
     // 把 script 铺到虚拟 .ts 文件里交给 TS 语言服务
     // 注意用 `!=`：解析失败时 root 为 null，root?.script 是 undefined，用 !== 会漏过去
     const parsed = [root?.module, root?.script].filter((script): script is Script => script != null);
-    // 解析失败就退回正则抠出来的 script，至少让语义高亮和补全还在
-    const scripts: VirtualScript[] = parsed.length > 0 ? parsed : fallback_scripts(source);
+    // 解析失败时第一阶段那两个块只有原文，照样能铺；再不行才用正则抠
+    const scripts: VirtualScript[] =
+        parsed.length > 0
+            ? parsed
+            : stage
+              ? [stage.module, stage.script].flatMap((script) =>
+                    script
+                        ? [{ contentStart: script.contentStart, contentEnd: script.contentEnd, raw: script.raw }]
+                        : []
+                )
+              : fallback_scripts(source);
     const virtual = virtual_name(filename);
 
-    typescript_service.update(virtual, build_virtual(source, scripts, expressions));
+    // 循环变量在虚拟文件里没有声明，补上（script 里已经声明过同名的就不补）
+    const loops = stage
+        ? collect_loop_names(stage.template.children).filter((name) => !all.has(name))
+        : [];
+
+    const declared = loops.map((name) => `declare let ${name}: any;`).join('\n');
+
+    typescript_service.update(virtual, build_virtual(source, scripts, regions, declared));
 
     return {
         root,
@@ -480,14 +573,20 @@ export function analyze(source: string, filename: string): Analysis {
                 (script) => offset >= script.contentStart && offset <= script.contentEnd
             );
 
+            // 模板里的表达式（`{x}`、`bind:value={ get: ... }` 里的每一项）也铺进虚拟文件了，
+            // 一样能问 TS —— 高亮拿得到，补全也拿得到
+            const in_expression = regions.some(
+                (expression) => offset >= expression.contentStart && offset <= expression.contentEnd
+            );
+
             log(
                 'completions',
                 'offset', offset,
                 '在 script 里吗', in_script,
-                '区间', scripts.map((script) => `${script.contentStart}-${script.contentEnd}`).join(' ')
+                '在表达式里吗', in_expression
             );
 
-            if (!in_script) return [];
+            if (!in_script && !in_expression) return [];
 
             // 点号后面优先自己按类型枚举：TS 在这种地方往往返回一堆全局标识符，
             // 而不是 `Math` 自己的成员
@@ -509,16 +608,30 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         semantic(): SemanticProblem[] {
-            // 模板里的表达式是为了拿语义高亮才铺进虚拟文件的，
-            // 那儿的诊断不算数（模板区原本是空白，从来不报）
-            return typescript_service
-                .semantic_problems(virtual)
-                .filter((problem) =>
+            return typescript_service.semantic_problems(virtual).filter((problem) => {
+                // script 里：全部照报
+                if (
                     scripts.some(
                         (script) =>
                             problem.start >= script.contentStart && problem.start <= script.contentEnd
                     )
+                ) {
+                    return true;
+                }
+
+                // 模板里的表达式（`{x}`、`onclick={...}`、`bind:value={...}` 里的每一项）
+                // 也铺进虚拟文件了，是真代码，照样报
+                const region = regions.find(
+                    (item) => problem.start >= item.contentStart && problem.start <= item.contentEnd
                 );
+
+                if (!region) return false;
+
+                // 只有 implicit any 是包装带来的：`set: (value) => ...`、`onclick={(ev) => ...}`
+                // 的参数类型来自 DOM / 父组件，TS 在我们的嵌入形式里看不到，
+                // 硬报的话每个 grain 绑定和事件处理器都会挂红线
+                return !REGEX_IMPLICIT_ANY.test(problem.message);
+            });
         },
 
         warmup(): void {

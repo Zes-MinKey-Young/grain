@@ -27,7 +27,8 @@
     "contributes": {
         "configurationDefaults": {
             "[grain]": {
-                "editor.wordBasedSuggestions": "off"
+                "editor.wordBasedSuggestions": "off",
+                "editor.inlineSuggest.suppressSuggestions": false
             }
         },
         "languages": [
