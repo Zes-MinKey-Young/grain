@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-import { compile, parse, parse_root, ParseError } from '../../compiler/index.js';
+import { compile, parse, parse_root, split_for_header, ParseError } from '../../compiler/index.js';
 import type { Expression, Root, RootStage, Script, TemplateNode } from '../../compiler/index.js';
 import { log } from './log.js';
 import {
@@ -161,14 +161,22 @@ function collect_all(source: string, script: Script | null): Map<string, Declara
  */
 function collect_loop_names(nodes: readonly unknown[]): string[] {
     const names = new Set<string>();
-    const pattern = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/;
+    const pattern = /[A-Za-z_$][\w$]*/g;
+    const keywords = new Set(['const', 'let', 'var']);
 
     const visit = (node: unknown): void => {
         const current = node as Record<string, unknown>;
 
         if (current?.type === 'ForBlock' && typeof current.raw === 'string') {
-            const declared = pattern.exec(current.raw);
-            if (declared) names.add(declared[1]);
+            // 循环头是 `item of list`：只看 `of` 左边那段（可能是 `[a, b]` / `{x}`）
+            const header = current.raw;
+            const binding = split_for_header(header)?.binding ?? header.split(/\s+of\s/)[0];
+
+            for (const match of binding.matchAll(pattern)) {
+                if (keywords.has(match[0])) continue;
+
+                names.add(match[0]);
+            }
         }
 
         for (const key of ['children', 'fallback'] as const) {

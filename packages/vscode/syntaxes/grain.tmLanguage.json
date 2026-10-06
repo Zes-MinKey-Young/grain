@@ -55,7 +55,7 @@
         },
         "block-tag": {
             "name": "meta.block.grain",
-            "begin": "(\\{)(:?/?)(if|for|else)\\b",
+            "begin": "(\\{)(#|:|/)\\s*(if|for|else)?\\b",
             "beginCaptures": {
                 "1": { "name": "punctuation.section.embedded.begin.grain" },
                 "2": { "name": "keyword.control.grain" },

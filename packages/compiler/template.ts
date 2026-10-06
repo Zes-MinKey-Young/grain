@@ -54,16 +54,69 @@ function is_keyword_at(source: string, index: number, keyword: string): boolean 
     return source.startsWith(keyword, index) && is_whitespace(source[index + keyword.length]);
 }
 
+/** `{` 后面直接跟 `if` / `for`（不管有没有 `#`） */
+function is_block_keyword(source: string, index: number): boolean {
+    return is_keyword_at(source, index, 'if') || is_keyword_at(source, index, 'for');
+}
+
 /**
- * `index` 处的 `{` 是否是块标记：`{if ...}`、`{for ...}`、`{:else}`、`{/if}`
+ * `index` 处的 `{` 是否是块标记：`{#if ...}`、`{#for ...}`、`{:else}`、`{/if}`
  */
 function is_block_mark(source: string, index: number): boolean {
     if (source[index] !== '{') return false;
 
     const next = source[index + 1];
     if (next === ':' || next === '/') return true;
+    if (next !== '#') return false;
 
-    return is_keyword_at(source, index + 1, 'if') || is_keyword_at(source, index + 1, 'for');
+    return is_keyword_at(source, index + 2, 'if') || is_keyword_at(source, index + 2, 'for');
+}
+
+/**
+ * 循环头 `item of list` 在哪儿断开。
+ *
+ * 按 `of` 这个单词切，而且必须在括号 / 方括号 / 花括号 / 字符串外面
+ * —— `for [a, b] of pairs`、`for x of obj[key]` 都靠这个切对。
+ */
+export function split_for_header(
+    raw: string
+): { binding: string; iterable: string } | null {
+    let depth = 0;
+    let quote: string | null = null;
+
+    for (let i = 0; i < raw.length; i += 1) {
+        const char = raw[i];
+
+        if (quote) {
+            if (char === '\\') i += 1;
+            else if (char === quote) quote = null;
+
+            continue;
+        }
+
+        if (char === '"' || char === "'" || char === '`') {
+            quote = char;
+            continue;
+        }
+
+        if (char === '(' || char === '[' || char === '{') depth += 1;
+        else if (char === ')' || char === ']' || char === '}') depth -= 1;
+        else if (depth === 0 && char === 'o' && raw.startsWith('of', i)) {
+            const before = raw[i - 1];
+            const after = raw[i + 2];
+
+            if (!before_match(before) && !before_match(after)) {
+                return { binding: raw.slice(0, i).trim(), iterable: raw.slice(i + 2).trim() };
+            }
+        }
+    }
+
+    return null;
+}
+
+/** 标识符字符：`of` 两边得是空白之类的，才说明它是关键字而不是名字的一部分 */
+function before_match(char: string | undefined): boolean {
+    return char !== undefined && /[\w$]/.test(char);
 }
 
 /** 读取一批节点：连续的文本 / 表达式，或者一个元素 / 逻辑块 */
@@ -98,8 +151,17 @@ function read_nodes(parser: Parser, top_level: boolean): RawTemplateNode[] {
     }
 
     if (parser.match('{')) {
-        if (is_keyword_at(parser.source, parser.index + 1, 'if')) return [read_if_block(parser)];
-        if (is_keyword_at(parser.source, parser.index + 1, 'for')) return [read_for_block(parser)];
+        if (parser.match('{#')) {
+            if (is_keyword_at(parser.source, parser.index + 2, 'if')) return [read_if_block(parser)];
+            if (is_keyword_at(parser.source, parser.index + 2, 'for')) return [read_for_block(parser)];
+        }
+
+        // 少了 `#`：别当成表达式去解析，那样报出来的错看不懂
+        for (const keyword of ['if', 'for'] as const) {
+            if (!is_keyword_at(parser.source, parser.index + 1, keyword)) continue;
+
+            parser.error(`块标记要带 \`#\`：写成 \`{#${keyword} ...}\``);
+        }
         // 分支 / 结束标记应由对应的块读取器消费，出现在这里说明没有可配对的块
         if (parser.match('{:') || parser.match('{/')) parser.error('没有可以闭合的块');
 
@@ -111,11 +173,11 @@ function read_nodes(parser: Parser, top_level: boolean): RawTemplateNode[] {
 
 // ---------------------------------------------------------------- 逻辑块
 
-/** `{if ...}` ... `{:else if ...}` / `{:else}` ... `{/if}` */
+/** `{#if ...}` ... `{:else if ...}` / `{:else}` ... `{/if}` */
 function read_if_block(parser: Parser): RawIfBlock {
     const start = parser.index;
 
-    parser.eat('{if', true);
+    parser.eat('{#if', true);
     parser.allow_whitespace();
     const test = read_tag_expression(parser, start);
 
@@ -131,20 +193,28 @@ function read_if_block(parser: Parser): RawIfBlock {
     return { type: 'IfBlock', test, children, alternates, start, end: parser.index };
 }
 
-/** `{for (... of ...)}` ... `{:else}` ... `{/for}` */
+/** `{#for item of list}` ... `{:else}` ... `{/for}` */
 function read_for_block(parser: Parser): RawForBlock {
     const start = parser.index;
 
-    parser.eat('{for', true);
+    parser.eat('{#for', true);
+    parser.allow_whitespace();
 
-    // 循环头从 `for` 本身开始整段保留，它天然就是一条 for-of 语句的写法，
-    // 第二阶段直接交给 TS 解析即可，字符偏移也不用做任何修正
-    const content_start = start + 1;
+    // 循环头只收 `循环变量 of 可迭代对象`：不写圆括号，
+    // 变量可以是 `item`、解构 `[a, b]` / `{x}`，也可以带 `const` / `let`。
+    // 第二阶段拼成 `for (...)` 交给 TS，`for (` 写在原本是空白的位置上，
+    // 所以字符偏移一个都不用改
+    const content_start = parser.index;
     const { contentEnd, end } = scan_expression(parser.source, parser.index, parser.locate);
     const raw = parser.source.slice(content_start, contentEnd);
+    const parts = split_for_header(raw);
 
-    if (!/^for\b/.test(raw)) {
-        parser.error('`{for ...}` 里必须是 `for (... of ...)` 形式的循环头', start, end);
+    if (!parts || parts.binding === '' || parts.iterable === '') {
+        parser.error(
+            '`{#for ...}` 里必须是 `循环变量 of 可迭代对象`，比如 `{#for item of list}`',
+            start,
+            end
+        );
     }
 
     parser.index = end;
@@ -306,7 +376,9 @@ function read_text_nodes(parser: Parser): RawTemplateNode[] {
 
     while (i < source.length && !is_tag_start(source, i)) {
         if (source[i] === '{') {
-            if (is_block_mark(source, i)) break;
+            // 少了 `#` 的 `{if ...}` / `{for ...}` 也停下：
+            // 交给 read_nodes 报"要带 #"，比当成表达式解析出来的错好懂
+            if (is_block_mark(source, i) || is_block_keyword(source, i + 1)) break;
 
             push_text(nodes, source, start, i);
 

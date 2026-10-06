@@ -18,7 +18,7 @@
     {title}: clicked {count} times
 </button>
 
-{if count > 0}
+{#if count > 0}
     <p>已经点过 {count} 次</p>
 {:else}
     <p>还没点过</p>
@@ -26,7 +26,7 @@
 
 <B a={count} />
 <ul>
-    {for (const item of history)}
+    {#for item of history}
         <li>第 {item} 次</li>
     {:else}
         <li>暂无记录</li>

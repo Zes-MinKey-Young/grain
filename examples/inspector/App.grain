@@ -7,9 +7,9 @@
 </script>
 
 <div class="box">
-    {if items.length > 1}
+    {#if items.length > 1}
         <ul>
-            {for (const item of items)}
+            {#for item of items}
                 <li>{item}</li>
             {/for}
         </ul>

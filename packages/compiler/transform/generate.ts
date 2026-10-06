@@ -1161,10 +1161,11 @@ class Generator {
         const right = this.slice(node.content.right.range);
         const left = node.content.left;
 
+        // 循环头不写声明方式时（`{#for item of list}`）left 就是个模式，自己补 const
         const binding =
             left.type === 'VariableDeclaration'
                 ? `${left.kind} ${this.slice(left.declarations[0].id.range)} = ${item};`
-                : `${this.slice(left.range)} = ${item};`;
+                : `const ${this.slice(left.range)} = ${item};`;
 
         // 每一项都要新建 DOM，所以块内的 creEle 放进 render 函数里，不注册片段
         const render = `render$${this.counter++}`;

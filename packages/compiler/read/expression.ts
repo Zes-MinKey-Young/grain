@@ -85,13 +85,31 @@ export function parse_snippet(node: RawExpression, masked: string, label: string
 }
 
 /**
- * 把 `{for (... of ...)}` 的循环头交给 TS 解析。
+ * 把 `{#for item of list}` 的循环头交给 TS 解析。
  *
- * 循环头本身就是 `for (... of ...)`，末尾补个 `;` 就是一条完整的 for-of 语句，
- * 同样不改任何字符偏移，拿到的 `left` / `right` 位置直接对齐整个 SFC。
+ * 循环头不带圆括号，所以拼一条完整的 for-of 语句：`for (` 写在 contentStart **前面**
+ * 那段空白上，`)` 写在 contentEnd 上，`;` 写在后面第一个空白处。
+ * 这样循环变量和可迭代对象的偏移一个字符都不动，拿到的 `left` / `right` 直接对齐整个 SFC。
  */
 export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
-    const code = masked.slice(0, node.contentStart) + node.raw + ';';
+    const prefix = 'for (';
+    const from = node.contentStart - prefix.length;
+
+    if (from < 0 || masked.slice(from, node.contentStart) !== ' '.repeat(prefix.length)) {
+        throw new ParseError(
+            `循环头 \`{${node.raw}}\` 前面没有地方放 \`for (\`，\`{#for\` 后面留个空格再写循环变量`,
+            node.contentStart,
+            node.contentEnd
+        );
+    }
+
+    let code = masked.slice(0, from) + prefix + node.raw + ')' + masked.slice(node.contentEnd + 1);
+
+    // 语句体：往后找第一个空白放个 `;`（`)` 和体之间隔着换行也没关系）
+    let at = node.contentEnd + 1;
+    while (at < code.length && (code[at] === '\n' || code[at] === '\r')) at += 1;
+
+    code = at < code.length ? `${code.slice(0, at)};${code.slice(at + 1)}` : `${code};`;
 
     let program: TSProgram;
 
@@ -101,13 +119,17 @@ export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
         const message = error instanceof Error ? error.message : String(error);
         const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
 
-        throw new ParseError(`\`{${node.raw}}\` 解析失败：${message}`, start, end);
+        throw new ParseError(`循环头 \`${node.raw}\` 解析失败：${message}`, start, end);
     }
 
     const statement = program.body[0];
 
     if (program.body.length !== 1 || !statement || statement.type !== 'ForOfStatement') {
-        throw new ParseError(`\`{${node.raw}}\` 里必须是 \`for (... of ...)\``, node.contentStart, node.contentEnd);
+        throw new ParseError(
+            `\`{${node.raw}}\` 里必须是 \`循环变量 of 可迭代对象\``,
+            node.contentStart,
+            node.contentEnd
+        );
     }
 
     return statement;
