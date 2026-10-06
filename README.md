@@ -88,7 +88,7 @@ The guard is optional: `listen(operationList, "do")` is the always-true predicat
 
 | key | required shape | note |
 | --- | --- | --- |
-| `get` | `() => T` | no parameters; a bare expression (`get: count`) is also accepted and wrapped into `() => (count)` |
+| `get` | `() => T` | no parameters — `get` provides the **getter**, not a value, so `get: count` means "`count` is the getter function". A callable expression (`get: read_count`) is also accepted. To bind a plain variable use the short form `bind:value={count}` |
 | `set` | `(value) => void` | exactly one parameter, the new value; a callable expression (`set: do_set`) is also accepted |
 | `listen` | `(update) => void` or `listen(bus, "name")` | `listen(bus, "name", guard)` — `guard` optional, must be a function, and the event name must be a string literal |
 
@@ -104,3 +104,80 @@ The guard is optional: `listen(operationList, "do")` is the always-true predicat
     active
 } />
 ```
+
+## bind:this
+`bind:this` hands you the element itself instead of one of its properties.
+
+### as a variable
+Write a bare name and `bind:this` **declares it for you** — there is nothing to add to your `<script>`:
+```grain
+<input bind:this={box} />
+
+<script onmount>
+  box.focus();
+  box.placeholder = 'set in onmount';
+</script>
+```
+The variable is created when the component instance is created, and assigned when the element is built.
+
+### as a callback
+Write a function (or any callable expression) and **no variable is declared** — the function is called with the element as soon as it is built:
+```grain
+<script>
+  function grab(el: HTMLElement) {
+    el.setAttribute('data-grabbed', 'yes');
+  }
+</script>
+
+<p bind:this={grab}>grab(el) runs when this &lt;p&gt; is built。
+```
+An inline arrow works the same way: `bind:this={(el) => el.focus()}`.
+
+Which one you get follows a single rule: an identifier that is **not** a function is the variable form, everything else is the callback form. `bind:this={grab}`, `bind:this={handlers.grab}`, `bind:this={makeHandler()}` and `bind:this={(el) => el.focus()}` are all callbacks.
+
+Nothing else is hard-coded — whether the callback really accepts an element, or whether the variable can hold one, is checked by TypeScript in the editor:
+```grain
+<script>
+  let s = $state('a');
+</script>
+<p bind:this={s}>...</p>   <!-- Type 'HTMLParagraphElement' is not assignable to type 'string' -->
+```
+Only obvious nonsense is rejected at compile time:
+```grain
+<p bind:this={123}>...</p>   <!-- error -->
+```
+
+## <script onmount>
+`<script onmount>` runs right after the component's element is mounted — by then every `bind:this` variable has been assigned, so this is where you touch the DOM directly:
+```grain
+<script>
+  let count = $state(0);
+</script>
+
+<script onmount>
+  // only this block can see `box`
+  box.focus();
+</script>
+
+<input bind:this={box} />
+```
+
+Rules:
+- **Only `<script onmount>` can access a `bind:this` variable.** Using it anywhere else is a compile-time error in the editor: `` `box` is declared by `bind:this` and can only be used inside `<script onmount>` ``.
+- It runs once per component instance — for the root component after it is appended to the target, for a child component when the parent attaches it.
+- `$state(...)` and `$props()` work inside it, exactly like in `<script>`.
+- It is not an event handler: writes to a `$state` there do not schedule a refresh. Set up the DOM instead, or do reactive work in `<script>`.
+
+A `bind:this` variable is typed with the matching DOM interface (`HTMLInputElement` for `<input>`, `HTMLDivElement` for `<div>`, …), so `box.value` and `box.focus()` are checked and completed. Unknown tags fall back to `HTMLElement`.
+
+### no second data flow
+A `bind:this` variable is a plain variable, not reactive state. The binding plus `active` is its **only** data flow — `active` re-reads the getter and writes the value back to that element, and nothing else. Reading the same variable elsewhere in the template does not update when it changes:
+```grain
+<script>
+  let draft = '';
+</script>
+
+<input bind:value={ get: () => draft, set: (value) => draft = value, active } />
+<span>draft: {draft}</span>   <!-- never changes; compile time has no way to know -->
+```
+Use `$state` if you want the rest of the template to follow.

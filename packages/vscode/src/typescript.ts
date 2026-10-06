@@ -39,18 +39,37 @@ declare function $props<T extends Record<string, unknown> = Record<string, unkno
  */
 declare function $bindable<T>(fallback?: T): T;
 
-declare module "*.grain" {
-    interface GrainComponent {
-        /** Mounts into the target element (top-level usage) */
-        (target: Element): unknown;
-        /** Called by the parent component to create a child instance */
-        create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
-    }
+/** What a compiled component looks like from the outside */
+interface GrainComponent {
+    /** Mounts into the target element (top-level usage) */
+    (target: Element): unknown;
+    /** Kept for HMR re-mounting */
+    target?: Element;
+    /** Called by the parent component to create a child instance */
+    create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
+}
 
+/**
+ * Only used when the imported component is not open in the editor.
+ * When it is, TS resolves \`./Child.grain\` to \`Child.grain.ts\` (its virtual file)
+ * and this ambient declaration no longer applies — see VIRTUAL_EXPORT below.
+ */
+declare module "*.grain" {
     const component: GrainComponent;
     export default component;
 }
 `;
+
+/**
+ * 追加在每个虚拟文件末尾：让它**一定是模块**，并且有一个默认导出。
+ *
+ * 组件 A 里 `import B from './B.grain'` 时，如果 B 也在编辑器里开着，
+ * TS 会解析到 B 的虚拟文件 `B.grain.ts`；那个文件里可能一句 import / export 都没有，
+ * 于是报 "File ... is not a module"（而且是它盖掉了 `declare module "*.grain"`）。
+ * 放在末尾是为了不影响任何已有偏移。
+ */
+export const VIRTUAL_EXPORT = `declare const __grain_component: GrainComponent;
+export default __grain_component;`;
 
 let options: TS.CompilerOptions | null = null;
 /** 当前生效的 tsconfig 路径（按它判断要不要重建语言服务） */
@@ -197,6 +216,13 @@ function normalize(file: string): string {
 
 export function virtual_name(filename: string): string {
     return normalize(`${filename}.ts`);
+}
+
+/** 一处定义：`file` 为 null 表示就在当前文档里（偏移是原 SFC 的） */
+export interface Definition {
+    file: string | null;
+    start: number;
+    end: number;
 }
 
 /** script 里的一补全候选项 */
@@ -487,6 +513,65 @@ class TypeScriptService {
             text: (info.displayParts ?? []).map((part) => part.text).join(''),
             documentation: (info.documentation ?? []).map((part) => part.text).join('')
         };
+    }
+
+    /**
+     * 跳转定义。
+     *
+     * 虚拟文件里既有 script，也有模板表达式、if / for 条件，所以参数、局部变量、
+     * `HTMLElement` 这类库里的类型，TS 都能自己找到（库里的会给出别的文件的区间）。
+     */
+    definition(file: string, offset: number): Array<{ file: string | null; start: number; end: number }> {
+        const key = normalize(file);
+        const found = this.get().getDefinitionAtPosition(key, offset) ?? [];
+
+        return found.map((entry) => {
+            const target = normalize(entry.fileName);
+
+            return {
+                file: target === key ? null : target,
+                start: entry.textSpan.start,
+                end: entry.textSpan.start + entry.textSpan.length
+            };
+        });
+    }
+
+    /**
+     * 重命名的所有位置。
+     *
+     * 注意结果里可能包含我们补在虚拟文件末尾的声明（`declare let x`），
+     * 那个偏移超出源码长度，由 analysis 那边过滤掉。
+     */
+    rename_locations(file: string, offset: number): Array<{ start: number; end: number }> {
+        const key = normalize(file);
+        const found = this.get().findRenameLocations(key, offset, false, false, {
+            providePrefixAndSuffixTextForRename: false
+        });
+
+        return (found ?? [])
+            .filter((location) => normalize(location.fileName) === key)
+            .map((location) => ({
+                start: location.textSpan.start,
+                end: location.textSpan.start + location.textSpan.length
+            }));
+    }
+
+    /**
+     * 找引用（TS 会把声明本身也算一条）。
+     *
+     * 虚拟文件里除了 script，还有模板里的表达式（`{x}`、`onclick={...}`、`bind:value={...}`）
+     * 和 if / for 的条件，所以一处问下去全都能找到。偏移跟原文件一一对应，不用换算。
+     */
+    references(file: string, offset: number): Array<{ start: number; end: number }> {
+        const key = normalize(file);
+        const found = this.get().getReferencesAtPosition(key, offset) ?? [];
+
+        return found
+            .filter((reference) => normalize(reference.fileName) === key)
+            .map((reference) => ({
+                start: reference.textSpan.start,
+                end: reference.textSpan.start + reference.textSpan.length
+            }));
     }
 
     semantic_problems(file: string): SemanticProblem[] {

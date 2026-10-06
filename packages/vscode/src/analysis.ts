@@ -1,21 +1,36 @@
 import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
-import { compile, parse, parse_root, split_for_header, ParseError } from '../../compiler/index.js';
+import {
+    analyze_script,
+    compile,
+    parse,
+    parse_root,
+    split_for_header,
+    ParseError
+} from '../../compiler/index.js';
 import type { Expression, Root, RootStage, Script, TemplateNode } from '../../compiler/index.js';
 import { log } from './log.js';
 import {
     build_virtual,
     typescript_service,
     virtual_name,
+    VIRTUAL_EXPORT,
     type CompletionDetail,
     type CompletionEntry,
+    type Definition,
     type QuickInfo,
     type SemanticProblem,
     type SemanticSpan,
     type VirtualScript
 } from './typescript.js';
-import { walk } from './ast-utils.js';
+import { identifier_at, walk } from './ast-utils.js';
+
+/** 一处引用（偏移相对整个 SFC） */
+export interface Reference {
+    start: number;
+    end: number;
+}
 
 export interface Declaration {
     name: string;
@@ -73,6 +88,16 @@ export interface Analysis {
     quick_info(offset: number): QuickInfo | null;
     /** TypeScript 的语义诊断（类型错误、未定义变量等） */
     semantic(): SemanticProblem[];
+    /** 光标下标识符的全部引用（含声明本身）：script / 模板表达式 / if / for 都算 */
+    references(offset: number): Reference[];
+    /** 光标下的标识符名（script / module / onmount / 模板表达式 都算） */
+    name_at(offset: number): string | null;
+    /** 名字对应的 `bind:this`（变量形式才有） */
+    this_binding_named(name: string | null): ThisBinding | undefined;
+    /** 跳转定义：`bind:this` 声明的变量指回模板那一处，其余交给 TS */
+    definition(offset: number): Definition[];
+    /** 重命名：`bind:this` 声明的变量改成模板里那一处，其余交给 TS */
+    rename(offset: number): Reference[];
     /** 后台预热 TS 语言服务（加载它比较重，别放在第一次 hover 时才做） */
     warmup(): void;
     /** 编译产物（命令用） */
@@ -223,25 +248,40 @@ const ELEMENT_TYPES: Record<string, string> = {
 };
 
 /**
- * `bind:this={x}` 声明的变量。
+ * 模板里的一处 `bind:this`。
  *
- * 只有写标识符时才声明——写函数的是回调形式，不声明变量。
+ * 两种形态：
+ * - **变量形式**（`name` 不为 null）：`bind:this={box}` —— box 由它声明，挂上时赋值
+ * - **回调形式**（`name` 为 null）：任何表达式，挂上时当函数调用、把元素传进去
+ *
+ * 到底是哪种，看写的是不是"一个不是函数的标识符"。剩下的交给 TS 判断：
+ * 回调形式会在虚拟文件末尾拼一句调用来验类型（见 `this_checks`）。
  */
-/** `bind:this={x}` 声明的一个变量 */
-interface ThisName {
-    name: string;
+interface ThisBinding {
+    name: string | null;
+    /**
+     * 变量是不是由 `bind:this` 声明的。
+     * script 里已经声明过同名的（`let box: number` + `bind:this={box}`）就不是——
+     * 那种只是赋值，别处照样能用，也别再补一个 `declare let`
+     */
+    declared: boolean;
+    /** 元素类型；变量形式用来声明，回调形式用来验参数 */
     type: string;
-    /** 声明处（`x` 本身）的区间，别把它自己当成"在别处引用" */
+    /** 值的原文（回调形式拼检查语句要用） */
+    raw: string;
+    /** 声明处 / 表达式本身的区间：报错往这儿指 */
     start: number;
     end: number;
 }
 
-function collect_this_names(
+function collect_this_bindings(
     nodes: readonly unknown[],
-    /** script 里的声明，用来判断某个名字是不是函数 */
-    all: Map<string, Declaration>
-): ThisName[] {
-    const found: ThisName[] = [];
+    /** script / onmount 里声明过的函数：`bind:this={grab}` 是回调形式 */
+    functions: Set<string>,
+    /** script / module 里已经声明过的名字 */
+    declared: Set<string>
+): ThisBinding[] {
+    const found: ThisBinding[] = [];
 
     const visit = (node: unknown): void => {
         const current = node as Record<string, unknown>;
@@ -251,21 +291,28 @@ function collect_this_names(
                 if (key !== 'bind:this' || typeof value !== 'object' || value === null || 'type' in value) continue;
 
                 const expression = (value as Record<string, unknown>).expression as
-                    | { content?: { type?: string; name?: string }; contentStart?: number; contentEnd?: number }
+                    | {
+                          content?: { type?: string; name?: string };
+                          contentStart?: number;
+                          contentEnd?: number;
+                          raw?: string;
+                      }
                     | null
                     | undefined;
 
-                // 解析失败时没有 AST，认不出是不是标识符，那就不声明
-                if (expression?.content?.type !== 'Identifier' || !expression.content.name) continue;
+                if (!expression?.raw) continue;
 
-                // 指向函数的是回调形式（`bind:this={grab}`），不声明变量
-                if (all.get(expression.content.name)?.kind === 'function') continue;
-
+                const identifier =
+                    expression.content?.type === 'Identifier' ? expression.content.name : undefined;
+                // 标识符、且它不是个函数 —— 变量形式；其余一律当回调
+                const name = identifier && !functions.has(identifier) ? identifier : null;
                 const tag = String(current.name ?? '');
 
                 found.push({
-                    name: expression.content.name,
+                    name,
+                    declared: name !== null && !declared.has(name),
                     type: ELEMENT_TYPES[tag] ?? 'HTMLElement',
+                    raw: expression.raw,
                     start: expression.contentStart ?? 0,
                     end: expression.contentEnd ?? 0
                 });
@@ -286,6 +333,98 @@ function collect_this_names(
 }
 
 /**
+ * 用 TS 验绑定项（`get` / `set` / `listen`）的类型。
+ *
+ * 虚拟文件里它们是按"值"铺的（`(get_的值);`），所以是不是能当函数调用、
+ * 参数对不对，TS 看不出来。这里按语义补一句调用去问它：
+ * - `get` -> `(expr)();`                  必须无参可调用
+ * - `set` -> `(expr)(null as any);`       必须能接一个值
+ * - `listen` -> `(expr)(() => {});`       必须能接一个 update 回调
+ *
+ * 简写形式 `listen(bus, "name")` 不是真的函数调用（`listen` 运行时并不存在），跳过。
+ */
+function binding_checks(regions: ExpressionRegion[]): Array<{ code: string; region: ExpressionRegion }> {
+    const calls: Record<string, string> = {
+        get: '()',
+        set: '(null as any)',
+        listen: '(() => {})'
+    };
+
+    const found: Array<{ code: string; region: ExpressionRegion }> = [];
+
+    for (const region of regions) {
+        if (!region.kind || region.kind === 'expression') continue;
+        if (region.kind === 'listen' && /^\s*listen\s*\(/.test(region.raw)) continue;
+
+        found.push({ code: `(${region.raw})${calls[region.kind]};`, region });
+    }
+
+    return found;
+}
+
+/**
+ * 用 TS 验 `bind:this` 的类型。
+ *
+ * 变量形式：`box = null as any as HTMLInputElement;` —— 类型不对（比如 script 里
+ * 声明成了 number）就会报错。回调形式：`(grab)(null as any as HTMLElement);` ——
+ * 不可调用、参数类型不对都会报错。
+ *
+ * 这些语句拼在虚拟文件末尾（偏移超出源码），报错位置由 `this_check_spans` 挪回模板那一处。
+ */
+function this_checks(bindings: ThisBinding[]): string[] {
+    return bindings.map((binding) =>
+        binding.name
+            ? `${binding.name} = null as any as ${binding.type};`
+            : `(${binding.raw})(null as any as ${binding.type});`
+    );
+}
+
+/**
+ * 模板里的子组件（`<Child />` / `<Foo.Bar />`）：名字按类型上色。
+ *
+ * TS 的分类只覆盖 script 和表达式，标签名在它眼里就是普通文本，
+ * 所以这里自己给一段 span（开标签和闭标签都给）。
+ */
+function component_spans_of(nodes: readonly unknown[], source: string): SemanticSpan[] {
+    const spans: SemanticSpan[] = [];
+
+    const visit = (node: unknown): void => {
+        const current = node as Record<string, unknown>;
+
+        if (current?.type === 'element' && typeof current.name === 'string') {
+            const name = current.name;
+
+            if (/^[A-Z]/.test(name) || name.includes('.')) {
+                const start = Number(current.start ?? 0) + 1;
+
+                spans.push({ start, length: name.length, type: 'class', modifiers: [] });
+
+                const closing = source.lastIndexOf(`</${name}>`, Number(current.end ?? source.length));
+                if (closing >= 0) {
+                    spans.push({ start: closing + 2, length: name.length, type: 'class', modifiers: [] });
+                }
+            }
+        }
+
+        for (const next of ['children', 'alternates', 'fallback'] as const) {
+            const value = current?.[next];
+
+            if (Array.isArray(value)) value.forEach(visit);
+            else if (value) visit(value);
+        }
+    };
+
+    nodes.forEach(visit);
+
+    return spans;
+}
+
+/** 已经自己写了 `export default` 的就别再补一个 */
+function has_default_export(scripts: VirtualScript[]): boolean {
+    return scripts.some((script) => /export\s+default\b/.test(script.raw));
+}
+
+/**
  * `bind:this` 声明的变量只在 `<script onmount>` 里有效，别处引用就该报错。
  *
  * TS 那边没法用作用域表达（变量是编译期才声明的，虚拟文件里只能全局声明），
@@ -294,11 +433,13 @@ function collect_this_names(
 function this_leaks(
     root: Root | null,
     expressions: Expression[],
-    names: ThisName[]
+    bindings: ThisBinding[]
 ): SemanticProblem[] {
-    if (!root || names.length === 0) return [];
+    const named = bindings.filter((item) => item.declared);
 
-    const wanted = new Map(names.map((item) => [item.name, item]));
+    if (!root || named.length === 0) return [];
+
+    const wanted = new Map(named.map((item) => [item.name as string, item]));
     const onmount = root.onmount;
     const problems: SemanticProblem[] = [];
 
@@ -342,9 +483,11 @@ export interface ExpressionRegion {
     contentStart: number;
     contentEnd: number;
     raw: string;
+    /** 是绑定值里的哪一项；用来决定拼什么样的类型检查语句 */
+    kind?: 'expression' | 'get' | 'set' | 'listen';
 }
 
-function collect_expressions(nodes: readonly unknown[]): ExpressionRegion[] {
+function collect_expressions(nodes: readonly unknown[], source: string): ExpressionRegion[] {
     const expressions: ExpressionRegion[] = [];
 
     const push = (value: unknown): void => {
@@ -374,7 +517,15 @@ function collect_expressions(nodes: readonly unknown[]): ExpressionRegion[] {
                         if (typeof chunk === 'object' && chunk !== null && !('type' in chunk)) {
                             const binding = chunk as Record<string, unknown>;
 
-                            for (const key of ['expression', 'get', 'set', 'listen']) push(binding[key]);
+                            for (const key of ['expression', 'get', 'set', 'listen'] as const) {
+                                const item = binding[key] as Record<string, unknown> | null | undefined;
+                                if (!item) continue;
+
+                                expressions.push({
+                                    ...(item as unknown as ExpressionRegion),
+                                    kind: key
+                                });
+                            }
 
                             continue;
                         }
@@ -397,7 +548,19 @@ function collect_expressions(nodes: readonly unknown[]): ExpressionRegion[] {
                 break;
 
             case 'ForBlock': {
-                // 循环头（`for (const x of y)`）不是表达式，不铺
+                // 循环头本身（`item of history`）不是合法 TS，不铺；
+                // 但可迭代对象是个表达式，单独铺进去——这样在它上面跳转引用 / 补全也能用
+                const right = (current as { content?: { right?: { range?: [number, number] } } }).content?.right
+                    ?.range;
+
+                if (right) {
+                    push({
+                        contentStart: right[0],
+                        contentEnd: right[1],
+                        raw: source.slice(right[0], right[1])
+                    });
+                }
+
                 const fallback = current.fallback as Record<string, unknown> | null | undefined;
                 if (fallback) children_of(fallback).forEach(visit);
 
@@ -650,12 +813,24 @@ export function analyze(source: string, filename: string): Analysis {
 
     // 两份：铺虚拟文件 / 判断光标位置用区间那份（解析失败时也有）；
     // 模板里 hover 找声明要 TS AST，只有完整解析成功才有
-    const regions = stage ? collect_expressions(stage.template.children) : [];
-    const expressions = (root ? collect_expressions(root.template.children) : []) as Expression[];
+    const regions = stage ? collect_expressions(stage.template.children, source) : [];
+    const expressions = (root ? collect_expressions(root.template.children, source) : []) as Expression[];
     const components = imported_components(root?.script ?? null, filename);
 
-    // `bind:this={x}` 声明的变量（写函数的是回调形式，不声明）
-    const this_names = root ? collect_this_names(root.template.children, all) : [];
+    // script / onmount 里声明过的函数：决定 `bind:this={grab}` 是回调还是变量
+    const script_functions = new Set<string>();
+
+    for (const script of [root?.script, root?.module, root?.onmount]) {
+        if (!script) continue;
+
+        for (const name of analyze_script(script.content, source).functions.keys()) script_functions.add(name);
+    }
+
+    const this_bindings = root
+        ? collect_this_bindings(root.template.children, script_functions, new Set(all.keys()))
+        : [];
+    // 模板里子组件的名字要按类型上色
+    const component_spans = stage ? component_spans_of(stage.template.children, source) : [];
 
     // 把 script 铺到虚拟 .ts 文件里交给 TS 语言服务
     // 注意用 `!=`：解析失败时 root 为 null，root?.script 是 undefined，用 !== 会漏过去
@@ -683,14 +858,52 @@ export function analyze(source: string, filename: string): Analysis {
         ? collect_loop_names(stage.template.children).filter((name) => !all.has(name))
         : [];
 
-    // bind:this 声明的变量也补上声明（元素类型），这样 onmount 里能正常用；
-    // "只有 onmount 能用"由 this_leaks 单独查
-    const declared = [
-        ...loops.map((name) => `declare let ${name}: any;`),
-        ...this_names.map((item) => `declare let ${item.name}: ${item.type};`)
-    ].join('\n');
+    // 拼在虚拟文件末尾的东西（偏移超出源码长度）：
+    //   - 循环变量 / bind:this 变量的声明，让它们能用
+    //   - bind:this 的类型检查语句，让 TS 帮我们验类型
+    //   - 兜底的默认导出，让这个虚拟文件一定是模块
+    // 类型检查项：拼在虚拟文件末尾，报错位置挪回模板里对应那一处
+    const checks: Array<{ code: string; start: number; end: number }> = [
+        ...this_bindings.map((binding, index) => ({
+            code: this_checks(this_bindings)[index],
+            start: binding.start,
+            end: binding.end
+        })),
+        ...binding_checks(regions).map((check) => ({
+            code: check.code,
+            start: check.region.contentStart,
+            end: check.region.contentEnd
+        }))
+    ];
 
-    typescript_service.update(virtual, build_virtual(source, scripts, regions, declared));
+    const tail_lines: string[] = [
+        ...loops.map((name) => `declare let ${name}: any;`),
+        // 只补 bind:this **自己声明**的变量；script 里已有的不重复声明
+        ...this_bindings
+            .filter((item) => item.declared)
+            .map((item) => `declare let ${item.name}: ${item.type};`),
+        ...checks.map((check) => check.code),
+        ...(has_default_export(scripts) ? [] : [VIRTUAL_EXPORT])
+    ];
+
+    // 末尾每一段在虚拟文件里的区间：报错要按它挪回模板里对应的位置
+    const tail_start = source.length + 1;
+    const tail_spans: Array<{ from: number; to: number; start: number; end: number }> = [];
+    let cursor = tail_start;
+
+    for (const [index, line] of tail_lines.entries()) {
+        const to = cursor + line.length + 1;
+
+        // 倒数 `checks.length` 行之前、声明之后那一段就是检查项
+        const at = index - (tail_lines.length - checks.length - (has_default_export(scripts) ? 0 : 1));
+        if (at >= 0 && at < checks.length) {
+            tail_spans.push({ from: cursor, to, start: checks[at].start, end: checks[at].end });
+        }
+
+        cursor = to;
+    }
+
+    typescript_service.update(virtual, build_virtual(source, scripts, regions, tail_lines.join('\n')));
 
     return {
         root,
@@ -704,6 +917,32 @@ export function analyze(source: string, filename: string): Analysis {
                     (expression) => offset >= expression.contentStart && offset <= expression.contentEnd
                 ) ?? null
             );
+        },
+
+        /** 名字对应的 `bind:this`（变量形式才有） */
+        this_binding_named(name: string | null): ThisBinding | undefined {
+            if (!name) return undefined;
+
+            return this_bindings.find((item) => item.declared && item.name === name);
+        },
+
+        /** 光标下的标识符名（script / module / onmount / 模板表达式 都算） */
+        name_at(offset: number): string | null {
+            const expression = expressions.find(
+                (item) => offset >= item.contentStart && offset <= item.contentEnd
+            );
+
+            if (expression) return identifier_at(expression.content, offset);
+
+            for (const script of [root?.script, root?.module, root?.onmount]) {
+                if (!script) continue;
+                if (offset < script.contentStart || offset > script.contentEnd) continue;
+
+                const name = identifier_at(script.content, offset);
+                if (name) return name;
+            }
+
+            return null;
         },
 
         script_at(offset: number): Script | null {
@@ -723,7 +962,10 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         classifications(): SemanticSpan[] {
-            return typescript_service.classifications(virtual, source.length);
+            return [
+                ...typescript_service.classifications(virtual, source.length),
+                ...component_spans
+            ];
         },
 
         completions(offset: number): CompletionEntry[] {
@@ -766,7 +1008,22 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         semantic(): SemanticProblem[] {
-            const problems = typescript_service.semantic_problems(virtual).filter((problem) => {
+            const kept: SemanticProblem[] = [];
+
+            for (const problem of typescript_service.semantic_problems(virtual)) {
+                // 拼在末尾的 `bind:this` 类型检查：位置挪回模板里那一处
+                const span = tail_spans.find(
+                    (item) => problem.start >= item.from && problem.start < item.to
+                );
+
+                if (span) {
+                    if (!REGEX_IMPLICIT_ANY.test(problem.message)) {
+                        kept.push({ start: span.start, end: span.end, message: problem.message });
+                    }
+
+                    continue;
+                }
+
                 // script 里：全部照报
                 if (
                     scripts.some(
@@ -774,7 +1031,8 @@ export function analyze(source: string, filename: string): Analysis {
                             problem.start >= script.contentStart && problem.start <= script.contentEnd
                     )
                 ) {
-                    return true;
+                    kept.push(problem);
+                    continue;
                 }
 
                 // 模板里的表达式（`{x}`、`onclick={...}`、`bind:value={...}` 里的每一项）
@@ -783,16 +1041,49 @@ export function analyze(source: string, filename: string): Analysis {
                     (item) => problem.start >= item.contentStart && problem.start <= item.contentEnd
                 );
 
-                if (!region) return false;
+                if (!region) continue;
 
                 // 只有 implicit any 是包装带来的：`set: (value) => ...`、`onclick={(ev) => ...}`
                 // 的参数类型来自 DOM / 父组件，TS 在我们的嵌入形式里看不到，
                 // 硬报的话每个 grain 绑定和事件处理器都会挂红线
-                return !REGEX_IMPLICIT_ANY.test(problem.message);
-            });
+                if (!REGEX_IMPLICIT_ANY.test(problem.message)) kept.push(problem);
+            }
 
             // bind:this 声明的变量只在 onmount 里有效
-            return [...problems, ...this_leaks(root, expressions, this_names)];
+            return [...kept, ...this_leaks(root, expressions, this_bindings)];
+        },
+
+        references(offset: number): Reference[] {
+            return typescript_service.references(virtual, offset);
+        },
+
+        definition(offset: number): Definition[] {
+            const name = this.name_at(offset);
+            const declared = this.this_binding_named(name);
+
+            // `bind:this={box}` 声明的变量：指回模板里那一处，
+            // 别跳到我们补在虚拟文件末尾的 `declare let`
+            if (declared) return [{ file: null, start: declared.start, end: declared.end }];
+
+            return typescript_service.definition(virtual, offset);
+        },
+
+        rename(offset: number): Reference[] {
+            const declared = this.this_binding_named(this.name_at(offset));
+
+            const found = new Map<number, Reference>();
+
+            // `bind:this` 的声明在模板里；TS 只会指向我们补在末尾的 `declare let`
+            if (declared) found.set(declared.start, { start: declared.start, end: declared.end });
+
+            for (const entry of typescript_service.rename_locations(virtual, offset)) {
+                // 虚拟文件末尾补的声明：偏移超出源码长度，扔掉
+                if (entry.end > source.length) continue;
+
+                found.set(entry.start, entry);
+            }
+
+            return [...found.values()].sort((a, b) => a.start - b.start);
         },
 
         warmup(): void {

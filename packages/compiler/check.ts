@@ -19,17 +19,24 @@ function fail(item: Expression, message: string): never {
 }
 
 /**
- * `get`：`() => ...`（无参数）。
+ * `get`：跟 `set` 一个语义——**提供一个函数**，不是提供一个值。
  *
- * 也可以直接写一个表达式（`get: count`）—— 产物里包成 `() => (count)`，
- * 依赖照样能算出来，所以只拦"写了参数"这种明显不对的写法。
+ * 想绑一个变量直接用简略形式（`bind:value={count}`），那个才是"值"的写法。
+ * 这里要么写 `() => ...`（无参数），要么给一个现成的函数。
  */
 function check_get(get: Expression): void {
     const node = get.content;
 
-    if (!is_function_like(node) || node.params.length === 0) return;
+    if (!is_function_like(node)) {
+        // 不是函数字面量，那就得是个能当 getter 使的东西（`get: read_count`）
+        if (is_callable(node)) return;
 
-    fail(get, '`get` takes no parameters — write `get: () => ...`');
+        fail(get, '`get` must be a function with no parameters — write `get: () => ...`');
+    }
+
+    if (node.params.length !== 0) {
+        fail(get, '`get` takes no parameters — write `get: () => ...`');
+    }
 }
 
 /**
@@ -114,16 +121,20 @@ function check_binding(binding: BindingValue): void {
 }
 
 /**
- * `bind:this`：
- * - 写标识符 —— 变量由它自己声明（不用在 `<script>` 里先写）
- * - 写函数 / 别的表达式 —— 不声明变量，元素挂上时把元素当参数传进去跑
+ * `bind:this`：不硬性限定写法。
+ *
+ * 写标识符（且不是函数）时变量由它声明；其余一律当"挂上时调用"的表达式。
+ * 到底能不能用交给编辑器里的 TS 验（可调用性 / 参数类型 / 能不能赋值），
+ * 这里只挡一眼就看得出是错的写法——字面量。
  */
 function check_this(item: Expression): void {
-    if (is_callable(item.content)) return;
+    const node = item.content;
+
+    if (node.type !== 'Literal' && node.type !== 'TemplateLiteral') return;
 
     fail(
         item,
-        '`bind:this` takes either a variable name (which it declares) or a function receiving the element when it mounts'
+        '`bind:this` takes either a variable name (which it declares) or something callable that receives the element'
     );
 }
 

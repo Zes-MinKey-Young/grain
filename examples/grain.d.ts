@@ -23,16 +23,17 @@ declare function $props<T extends Record<string, unknown> = Record<string, unkno
  */
 declare function $bindable<T>(fallback?: T): T;
 
-declare module '*.grain' {
-    interface GrainComponent {
-        /** Mounts into the target element (top-level usage) */
-        (target: Element): unknown;
-        /** Kept for HMR re-mounting */
-        target?: Element;
-        /** Called by the parent component to create a child instance */
-        create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
-    }
+/** What a compiled component looks like from the outside */
+interface GrainComponent {
+    /** Mounts into the target element (top-level usage) */
+    (target: Element): unknown;
+    /** Kept for HMR re-mounting */
+    target?: Element;
+    /** Called by the parent component to create a child instance */
+    create(props?: Record<string, unknown>, children?: (() => unknown) | null): unknown;
+}
 
+declare module '*.grain' {
     const component: GrainComponent;
     export default component;
 }

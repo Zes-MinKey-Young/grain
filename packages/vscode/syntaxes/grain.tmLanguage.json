@@ -109,6 +109,26 @@
             },
             "patterns": [{ "include": "#attribute" }]
         },
+        "binding-this": {
+            "name": "meta.binding.grain",
+            "begin": "(bind)(\\:)(this)(\\s*)(=)(\\s*)(\\{)",
+            "beginCaptures": {
+                "1": { "name": "keyword.control.grain" },
+                "2": { "name": "keyword.control.grain" },
+                "3": { "name": "keyword.other.grain" },
+                "5": { "name": "keyword.operator.assignment.grain" },
+                "7": { "name": "punctuation.section.embedded.begin.grain" }
+            },
+            "end": "(\\})",
+            "endCaptures": {
+                "1": { "name": "punctuation.section.embedded.end.grain" }
+            },
+            "patterns": [
+                { "include": "#binding-key" },
+                { "include": "#operator" },
+                { "include": "source.ts" }
+            ]
+        },
         "binding": {
             "name": "meta.binding.grain",
             "begin": "(bind)(\\:)([\\w.-]*)(\\s*)(=)(\\s*)(\\{)",
@@ -135,6 +155,7 @@
         },
         "attribute": {
             "patterns": [
+                { "include": "#binding-this" },
                 { "include": "#binding" },
                 {
                     "match": "(bind)(\\:)([\\w.-]*)(\\s*)(=)?",

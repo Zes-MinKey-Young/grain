@@ -1,6 +1,9 @@
+import { readFileSync } from 'node:fs';
+
 import * as vscode from 'vscode';
 
 import type { Analysis, ComponentProp } from './analysis.js';
+import type { Definition } from './typescript.js';
 import { attributes_in, identifier_at } from './ast-utils.js';
 import { log } from './log.js';
 
@@ -10,6 +13,42 @@ export const SELECTOR: vscode.DocumentSelector = { scheme: 'file', language: 'gr
 /** 取光标在文档里的偏移 */
 function offset_at(document: vscode.TextDocument, position: vscode.Position): number {
     return document.offsetAt(position);
+}
+
+/**
+ * 定义跳转的目标位置。
+ *
+ * 跨文件时（`HTMLElement` 跳到 lib.dom.d.ts）偏移量属于**目标文件**，
+ * 得按目标文件的内容换算行列，不能用当前文档的。
+ */
+function location_of(document: vscode.TextDocument, entry: Definition): vscode.Location {
+    if (!entry.file) {
+        return new vscode.Location(
+            document.uri,
+            new vscode.Range(document.positionAt(entry.start), document.positionAt(entry.end))
+        );
+    }
+
+    let text = '';
+
+    try {
+        text = readFileSync(entry.file, 'utf8');
+    } catch {
+        // 读不到就退到文件开头，至少能打开那个文件
+        return new vscode.Location(vscode.Uri.file(entry.file), new vscode.Position(0, 0));
+    }
+
+    const at = (offset: number): vscode.Position => {
+        const before = text.slice(0, offset);
+        const line = before.split('\n').length - 1;
+
+        return new vscode.Position(line, offset - (before.lastIndexOf('\n') + 1));
+    };
+
+    return new vscode.Location(
+        vscode.Uri.file(entry.file),
+        new vscode.Range(at(entry.start), at(entry.end))
+    );
 }
 
 /**
@@ -177,7 +216,15 @@ export function register_providers(
         vscode.languages.registerDefinitionProvider(SELECTOR, {
             provideDefinition(document, position) {
                 const analysis = get_analysis(document);
-                const declaration = analysis && declaration_at(analysis, document, position);
+                if (!analysis) return null;
+
+                const offset = offset_at(document, position);
+                const found = analysis.definition(offset);
+
+                if (found.length > 0) return found.map((entry) => location_of(document, entry));
+
+                // 兜底：TS 认不出来的（模板里某些写法）退回我们收集的声明
+                const declaration = declaration_at(analysis, document, position);
                 if (!declaration) return null;
 
                 return new vscode.Location(
@@ -186,6 +233,72 @@ export function register_providers(
                         document.positionAt(declaration.start),
                         document.positionAt(declaration.end)
                     )
+                );
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.languages.registerRenameProvider(SELECTOR, {
+            prepareRename(document, position) {
+                const analysis = get_analysis(document);
+                if (!analysis) throw new Error('Cannot rename here');
+
+                const offset = offset_at(document, position);
+                const name = analysis.name_at(offset);
+                if (!name) throw new Error('Cannot rename here');
+
+                const found = analysis.rename(offset);
+                const at = found.find((entry) => offset >= entry.start && offset <= entry.end);
+                if (!at) throw new Error('Cannot rename here');
+
+                return new vscode.Range(document.positionAt(at.start), document.positionAt(at.end));
+            },
+
+            provideRenameEdits(document, position, newName) {
+                const analysis = get_analysis(document);
+                if (!analysis) return null;
+
+                if (!/^[A-Za-z_$][\w$]*$/.test(newName)) {
+                    throw new Error('The new name must be an identifier');
+                }
+
+                const offset = offset_at(document, position);
+                const edit = new vscode.WorkspaceEdit();
+
+                // script、模板表达式、if / for 条件、bind:this 的声明处 —— TS 一把找齐
+                for (const entry of analysis.rename(offset)) {
+                    edit.replace(
+                        document.uri,
+                        new vscode.Range(document.positionAt(entry.start), document.positionAt(entry.end)),
+                        newName
+                    );
+                }
+
+                return edit;
+            }
+        })
+    );
+
+    context.subscriptions.push(
+        vscode.languages.registerReferenceProvider(SELECTOR, {
+            provideReferences(document, position) {
+                const analysis = get_analysis(document);
+                if (!analysis) return null;
+
+                const offset = offset_at(document, position);
+
+                // script、模板表达式（`{x}` / `onclick={...}` / `bind:value={...}`）、
+                // if / for 的条件都在虚拟文件里，TS 一把找齐
+                return analysis.references(offset).map(
+                    (reference) =>
+                        new vscode.Location(
+                            document.uri,
+                            new vscode.Range(
+                                document.positionAt(reference.start),
+                                document.positionAt(reference.end)
+                            )
+                        )
                 );
             }
         })
