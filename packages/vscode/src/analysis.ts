@@ -1092,7 +1092,7 @@ export function analyze(source: string, filename: string): Analysis {
 
         compiled(): { js: string; css: string } | null {
             try {
-                return compile(source, { filename, runtimeModule: 'grain' });
+                return compile(source, { filename, runtimeModule: '@graints/runtime' });
             } catch {
                 return null;
             }

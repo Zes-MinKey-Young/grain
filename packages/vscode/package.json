@@ -2,7 +2,7 @@
     "name": "grain-vscode",
     "displayName": "Grain",
     "description": "Grain language support: syntax highlighting, diagnostics, go-to-definition, hover, completion and component prop hints",
-    "version": "0.1.8",
+    "version": "0.1.14",
     "publisher": "grain",
     "license": "MIT",
     "icon": "images/icon.png",
@@ -52,7 +52,13 @@
                 "embeddedLanguages": {
                     "source.ts": "typescript",
                     "source.css": "css"
-                }
+                },
+                "unbalancedBracketScopes": [
+                    "punctuation.definition.typeparameters",
+                    "storage.type.function.arrow",
+                    "keyword.operator.relational",
+                    "keyword.operator.bitwise.shift"
+                ]
             }
         ],
         "commands": [

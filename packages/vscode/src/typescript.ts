@@ -218,6 +218,17 @@ export function virtual_name(filename: string): string {
     return normalize(`${filename}.ts`);
 }
 
+/**
+ * 虚拟文件 -> 真实文件。
+ *
+ * `import Child from './Child.grain'` 跳定义时，TS 给的目标是 `Child.grain.ts`
+ * （我们喂给它的虚拟文件），那个文件在磁盘上并不存在；
+ * 偏移跟原文件一一对应，所以去掉 `.ts` 就能直接跳到真正的 `.grain`。
+ */
+export function real_name(file: string): string {
+    return file.endsWith('.grain.ts') ? file.slice(0, -'.ts'.length) : file;
+}
+
 /** 一处定义：`file` 为 null 表示就在当前文档里（偏移是原 SFC 的） */
 export interface Definition {
     file: string | null;
@@ -529,7 +540,8 @@ class TypeScriptService {
             const target = normalize(entry.fileName);
 
             return {
-                file: target === key ? null : target,
+                // 跳到别的 .grain 时给真实文件，不是它那份虚拟文件
+                file: target === key ? null : real_name(target),
                 start: entry.textSpan.start,
                 end: entry.textSpan.start + entry.textSpan.length
             };

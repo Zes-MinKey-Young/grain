@@ -65,7 +65,7 @@
             "endCaptures": {
                 "0": { "name": "punctuation.section.embedded.end.grain" }
             },
-            "patterns": [{ "include": "#operator" }, { "include": "source.ts" }]
+            "patterns": [{ "include": "source.ts" }, { "include": "#operator" }]
         },
         "expression": {
             "name": "meta.embedded.expression.grain",
@@ -77,10 +77,10 @@
             "endCaptures": {
                 "0": { "name": "punctuation.section.embedded.end.grain" }
             },
-            "patterns": [{ "include": "#operator" }, { "include": "source.ts" }]
+            "patterns": [{ "include": "source.ts" }, { "include": "#operator" }]
         },
         "operator": {
-            "match": "(=>|<=|>=|===|!==|==|!=|&&|\\|\\||\\*\\*|[+\\-*/%<>=!?:])",
+            "match": "(=>|<=|>=|===|!==|==|!=|&&|\\|\\||\\*\\*|\\?\\?|\\+\\+|--)",
             "name": "keyword.operator.grain"
         },
         "closing-tag": {
@@ -125,8 +125,8 @@
             },
             "patterns": [
                 { "include": "#binding-key" },
-                { "include": "#operator" },
-                { "include": "source.ts" }
+                { "include": "source.ts" },
+                { "include": "#operator" }
             ]
         },
         "binding": {
@@ -145,8 +145,8 @@
             },
             "patterns": [
                 { "include": "#binding-key" },
-                { "include": "#operator" },
-                { "include": "source.ts" }
+                { "include": "source.ts" },
+                { "include": "#operator" }
             ]
         },
         "binding-key": {
@@ -183,7 +183,7 @@
                     "endCaptures": {
                         "1": { "name": "punctuation.section.embedded.end.grain" }
                     },
-                    "patterns": [{ "include": "#operator" }, { "include": "source.ts" }]
+                    "patterns": [{ "include": "source.ts" }, { "include": "#operator" }]
                 },
                 {
                     "name": "string.quoted.double.grain",
