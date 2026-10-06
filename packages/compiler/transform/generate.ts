@@ -369,7 +369,7 @@ class Generator {
         // onmount 跟 script 走同一套处理（`$state` 展开、`$props()` 换成 props）
         const onmount = this.root.onmount ? this.script(this.root.onmount) : null;
 
-        const imported = ['creEle', 'creFragment'];
+        const imported = ['creEle', 'creFragment', 'component'];
         if (this.bindables.length > 0) imported.push('to_binding');
         if (this.needs_text) imported.push('creText');
 
@@ -419,7 +419,8 @@ class Generator {
             instance.push('', '/* <script onmount> */', `${root_name}.onmount = () => {`, onmount.body, '};');
         }
 
-        instance.push('', `return ${root_name};`);
+        // 套一层稳定的外壳：HMR 换实例时只换里面，父组件持有的引用不动
+        instance.push('', `return component(${root_name}, create, props, children);`);
 
         output.push(
             '',

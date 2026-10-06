@@ -22,6 +22,27 @@ export interface Updater {
     onmount?: () => void;
 }
 
+/**
+ * `Foo.create(props, children)` 返回的外壳。
+ *
+ * 内层实例可以被整个换掉（HMR 就这么做），外壳不变 ——
+ * 父组件持有的引用、它在父组件 `nested` 里的位置都不受影响。
+ */
+export interface ComponentShell extends Updater {
+    __grain: ComponentMeta;
+}
+
+interface ComponentMeta {
+    create: (props?: unknown, children?: unknown) => Updater;
+    /** 最近一次的 props / children，重建时原样传回去 */
+    props: unknown;
+    children: unknown;
+    /** 真正落进 DOM 的节点；组件根是 fragment，appendChild 之后它自己就空了 */
+    nodes: Node[];
+    /** 内层实例 */
+    current: Updater;
+}
+
 export interface Binding<T = unknown> {
     get(): T;
     /**
@@ -49,6 +70,9 @@ export interface Binding<T = unknown> {
 type Props = Record<string, unknown>;
 
 const FRAGMENT_NODE = 11;
+
+/** 活着的组件外壳，`hot_replace` 遍历它找要重建的实例 */
+const components = new Set<ComponentShell>();
 
 interface Slot {
     /** 属性更新器没有锚点——它不改 DOM，只是把新 props 推给子组件 */
@@ -190,8 +214,15 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
             // 嵌套元素（creEle 的返回值）直接挂上去，不算动态片段
             const child_el = (child as Partial<Updater>).el;
             if (child_el) {
+                const before = el.childNodes.length;
+
                 el.appendChild(child_el);
                 nested.push(child as Updater);
+
+                // 组件根是 fragment，appendChild 之后它自己就空了 ——
+                // 记下真正落进去的节点，HMR 换实例时才知道要替换哪一段
+                const meta = (child as Partial<ComponentShell>).__grain;
+                if (meta) meta.nodes = [...el.childNodes].slice(before);
 
                 // 子组件挂上了（根组件由生成出来的 mount 负责）
                 (child as Partial<Updater>).onmount?.();
@@ -263,6 +294,108 @@ export function creText(value: () => unknown): Updater {
     update.el = node;
 
     return update as Updater;
+}
+
+/**
+ * 组件实例的外壳。
+ *
+ * 编译产物里 `create()` 最后一行是 `return component(update$0, create, props, children)`。
+ * 外壳是稳定的，内层实例可以随时换 —— HMR 就靠这个做到"只换一个组件"。
+ */
+export function component(
+    instance: Updater,
+    create: (props?: unknown, children?: unknown) => Updater,
+    props: unknown,
+    children: unknown
+): Updater {
+    let current = instance;
+
+    const shell = ((...indices: number[]) => current(...indices)) as Updater;
+
+    const meta: ComponentMeta = {
+        create,
+        props,
+        children,
+        nodes: [],
+        get current() {
+            return current;
+        },
+        set current(next: Updater) {
+            current = next;
+        }
+    };
+
+    Object.defineProperty(shell, 'el', {
+        configurable: true,
+        get: () => current.el
+    });
+
+    shell.set_props = (next_props: Props, next_children?: unknown) => {
+        meta.props = next_props ?? {};
+        meta.children = next_children ?? null;
+
+        current.set_props?.(next_props, next_children as (() => unknown) | null);
+    };
+
+    shell.onmount = () => current.onmount?.();
+
+    (shell as ComponentShell).__grain = meta;
+    components.add(shell as ComponentShell);
+
+    return shell;
+}
+
+/**
+ * HMR：用新的 `create` 重建这个组件的所有实例。
+ *
+ * 只替换组件自己那一段 DOM —— 父组件、兄弟节点、以及父组件的状态都不动。
+ *
+ * @returns 换掉的实例数；0 表示这个组件现在没有活着的实例（比如它自己就是根组件），
+ *          调用方该退回重新挂载。
+ */
+export function hot_replace(
+    old_create: (props?: unknown, children?: unknown) => Updater,
+    next_create: (props?: unknown, children?: unknown) => Updater
+): number {
+    let replaced = 0;
+
+    for (const shell of [...components]) {
+        const meta = shell.__grain;
+        if (meta.create !== old_create) continue;
+
+        const parent = meta.nodes[0]?.parentNode;
+
+        // 还没挂上、或者已经卸载了
+        if (!parent) {
+            components.delete(shell);
+            continue;
+        }
+
+        const fresh = next_create(meta.props, meta.children);
+
+        // 临时插一个标记，新节点才能落在原来的位置
+        const marker = document.createComment('');
+
+        parent.insertBefore(marker, meta.nodes[0]);
+        for (const node of meta.nodes) parent.removeChild(node);
+
+        const nodes = [...fresh.el.childNodes];
+        for (const node of nodes) parent.insertBefore(node, marker);
+
+        parent.removeChild(marker);
+
+        meta.nodes = nodes;
+        meta.current = fresh;
+        // 记下新的 create，下一次 HMR 才匹配得上
+        meta.create = next_create;
+
+        // 重建出来的实例 DOM 已经就位，onmount 现在就能跑
+        fresh.onmount?.();
+
+        replaced += 1;
+    }
+
+    return replaced;
 }
 
 function is_binding(value: unknown): value is Binding {

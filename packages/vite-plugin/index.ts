@@ -33,20 +33,29 @@ function to_json(root: Root): string {
 }
 
 /**
- * 组件级 HMR：模块自己 accept，拿到新模块后清空挂载点重新挂载。
- * 不做状态保留（count 之类会重置），但不用整页刷新。
- * 拿不到挂载点时 `invalidate()` 退回整页刷新。
+ * 组件级 HMR。
+ *
+ * 优先换掉这个组件自己的实例（`hot_replace`）—— 只重建它那一段 DOM，
+ * 父组件、兄弟节点和父组件的状态都留着。
+ *
+ * 换不掉（它自己就是根组件、或者当前没有活着的实例）才退回"清空挂载点重新挂"；
+ * 连挂载点都没有就 `invalidate()` 交给 Vite 往上冒泡。
  */
-const HMR_SNIPPET = `
+const hmr_snippet = (runtime: string) => `
+import { hot_replace as __grain_hot_replace } from ${JSON.stringify(runtime)};
+
 if (import.meta.hot) {
   import.meta.hot.accept((mod) => {
+    if (mod && mod.create && __grain_hot_replace(create, mod.create) > 0) return;
+
     const target = mount.target;
     if (target && mod && mod.default) {
       target.replaceChildren();
       mod.default(target);
-    } else {
-      import.meta.hot.invalidate();
+      return;
     }
+
+    import.meta.hot.invalidate();
   });
 }
 `;
@@ -61,6 +70,7 @@ export interface GrainPluginOptions {
 export default function grain(options: GrainPluginOptions = {}): Plugin {
     const extensions = options.extensions ?? ['.grain'];
     const compiler_options = options.compiler ?? {};
+    const runtime = compiler_options.runtimeModule ?? '@graints/runtime';
 
     // transform（JS）和 load（CSS）会各编译一次同一个文件，按内容缓存掉
     const cache = new Map<string, CompileResult>();
@@ -135,7 +145,7 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
             const css_import = css ? `\nimport ${JSON.stringify(`${file}?${STYLE_QUERY}`)};` : '';
 
             return {
-                code: js + css_import + (is_dev ? HMR_SNIPPET : ''),
+                code: js + css_import + (is_dev ? hmr_snippet(runtime) : ''),
                 map: null
             };
         }
