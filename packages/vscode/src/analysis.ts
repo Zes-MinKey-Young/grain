@@ -3,12 +3,17 @@ import { dirname, resolve } from 'node:path';
 
 import { compile, parse, ParseError } from '../../compiler/index.js';
 import type { Expression, Root, Script, TemplateNode } from '../../compiler/index.js';
+import { log } from './log.js';
 import {
     build_virtual,
     typescript_service,
     virtual_name,
+    type CompletionDetail,
+    type CompletionEntry,
     type QuickInfo,
-    type SemanticProblem
+    type SemanticProblem,
+    type SemanticSpan,
+    type VirtualScript
 } from './typescript.js';
 import { walk } from './ast-utils.js';
 
@@ -58,6 +63,12 @@ export interface Analysis {
     element_at(offset: number): ElementInfo | null;
     /** 导入的某个组件接受哪些属性（来自它自己的 `$props<...>()`） */
     component_props(name: string): ComponentProp[];
+    /** 语义高亮用：TS 给的符号分类（类名 / 接口 / 参数 …） */
+    classifications(): SemanticSpan[];
+    /** script 里的补全（模板里返回空） */
+    completions(offset: number): CompletionEntry[];
+    /** 补全项的签名和文档 */
+    completion_detail(offset: number, name: string): CompletionDetail | null;
     /** TypeScript 语言服务给的悬停信息（带类型），只在 script 区域里有效 */
     quick_info(offset: number): QuickInfo | null;
     /** TypeScript 的语义诊断（类型错误、未定义变量等） */
@@ -371,6 +382,30 @@ function element_at(nodes: TemplateNode[], offset: number): ElementInfo | null {
     return null;
 }
 
+/**
+ * 解析失败时的兜底：把 `<script>` 块抠出来。
+ *
+ * 模板写坏了（比如 `obj.` 敲一半）编译器会抛错，但 script 本身多半是好的。
+ * 不抠出来的话虚拟文件里 script 全变空白，语义高亮和补全就整个没了。
+ */
+function fallback_scripts(source: string): VirtualScript[] {
+    const found: VirtualScript[] = [];
+    const pattern = /<script([^>]*)>([\s\S]*?)<\/script>/g;
+
+    for (const match of source.matchAll(pattern)) {
+        const open_end = match.index + match[0].indexOf('>') + 1;
+        const body = match[2];
+
+        found.push({
+            contentStart: open_end,
+            contentEnd: open_end + body.length,
+            raw: body
+        });
+    }
+
+    return found;
+}
+
 export function analyze(source: string, filename: string): Analysis {
     let root: Root | null = null;
     let error: ParseError | null = null;
@@ -399,10 +434,12 @@ export function analyze(source: string, filename: string): Analysis {
 
     // 把 script 铺到虚拟 .ts 文件里交给 TS 语言服务
     // 注意用 `!=`：解析失败时 root 为 null，root?.script 是 undefined，用 !== 会漏过去
-    const scripts = [root?.module, root?.script].filter((script): script is Script => script != null);
+    const parsed = [root?.module, root?.script].filter((script): script is Script => script != null);
+    // 解析失败就退回正则抠出来的 script，至少让语义高亮和补全还在
+    const scripts: VirtualScript[] = parsed.length > 0 ? parsed : fallback_scripts(source);
     const virtual = virtual_name(filename);
 
-    typescript_service.update(virtual, build_virtual(source, scripts, filename));
+    typescript_service.update(virtual, build_virtual(source, scripts, expressions));
 
     return {
         root,
@@ -434,6 +471,36 @@ export function analyze(source: string, filename: string): Analysis {
             return components.get(name) ?? [];
         },
 
+        classifications(): SemanticSpan[] {
+            return typescript_service.classifications(virtual, source.length);
+        },
+
+        completions(offset: number): CompletionEntry[] {
+            const in_script = scripts.some(
+                (script) => offset >= script.contentStart && offset <= script.contentEnd
+            );
+
+            log(
+                'completions',
+                'offset', offset,
+                '在 script 里吗', in_script,
+                '区间', scripts.map((script) => `${script.contentStart}-${script.contentEnd}`).join(' ')
+            );
+
+            if (!in_script) return [];
+
+            // 点号后面优先自己按类型枚举：TS 在这种地方往往返回一堆全局标识符，
+            // 而不是 `Math` 自己的成员
+            const members = typescript_service.member_completions(virtual, offset);
+            if (members.length > 0) return members;
+
+            return typescript_service.completions(virtual, offset);
+        },
+
+        completion_detail(offset: number, name: string): CompletionDetail | null {
+            return typescript_service.completion_detail(virtual, offset, name);
+        },
+
         // 虚拟文件与原文件 offset 一一对应，直接把光标偏移传进去就行
         quick_info(offset: number): QuickInfo | null {
             return scripts.some((script) => offset >= script.contentStart && offset <= script.contentEnd)
@@ -442,7 +509,16 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         semantic(): SemanticProblem[] {
-            return typescript_service.semantic_problems(virtual);
+            // 模板里的表达式是为了拿语义高亮才铺进虚拟文件的，
+            // 那儿的诊断不算数（模板区原本是空白，从来不报）
+            return typescript_service
+                .semantic_problems(virtual)
+                .filter((problem) =>
+                    scripts.some(
+                        (script) =>
+                            problem.start >= script.contentStart && problem.start <= script.contentEnd
+                    )
+                );
         },
 
         warmup(): void {

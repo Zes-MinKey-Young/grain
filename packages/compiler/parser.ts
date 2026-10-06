@@ -1,3 +1,4 @@
+import { check_bindings } from './check.js';
 import { ParseError } from './errors.js';
 import { parse_expressions } from './read/expression.js';
 import { parse_script } from './read/script.js';
@@ -59,13 +60,18 @@ export class Parser {
         // 模板里的 `{ ... }` 表达式同样交给 TS 解析器
         parse_expressions(root.template, masked);
 
-        return {
+        const result: Root = {
             ...root,
             stylesheet,
             module,
             script,
             template: root.template as Template<TemplateNode>
         };
+
+        // 都解析完了才检查 `bind:value={ ... }` 里那三个函数的形状
+        check_bindings(result);
+
+        return result;
     }
 
     /**

@@ -78,6 +78,20 @@ The listener is run only once when the `<input>` is mounted. In this scene, both
 
 The `listen` sub-expression could be shortened into `listen(operationList, "do", (ev) => ev instanceof NodeValueChangeOperation && ev.target === target)` (i.e. `listen(eventBus, eventName, guard_predicate)`). Grain expands it into the equivalent of the long form at compile time — no `listen` function exists at runtime. If `addEventListener` method does not exist, Grain will try to find an `on` method.
 
+The guard is optional: `listen(operationList, "do")` is the always-true predicate, i.e. `update()` runs on every event. So the shortest form is just the event bus plus the event name:
+```grain
+<input bind:value={ get: () => stamp, set: (value) => stamp = value, listen(bus, "tick") } />
+```
+
+## bind: shape of get / set / listen
+`bind:value={ ... }` is grain syntax, not TypeScript, so the three functions are checked at compile time:
+
+| key | required shape | note |
+| --- | --- | --- |
+| `get` | `() => T` | no parameters; a bare expression (`get: count`) is also accepted and wrapped into `() => (count)` |
+| `set` | `(value) => void` | exactly one parameter, the new value; a callable expression (`set: do_set`) is also accepted |
+| `listen` | `(update) => void` or `listen(bus, "name")` | `listen(bus, "name", guard)` — `guard` optional, must be a function, and the event name must be a string literal |
+
 ## bind with active
 `active` is used to bind a non-reactive variable to a reactive variable. It tells the compiler that the getter should be called after the setter is called.
 ```grain

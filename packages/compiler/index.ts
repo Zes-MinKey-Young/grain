@@ -1,6 +1,7 @@
 export { Parser, parse, parse_root, type ParseOptions } from './parser.js';
 export { ParseError } from './errors.js';
 export { scan_script, scan_expression, scan_style, type ScanResult } from './scan.js';
+export { check_bindings } from './check.js';
 export { parse_expression, parse_expressions, parse_for_of } from './read/expression.js';
 export { parse_script } from './read/script.js';
 export { parse_style } from './read/style.js';

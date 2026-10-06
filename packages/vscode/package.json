@@ -1,23 +1,35 @@
 {
     "name": "grain-vscode",
     "displayName": "Grain",
-    "description": "Grain 语言支持：语法高亮、诊断、跳转定义、悬停、补全",
-    "version": "0.0.0",
-    "private": true,
+    "description": "Grain 语言支持：语法高亮、诊断、跳转定义、悬停、补全、组件属性智能提示",
+    "version": "0.1.0",
     "publisher": "grain",
+    "license": "MIT",
+    "icon": "images/icon.png",
+    "keywords": [
+        "grain",
+        "svelte",
+        "typescript",
+        "compiler"
+    ],
     "engines": {
-        "vscode": "^1.85.0"
+        "vscode": "^1.140.0"
     },
     "categories": [
         "Programming Languages"
     ],
-    "main": "./dist/vscode/src/extension.js",
+    "main": "./dist/extension.js",
     "activationEvents": [
         "onLanguage:grain",
         "onCommand:grain.compileJs",
         "onCommand:grain.compileCss"
     ],
     "contributes": {
+        "configurationDefaults": {
+            "[grain]": {
+                "editor.wordBasedSuggestions": "off"
+            }
+        },
         "languages": [
             {
                 "id": "grain",
@@ -63,17 +75,28 @@
                 "grain.debug": {
                     "type": "boolean",
                     "default": false,
-                    "description": "把语言服务的调用情况输出到「输出 → Log (Extension Host)」"
+                    "description": "调试日志：额外打一份到「输出 → Log (Extension Host)」，并自动显示「输出 → Grain」通道（Grain 通道里的日志跟这个开关无关，一直都在）"
                 }
             }
         }
     },
     "scripts": {
         "build": "tsc -p . --ignoreDeprecations 6.0",
-        "watch": "tsc -p . --ignoreDeprecations 6.0 --watch"
+        "watch": "tsc -p . --ignoreDeprecations 6.0 --watch",
+        "libs": "node scripts/copy-ts-lib.mjs",
+        "bundle": "esbuild dist/vscode/src/extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js && pnpm libs",
+        "package": "pnpm build && pnpm bundle && vsce package --no-dependencies --allow-missing-repository --no-git-tag-version",
+        "publish:marketplace": "pnpm build && pnpm bundle && vsce publish --no-dependencies --allow-missing-repository --no-git-tag-version"
+    },
+    "dependencies": {
+        "@typescript-eslint/typescript-estree": "^8.71.0",
+        "css-tree": "^3.2.1",
+        "typescript": "6.0.3"
     },
     "devDependencies": {
         "@types/vscode": "^1.140.0",
+        "@vscode/vsce": "^3.7.1",
+        "esbuild": "^0.27.0",
         "typescript": "6.0.3"
     }
 }

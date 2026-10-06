@@ -2,9 +2,10 @@ import * as vscode from 'vscode';
 
 import type { Analysis, ComponentProp } from './analysis.js';
 import { attributes_in, identifier_at } from './ast-utils.js';
+import { log } from './log.js';
 
 /** 带上 scheme，免得 VSCode 警告 "document selector without scheme" */
-const SELECTOR: vscode.DocumentSelector = { scheme: 'file', language: 'grain' };
+export const SELECTOR: vscode.DocumentSelector = { scheme: 'file', language: 'grain' };
 
 /** 取光标在文档里的偏移 */
 function offset_at(document: vscode.TextDocument, position: vscode.Position): number {
@@ -54,6 +55,60 @@ function component_attribute_at(
     return { component: element.name, prop };
 }
 
+// ---------------------------------------------------------------- 补全
+
+/** 记下补全发生的位置，resolve 详情时要拿它去问语言服务 */
+const completion_context = new WeakMap<
+    vscode.CompletionItem,
+    { document: vscode.TextDocument; offset: number }
+>();
+
+/** `ts.ScriptElementKind` -> VS Code 的图标 */
+const KIND_BY_TS: Record<string, vscode.CompletionItemKind> = {
+    keyword: vscode.CompletionItemKind.Keyword,
+    class: vscode.CompletionItemKind.Class,
+    interface: vscode.CompletionItemKind.Interface,
+    enum: vscode.CompletionItemKind.Enum,
+    enumMember: vscode.CompletionItemKind.EnumMember,
+    module: vscode.CompletionItemKind.Module,
+    function: vscode.CompletionItemKind.Function,
+    method: vscode.CompletionItemKind.Method,
+    property: vscode.CompletionItemKind.Property,
+    parameter: vscode.CompletionItemKind.Variable,
+    var: vscode.CompletionItemKind.Variable,
+    let: vscode.CompletionItemKind.Variable,
+    const: vscode.CompletionItemKind.Constant,
+    alias: vscode.CompletionItemKind.Reference,
+    type: vscode.CompletionItemKind.TypeParameter,
+    primitiveType: vscode.CompletionItemKind.TypeParameter
+};
+
+function kind_of(kind: string): vscode.CompletionItemKind {
+    return KIND_BY_TS[kind] ?? vscode.CompletionItemKind.Variable;
+}
+
+// ---------------------------------------------------------------- 语义高亮
+
+const TOKEN_TYPES = [
+    'class',
+    'enum',
+    'interface',
+    'namespace',
+    'typeParameter',
+    'type',
+    'parameter',
+    'variable',
+    'enumMember',
+    'property',
+    'function',
+    'method'
+];
+
+/** 顺序要跟 typescript.ts 里的 TOKEN_MODIFIER_NAMES 一致 */
+const TOKEN_MODIFIERS = ['declaration', 'static', 'async', 'readonly', 'defaultLibrary', 'local'];
+
+const LEGEND = new vscode.SemanticTokensLegend(TOKEN_TYPES, TOKEN_MODIFIERS);
+
 /** 一个属性候选。`order` 决定排序：`bind:` 形式在最前 */
 function attribute_item(name: string, prop: ComponentProp, order: string): vscode.CompletionItem {
     const item = new vscode.CompletionItem(name, vscode.CompletionItemKind.Property);
@@ -63,7 +118,9 @@ function attribute_item(name: string, prop: ComponentProp, order: string): vscod
     item.sortText = `${order}${name}`;
 
     if (prop.bindable) {
-        item.documentation = new vscode.MarkdownString('可以双向绑定（子组件里是 `$bindable`）');
+        item.documentation = new vscode.MarkdownString(
+            'Bindable — the child declares it with `$bindable`, so writes go back to the parent'
+        );
     }
 
     return item;
@@ -71,8 +128,51 @@ function attribute_item(name: string, prop: ComponentProp, order: string): vscod
 
 export function register_providers(
     context: vscode.ExtensionContext,
-    get_analysis: (document: vscode.TextDocument) => Analysis | undefined
+    get_analysis: (document: vscode.TextDocument) => Analysis | undefined,
+    /** 语义高亮会比第一次分析来得更早，所以允许"要的时候现算" */
+    ensure_analysis: (document: vscode.TextDocument) => Analysis | undefined
 ): void {
+    context.subscriptions.push(
+        vscode.languages.registerDocumentSemanticTokensProvider(
+            SELECTOR,
+            {
+                provideDocumentSemanticTokens(document) {
+                    // 语义高亮请求得比第一次分析早，这里现算一份
+                    const analysis = get_analysis(document) ?? ensure_analysis(document);
+                    if (!analysis) return null;
+
+                    const builder = new vscode.SemanticTokensBuilder(LEGEND);
+
+                    for (const span of analysis.classifications()) {
+                        let start = span.start;
+                        const end = span.start + span.length;
+
+                        // 语义 token 不能跨行，跨了就按行拆成多个
+                        while (start < end) {
+                            const position = document.positionAt(start);
+                            const line_end = document.lineAt(position.line).range.end;
+                            const stop = Math.min(end, document.offsetAt(line_end));
+
+                            builder.push(
+                                new vscode.Range(position, position.translate(0, stop - start)),
+                                span.type,
+                                span.modifiers
+                            );
+
+                            const next = position.line + 1;
+                            if (next >= document.lineCount) break;
+
+                            start = document.offsetAt(new vscode.Position(next, 0));
+                        }
+                    }
+
+                    return builder.build();
+                }
+            },
+            LEGEND
+        )
+    );
+
     context.subscriptions.push(
         vscode.languages.registerDefinitionProvider(SELECTOR, {
             provideDefinition(document, position) {
@@ -121,8 +221,8 @@ export function register_providers(
                     );
                     contents.appendMarkdown(
                         prop.bindable
-                            ? `_${component} 的属性 · 可以双向绑定_`
-                            : `_${component} 的属性_`
+                            ? `_Property of \`${component}\` · bindable (two-way)_`
+                            : `_Property of \`${component}\`_`
                     );
 
                     return new vscode.Hover(contents);
@@ -134,7 +234,9 @@ export function register_providers(
 
                 const contents = new vscode.MarkdownString();
                 contents.appendCodeblock(declaration.detail, 'ts');
-                contents.appendMarkdown(declaration.kind === 'function' ? '_函数声明_' : '_变量声明_');
+                contents.appendMarkdown(
+                    declaration.kind === 'function' ? '_function declaration_' : '_variable declaration_'
+                );
 
                 return new vscode.Hover(contents);
             }
@@ -145,12 +247,45 @@ export function register_providers(
         vscode.languages.registerCompletionItemProvider(
             SELECTOR,
             {
-                provideCompletionItems(document, position) {
-                    const analysis = get_analysis(document);
+                provideCompletionItems(document, position, token, context) {
+                    log(
+                        '补全请求',
+                        'language', document.languageId,
+                        '触发字符', JSON.stringify(context?.triggerCharacter ?? null),
+                        'offset', offset_at(document, position)
+                    );
+
+                    const analysis = get_analysis(document) ?? ensure_analysis(document);
+
+                    log('补全请求 analysis', analysis ? '有' : '没有');
+
                     if (!analysis) return null;
 
-                    // 在组件标签里：补全它的属性
                     const offset = offset_at(document, position);
+
+                    // script 里：交给 TS 语言服务，补全什么它说了算
+                    const entries = analysis.completions(offset);
+
+                    log('补全请求 条目', entries.length);
+
+                    if (entries.length > 0) {
+                        return entries.map((entry) => {
+                            const item = new vscode.CompletionItem(entry.name, kind_of(entry.kind));
+
+                            item.sortText = entry.sortText;
+                            if (entry.detail) item.detail = entry.detail;
+
+                            if (entry.insertText) {
+                                item.insertText = new vscode.SnippetString(entry.insertText);
+                            }
+
+                            completion_context.set(item, { document, offset });
+
+                            return item;
+                        });
+                    }
+
+                    // 在组件标签里：补全它的属性
                     const element = analysis.element_at(offset);
                     const props = element ? analysis.component_props(element.name) : [];
 
@@ -193,8 +328,25 @@ export function register_providers(
                     }
 
                     return items;
+                },
+
+                resolveCompletionItem(item) {
+                    const context = completion_context.get(item);
+                    if (!context) return item;
+
+                    const analysis = get_analysis(context.document);
+                    const name = typeof item.label === 'string' ? item.label : item.label.label;
+                    const detail = analysis?.completion_detail(context.offset, name);
+
+                    if (detail?.detail) item.detail = detail.detail;
+                    if (detail?.documentation) {
+                        item.documentation = new vscode.MarkdownString(detail.documentation);
+                    }
+
+                    return item;
                 }
             },
+            '.',
             '{',
             ' '
         )

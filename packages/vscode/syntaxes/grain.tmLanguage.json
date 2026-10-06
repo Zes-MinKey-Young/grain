@@ -153,6 +153,18 @@
                     }
                 },
                 {
+                    "name": "meta.embedded.expression.grain",
+                    "begin": "(\\{)",
+                    "beginCaptures": {
+                        "1": { "name": "punctuation.section.embedded.begin.grain" }
+                    },
+                    "end": "(\\})",
+                    "endCaptures": {
+                        "1": { "name": "punctuation.section.embedded.end.grain" }
+                    },
+                    "patterns": [{ "include": "#operator" }, { "include": "source.ts" }]
+                },
+                {
                     "name": "string.quoted.double.grain",
                     "begin": "\"",
                     "end": "\"",

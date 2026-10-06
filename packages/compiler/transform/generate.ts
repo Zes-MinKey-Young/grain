@@ -967,8 +967,9 @@ class Generator {
     /**
      * `listen`：
      * - 自己写的 `(update) => {...}` 原样传下去
-     * - `listen(eventBus, eventName, guard)` 展开成挂事件监听的代码，
+     * - `listen(eventBus, eventName)` / `listen(eventBus, eventName, guard)` 展开成挂事件监听的代码，
      *   没有 `addEventListener` 就用 `on`
+     * - 谓词（guard）可省：省了就是恒真，事件来了直接 update
      */
     private listen_source(listen: TSESTree.Node): string {
         const call = listen.type === 'CallExpression' ? listen : null;

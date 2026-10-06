@@ -32,6 +32,9 @@ export type Attributes = Record<string, string | true>;
  * - `{count}` / `{count, active}` —— 变量形式
  * - `{ get: () => x, set: (v) => x = v, listen: ..., active }` —— 完整形式
  *
+ * 三个函数的形状由 `check_bindings` 检验：`get` 无参数、`set` 正好一个参数、
+ * `listen` 是 `(update) => ...` 或者 `listen(总线, "事件名")`（谓词可省，省了就是恒真）。
+ *
  * 各项之间按顶层逗号断开，由专门的解析器读出来（不交给 TS 猜）。
  * `get` / `set` / `listen` 存的是它们**值**的源码片段，第二阶段再用 TS 解析。
  */

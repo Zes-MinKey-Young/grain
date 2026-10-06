@@ -5,6 +5,8 @@
     "example": "node scripts/example.mjs",
     "vscode:build": "pnpm --filter grain-vscode build",
     "vscode:watch": "pnpm --filter grain-vscode watch",
+    "vscode:package": "pnpm --filter grain-vscode package",
+    "vscode:publish": "pnpm --filter grain-vscode publish:marketplace",
     "typecheck": "tsc --noEmit --target es2022 --module esnext --moduleResolution bundler --skipLibCheck --strict --types node packages/compiler/index.ts packages/vite-plugin/index.ts examples/grain.d.ts examples/counter/main.ts examples/inspector/main.ts examples/components/main.ts"
   },
   "dependencies": {

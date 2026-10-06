@@ -3,3 +3,4 @@ svelte
 .tmp
 dist
 .vscode-test
+*.vsix

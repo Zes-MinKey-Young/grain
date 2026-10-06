@@ -13,6 +13,7 @@
         stamp = Math.floor(Math.random() * 1000);
         bus.dispatchEvent(new Event('tick'));
     }
+    
 </script>
 
 <Child label={name} bind:count={total}>
@@ -28,7 +29,7 @@
 <button onclick={() => name = 'grain'}>改名</button>
 
 <p>
-    <input bind:value={ get: () => stamp, set: (value) => stamp = Number(value), listen(bus, 'tick', (ev) => true) } />
+    <input bind:value={ get: () => stamp, set: (value) => stamp = Number(value), listen(bus, 'tick') } />
     <span>stamp: {stamp}</span>
     <button onclick={tick}>tick</button>
 </p>

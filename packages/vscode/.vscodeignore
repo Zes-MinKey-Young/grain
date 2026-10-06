@@ -1,0 +1,9 @@
+.vscode/**
+.gitignore
+node_modules/**
+src/**
+tsconfig.json
+**/*.map
+# 这些已经 bundle 进 dist/extension.js 了
+dist/vscode/**
+dist/compiler/**

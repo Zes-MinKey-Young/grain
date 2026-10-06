@@ -2,10 +2,30 @@ import * as vscode from 'vscode';
 
 import type { Analysis } from './analysis.js';
 import { update_diagnostics } from './diagnostics.js';
-import { register_providers } from './providers.js';
-import { read_tsconfig, set_compiler_options, set_debug } from './typescript.js';
+import { register_providers, SELECTOR } from './providers.js';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
-const analyses = new Map<string, Analysis>();
+import { log, set_debug } from './log.js';
+import { forget_tsconfig, use_tsconfig } from './typescript.js';
+
+/** 缓存的分析连带它当时的文档版本：版本对不上就说明文档又改过了，这份不能再用 */
+const analyses = new Map<string, { analysis: Analysis; version: number }>();
+
+/**
+ * 缓存里那份跟眼前的文档是不是同一个版本。
+ *
+ * 补全 / hover 来问的时候文档往往已经比上次分析时新了几个字符，
+ * 拿旧内容去问 TS 位置会对不上（`Math.` 会被当成别处，点号那一下直接白给）。
+ */
+function cached_analysis(document: vscode.TextDocument): Analysis | undefined {
+    const entry = analyses.get(document.uri.toString());
+
+    return entry?.version === document.version ? entry.analysis : undefined;
+}
+
+/** 右下角的 Grain 状态项，悬停能看到当前用的 tsconfig */
+let status_item: vscode.LanguageStatusItem | null = null;
 
 /**
  * 编译器（连带 typescript-estree → TypeScript）只能惰性加载：
@@ -24,33 +44,67 @@ function is_grain(document: vscode.TextDocument): boolean {
 }
 
 /**
- * 工作区有 tsconfig.json 就用它的编译选项（`lib` / `target` / `strict` …）。
- * 没有也不打紧，插件自带一套（含 DOM）。
+ * 从当前文件所在目录往上找最近的 tsconfig.json（跟 TypeScript 自己的做法一样），
+ * 到工作区根为止。找不到就用插件自带的一套（含 DOM）。
  */
-async function load_tsconfig(): Promise<void> {
-    const files = await vscode.workspace.findFiles('**/tsconfig.json', '**/node_modules/**', 1);
-    if (files.length === 0) return;
+function nearest_tsconfig(document: vscode.TextDocument): string | null {
+    const folder = vscode.workspace.getWorkspaceFolder(document.uri);
+    if (!folder) return null;
 
-    try {
-        const options = read_tsconfig(files[0].fsPath);
+    const root = folder.uri.fsPath.toLowerCase();
+    let directory = dirname(document.uri.fsPath);
 
-        if (options) {
-            set_compiler_options(options);
-            console.log('[grain] 采用 tsconfig:', files[0].fsPath);
-        }
-    } catch (error) {
-        console.error('[grain] 读取 tsconfig 失败', error);
+    while (directory.toLowerCase().startsWith(root)) {
+        const candidate = join(directory, 'tsconfig.json');
+        if (existsSync(candidate)) return candidate;
+
+        const parent = dirname(directory);
+        if (parent === directory) break;
+
+        directory = parent;
     }
+
+    return null;
+}
+
+/**
+ * 右下角那个 Grain 状态项。
+ * 悬停能看到当前用的是哪个 tsconfig —— 找不到的话也写清楚从哪儿往上找过。
+ */
+function describe_tsconfig(status: vscode.LanguageStatusItem, document: vscode.TextDocument, file: string | null): void {
+    if (file) {
+        status.detail = `tsconfig: ${vscode.workspace.asRelativePath(file, false)}`;
+        status.command = {
+            command: 'vscode.open',
+            title: '打开 tsconfig.json',
+            arguments: [vscode.Uri.file(file)]
+        };
+
+        return;
+    }
+
+    const from = vscode.workspace.asRelativePath(dirname(document.uri.fsPath), false);
+
+    status.detail = `tsconfig: 没找到（从 ${from} 往上到工作区根都没有），用插件自带的配置（含 DOM）`;
+    status.command = undefined;
 }
 
 function refresh(document: vscode.TextDocument, collection: vscode.DiagnosticCollection): void {
     if (!is_grain(document)) return;
 
+    // 用离这个文件最近的 tsconfig，并在状态项里写出来
+    const tsconfig = nearest_tsconfig(document);
+
+    use_tsconfig(tsconfig);
+    if (status_item) describe_tsconfig(status_item, document, tsconfig);
+
     try {
         const { analyze } = get_analysis_module();
         const analysis = analyze(document.getText(), document.uri.fsPath);
 
-        analyses.set(document.uri.toString(), analysis);
+        log('分析', document.uri.fsPath, 'script', analysis.root?.script ? '有' : '没有');
+
+        analyses.set(document.uri.toString(), { analysis, version: document.version });
         update_diagnostics(document, collection, analysis);
 
         // 语言服务要加载 lib.es2022.d.ts，放后台预热，启动阶段不碰它
@@ -119,26 +173,52 @@ async function show_compiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Pro
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+    // 无条件的：用来确认扩展到底有没有激活（「输出 → Grain」里看）
+    log('扩展激活', '版本', String(context.extension.packageJSON?.version ?? '?'));
+
     const collection = vscode.languages.createDiagnosticCollection('grain');
     context.subscriptions.push(collection);
 
-    register_providers(context, (document) => analyses.get(document.uri.toString()));
+    register_providers(
+        context,
+        cached_analysis,
+        (document) => {
+            if (!is_grain(document)) return undefined;
+
+            // 缓存那份不是当前版本（文档改过了），就按眼前的文本重新分析
+            const analysis = get_analysis_module().analyze(document.getText(), document.uri.fsPath);
+
+            analyses.set(document.uri.toString(), { analysis, version: document.version });
+
+            return analysis;
+        }
+    );
+
+    status_item = vscode.languages.createLanguageStatusItem('grain.status', SELECTOR);
+    status_item.name = 'Grain';
+    status_item.text = 'Grain';
+    status_item.detail = 'tsconfig: 还没分析过文件';
+
+    context.subscriptions.push(status_item);
 
     const sync_debug = () =>
         set_debug(vscode.workspace.getConfiguration('grain').get<boolean>('debug', false));
 
     sync_debug();
 
-    // 后台读，不占激活的时间；语言服务是惰性建的，读完了正好赶上第一次用
-    void load_tsconfig();
-
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((event) => {
             if (event.affectsConfiguration('grain')) sync_debug();
         }),
-        // tsconfig 改了要重新读一遍
+        // tsconfig 改了：作废缓存，把所有 .grain 重新分析一遍
         vscode.workspace.onDidSaveTextDocument((document) => {
-            if (document.uri.fsPath.endsWith('tsconfig.json')) void load_tsconfig();
+            if (!document.uri.fsPath.endsWith('tsconfig.json')) return;
+
+            forget_tsconfig();
+
+            for (const other of vscode.workspace.textDocuments) {
+                if (is_grain(other)) schedule(other);
+            }
         })
     );
 
@@ -179,7 +259,7 @@ export function activate(context: vscode.ExtensionContext): void {
             clearTimeout(timers.get(key));
             timers.delete(key);
 
-            analyses.get(key)?.dispose();
+            analyses.get(key)?.analysis.dispose();
             analyses.delete(key);
             collection.delete(document.uri);
         })

@@ -2,6 +2,8 @@
 // 扩展激活时同步 require('typescript') 会拖慢扩展宿主，直接触发 10 秒启动超时。
 import type * as TS from 'typescript';
 
+import { log } from './log.js';
+
 import type { Script } from '../../compiler/index.js';
 
 type TypeScript = typeof TS;
@@ -49,7 +51,9 @@ declare module "*.grain" {
 `;
 
 let options: TS.CompilerOptions | null = null;
-/** 工作区 tsconfig.json 里的编译选项 */
+/** 当前生效的 tsconfig 路径（按它判断要不要重建语言服务） */
+let tsconfig_path: string | null = null;
+/** tsconfig.json 里的编译选项 */
 let overrides: TS.CompilerOptions | null = null;
 
 function get_options(): TS.CompilerOptions {
@@ -78,10 +82,10 @@ function get_options(): TS.CompilerOptions {
 }
 
 /**
- * 读工作区的 tsconfig.json（会顺着 `extends` 找下去），拿来当编译选项。
+ * 读 tsconfig.json（会顺着 `extends` 找下去），拿来当编译选项。
  * 这样项目里配的 `lib` / `target` / `strict` 都能生效。
  */
-export function read_tsconfig(path: string): TS.CompilerOptions | null {
+function read_tsconfig(path: string): TS.CompilerOptions | null {
     const ts = get_ts();
 
     const host: TS.ParseConfigFileHost = {
@@ -97,12 +101,25 @@ export function read_tsconfig(path: string): TS.CompilerOptions | null {
     return ts.getParsedCommandLineOfConfigFile(path, {}, host)?.options ?? null;
 }
 
-/** 换编译选项。语言服务不会自己重读配置，得把它丢掉重建 */
-export function set_compiler_options(next: TS.CompilerOptions): void {
-    overrides = next;
+/**
+ * 切换到离当前文件最近的那个 tsconfig.json。
+ *
+ * 按**路径**比较，所以同一个目录下反复分析不会重建语言服务；
+ * 换到别的目录（配置不同）才重建。传 null 表示没有 tsconfig，用插件自带的一套。
+ */
+export function use_tsconfig(path: string | null): void {
+    if (path === tsconfig_path) return;
+
+    tsconfig_path = path;
+    overrides = path ? read_tsconfig(path) : null;
     options = null;
 
     typescript_service.reset();
+}
+
+/** tsconfig 改过了，下次重新读一遍 */
+export function forget_tsconfig(): void {
+    tsconfig_path = null;
 }
 
 /**
@@ -111,13 +128,55 @@ export function set_compiler_options(next: TS.CompilerOptions): void {
  * 这样虚拟文件里的 offset 就是 SFC 里的 offset，TS 报出来的位置不需要换算。
  * `<script module>` 和 `<script>` 都放回原位，合成一个文件，两边的变量互相可见。
  */
-export function build_virtual(source: string, scripts: Script[], filename: string): string {
+/** 铺虚拟文件只需要这几个字段——解析失败时兜底扫出来的 script 也给得出 */
+export interface VirtualScript {
+    contentStart: number;
+    contentEnd: number;
+    raw: string;
+}
+
+/** 模板里的一个表达式（`{x}` / `onclick={...}`），铺进虚拟文件用 */
+export interface VirtualExpression {
+    contentStart: number;
+    contentEnd: number;
+    raw: string;
+}
+
+export function build_virtual(
+    source: string,
+    scripts: VirtualScript[],
+    expressions: VirtualExpression[]
+): string {
     let virtual = source.replace(/[^\n\r]/g, ' ');
 
     for (const script of scripts) {
         if (!script) continue;
 
         virtual = virtual.slice(0, script.contentStart) + script.raw + virtual.slice(script.contentEnd);
+    }
+
+    // 模板里的表达式也铺进来：语义高亮是 TS 给的，模板区域原来是纯空白，
+    // 拿不到分类（`onclick={() => ...}` 里的函数体就没高亮）。
+    //
+    // 用 `( ... );` 包成表达式语句让它合法：括号和分号写在原本是空白的位置上，
+    // 表达式本身还落在原来的 offset 上，不用做换算
+    for (const expression of expressions) {
+        const start = expression.contentStart;
+        const end = expression.contentEnd;
+
+        // 左右各得有一个空白位置放括号，而且不能踩到别的表达式 / script 上去
+        if (start === 0 || end >= virtual.length) continue;
+        if (virtual[start - 1] !== ' ' || virtual[end] !== ' ') continue;
+
+        const semicolon = virtual[end + 1] === ' ';
+
+        virtual =
+            virtual.slice(0, start - 1) +
+            '(' +
+            expression.raw +
+            ')' +
+            (semicolon ? ';' : '') +
+            virtual.slice(semicolon ? end + 2 : end + 1);
     }
 
     return virtual;
@@ -136,16 +195,45 @@ export function virtual_name(filename: string): string {
     return normalize(`${filename}.ts`);
 }
 
-let debug = false;
-
-/** 打开 `grain.debug` 后，把语言服务的调用情况打到 Extension Host 日志里 */
-export function set_debug(value: boolean): void {
-    debug = value;
+/** script 里的一补全候选项 */
+export interface CompletionEntry {
+    name: string;
+    /** `ts.ScriptElementKind` 的字符串值（`class` / `function` / `var` …） */
+    kind: string;
+    sortText: string;
+    /** TS 给的插入文本，可能是 `foo($0)` 这种带占位符的 */
+    insertText?: string;
+    /** 类型文本，如 `(x: number) => number` */
+    detail?: string;
+    documentation?: string;
 }
 
-function log(...args: unknown[]): void {
-    if (debug) console.log('[grain]', ...args);
+/** 补全项的详情：签名和文档 */
+export interface CompletionDetail {
+    detail?: string;
+    documentation?: string;
 }
+
+/** 一处语义分类：这个位置上的东西是类名 / 接口 / 参数 … */
+export interface SemanticSpan {
+    start: number;
+    length: number;
+    /** 语义 token 类型名（`class` / `interface` / `type` …） */
+    type: string;
+    /** 语义 token 修饰符 */
+    modifiers: string[];
+}
+
+/** 跟 providers 里 legend 的顺序一致 */
+const TOKEN_NAMES = [
+    'class', 'enum', 'interface', 'namespace', 'typeParameter', 'type',
+    'parameter', 'variable', 'enumMember', 'property', 'function', 'method'
+];
+
+/** 修饰符按位：declaration / static / async / readonly / defaultLibrary / local */
+const TOKEN_MODIFIER_NAMES = [
+    'declaration', 'static', 'async', 'readonly', 'defaultLibrary', 'local'
+];
 
 export interface QuickInfo {
     /** 例如 `let count: number` */
@@ -209,6 +297,146 @@ class TypeScriptService {
     reset(): void {
         this.service = null;
         log('语言服务已重置');
+    }
+
+    /** script 里的补全，交给 TS 语言服务 */
+    completions(file: string, offset: number): CompletionEntry[] {
+        const info = this.get().getCompletionsAtPosition(file, offset, {
+            includeCompletionsForModuleExports: true,
+            includeCompletionsWithInsertText: true
+        });
+
+        log('TS 补全', file, offset, '->', info ? `${info.entries.length} 项` : 'undefined');
+
+        if (!info) return [];
+
+        return info.entries.map((entry) => ({
+            name: entry.name,
+            kind: String(entry.kind),
+            sortText: entry.sortText ?? entry.name,
+            insertText: entry.insertText
+        }));
+    }
+
+    /**
+     * `x.` 这种"刚敲下点号"的补全。
+     *
+     * `getCompletionsAtPosition` 在语法不完整的地方会直接返回 undefined（`Math.` 后面空着时），
+     * 所以自己来：拿点号左边的表达式问类型，再把成员枚举出来。
+     */
+    member_completions(file: string, offset: number): CompletionEntry[] {
+        const ts = get_ts();
+        const dot = offset - 1;
+
+        const program = this.get().getProgram();
+        const source_file = program?.getSourceFile(file);
+
+        // 无条件先打一条：早退的话，日志里能直接看出"虚拟文件里点号位置不是 ."
+        // （多半是虚拟文件比文档旧，偏移对不上）
+        log(
+            'member_completions',
+            'dot', dot,
+            '字符', source_file ? JSON.stringify(source_file.text[dot] ?? '') : '虚拟文件不在'
+        );
+
+        if (!program || !source_file || source_file.text[dot] !== '.') return [];
+
+        // 点号左边那个表达式：结束位置正好落在点号上的最内层节点
+        let target: TS.Node | undefined;
+
+        const visit = (node: TS.Node): void => {
+            if (node.getEnd() === dot && node.getStart(source_file) < dot) target = node;
+            node.forEachChild(visit);
+        };
+
+        visit(source_file);
+
+        log('member_completions 左边', target ? `"${target.getText(source_file)}"` : '没找到');
+
+        if (!target) return [];
+
+        const checker = program.getTypeChecker();
+        const type = checker.getApparentType(checker.getTypeAtLocation(target));
+        const properties = type.getProperties();
+
+        // `Symbol.toStringTag` 这类符号属性在 TS 里叫 `__@toStringTag@N`，
+        // 拼不出合法成员表达式，不该进候选
+        const visible = properties.filter((symbol) => !symbol.getName().startsWith('__'));
+
+        log(
+            'member_completions 类型',
+            checker.typeToString(type),
+            '成员',
+            visible.length,
+            '（共',
+            properties.length,
+            '）'
+        );
+
+        return visible.map((symbol, index) => {
+            const flags = symbol.getFlags();
+            let kind = 'var';
+
+            if (flags & ts.SymbolFlags.Method) kind = 'method';
+            else if (flags & ts.SymbolFlags.Function) kind = 'function';
+            else if (flags & ts.SymbolFlags.Property) kind = 'property';
+            else if (flags & ts.SymbolFlags.Class) kind = 'class';
+            else if (flags & ts.SymbolFlags.Interface) kind = 'interface';
+            else if (flags & ts.SymbolFlags.Enum) kind = 'enum';
+            else if (flags & ts.SymbolFlags.Module) kind = 'module';
+
+            return {
+                name: symbol.getName(),
+                kind,
+                // 排在 TS 给的那些前面
+                sortText: `0${String(index).padStart(4, '0')}`,
+                detail: checker.typeToString(checker.getTypeOfSymbolAtLocation(symbol, target!))
+            };
+        });
+    }
+
+    /** 补全项的签名和文档（VS Code 选中某一项时才来要） */
+    completion_detail(file: string, offset: number, name: string): CompletionDetail | null {
+        const details = this.get().getCompletionEntryDetails(file, offset, name, undefined, undefined, undefined, undefined);
+        if (!details) return null;
+
+        const detail = details.displayParts?.map((part) => part.text).join('') ?? '';
+        const documentation = details.documentation?.map((part) => part.text).join('') ?? '';
+
+        return { detail: detail || undefined, documentation: documentation || undefined };
+    }
+
+    /**
+     * 语义分类：哪些位置是类名、接口、类型别名、参数 …
+     *
+     * 虚拟文件和原文件偏移一一对应，所以结果可以直接用。
+     * 模板区域在虚拟文件里是空白，拿不到分类 —— 那边交给 TextMate。
+     */
+    classifications(file: string, length: number): SemanticSpan[] {
+        const ts = get_ts();
+        const service = this.get();
+
+        const { spans } = service.getEncodedSemanticClassifications(
+            file,
+            { start: 0, length },
+            ts.SemanticClassificationFormat.TwentyTwenty
+        );
+
+        const result: SemanticSpan[] = [];
+
+        for (let i = 0; i + 2 < spans.length; i += 3) {
+            // 编码是 `type | (modifier << 8)`：高 8 位是类型（从 1 起），低 8 位是修饰符位掩码
+            const encoded = spans[i + 2];
+            const type = TOKEN_NAMES[(encoded >> 8) - 1];
+            if (!type) continue;
+
+            const bits = encoded & 0xff;
+            const modifiers = TOKEN_MODIFIER_NAMES.filter((_, index) => bits & (1 << index));
+
+            result.push({ start: spans[i], length: spans[i + 1], type, modifiers });
+        }
+
+        return result;
     }
 
     /** 提前把语言服务建好（在编辑 .grain 时后台调用，避免第一次 hover 卡一下） */
