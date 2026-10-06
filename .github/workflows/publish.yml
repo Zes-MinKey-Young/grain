@@ -1,0 +1,47 @@
+name: publish
+
+# 发布到 npm。手动点 "Run workflow"，或者 push 一个 v* 的 tag。
+on:
+    workflow_dispatch:
+    push:
+        tags:
+            - 'v*'
+
+jobs:
+    publish:
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+        steps:
+            - uses: actions/checkout@v4
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 10
+
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  registry-url: https://registry.npmjs.org
+                  cache: pnpm
+
+            # 只编译 TS，不需要任何原生模块的构建脚本（keytar / esbuild 之类）
+            - run: pnpm install --ignore-scripts --no-frozen-lockfile
+
+            # 产物：packages/runtime/dist 与 packages/vite-plugin/dist
+            - run: pnpm packages:build
+
+            - run: npm publish --access public
+              working-directory: packages/runtime
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+            - run: npm publish --access public
+              working-directory: packages/vite-plugin
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+            - run: npm publish --access public
+              working-directory: packages/create-grain
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

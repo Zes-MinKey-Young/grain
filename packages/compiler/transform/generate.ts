@@ -25,7 +25,7 @@ import {
 import { create_scope_id, is_global, scope_stylesheet } from './style.js';
 
 export interface CompileOptions {
-    /** 运行时模块路径，默认 `grain` */
+    /** 运行时模块路径，默认 `@graints/runtime` */
     runtimeModule?: string;
     /** 文件名，参与 scope id 计算 */
     filename?: string;
@@ -1356,7 +1356,7 @@ export function generate(root: Root, source: string, options: CompileOptions = {
     return new Generator(
         source,
         root,
-        options.runtimeModule ?? 'grain',
+        options.runtimeModule ?? '@graints/runtime',
         analysis,
         scope_id,
         options.filename ?? 'component.grain'

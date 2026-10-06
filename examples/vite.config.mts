@@ -12,8 +12,8 @@ export default defineConfig({
     plugins: [grain()],
     resolve: {
         alias: {
-            // 编译产物里 `import { creEle } from "grain"`，运行时源码就在仓库里
-            grain: fileURLToPath(new URL('../packages/runtime/index.ts', import.meta.url))
+            // 编译产物里 `import { creEle } from "@graints/runtime"`，运行时源码就在仓库里
+            '@graints/runtime': fileURLToPath(new URL('../packages/runtime/index.ts', import.meta.url))
         }
     }
 });

@@ -1,0 +1,16 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ESNext",
+        "moduleResolution": "bundler",
+        "lib": ["ES2022"],
+        "strict": true,
+        "declaration": true,
+        "outDir": "dist",
+        // 编译器也要一起编译进来 —— 插件是单包发布的，不单独发 @graints/compiler
+        "rootDir": "..",
+        "skipLibCheck": true,
+        "types": ["node"]
+    },
+    "include": ["index.ts", "../compiler/**/*.ts"]
+}

@@ -1,8 +1,31 @@
 {
-    "name": "@grain/vite-plugin",
-    "version": "0.0.0",
-    "private": true,
+    "name": "@graints/vite-plugin",
+    "version": "0.1.1",
+    "description": "Vite plugin that compiles .grain components",
+    "license": "MIT",
     "type": "module",
-    "main": "./index.ts",
-    "types": "./index.ts"
+    "main": "./dist/vite-plugin/index.js",
+    "types": "./dist/vite-plugin/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./dist/vite-plugin/index.d.ts",
+            "default": "./dist/vite-plugin/index.js"
+        }
+    },
+    "files": ["dist"],
+    "scripts": {
+        "build": "tsc -p ."
+    },
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org"
+    },
+    "peerDependencies": {
+        "vite": ">=6"
+    },
+    "dependencies": {
+        "@typescript-eslint/typescript-estree": "^8.71.0",
+        "css-tree": "^3.2.1",
+        "typescript": ">=5.0.0"
+    }
 }

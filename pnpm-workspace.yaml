@@ -3,3 +3,6 @@ packages:
   - "packages/*"
 allowBuilds:
   esbuild: true
+  # 打包 / 发布 vscode 扩展用的
+  "@vscode/vsce-sign": true
+  keytar: true
