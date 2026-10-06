@@ -3,6 +3,23 @@
 
 Grain is a framework that prioritizes TypeScript. You don't need a `lang="ts"` attribute on your `<script>` tags.
 
+# Getting started
+Scaffold a project with `@graints/create-grain` (`packages/create-grain`), then start the dev server:
+
+```sh
+npx @graints/create-grain my-app
+# or, inside this repository — links the local packages instead of the published ones
+pnpm create-grain my-app
+
+cd my-app
+pnpm install
+pnpm dev
+```
+
+Templates: `basic` (default — `App.grain` + a child component, covering `$state`, `{#if}` / `{#for}`, `bind:value`, `bind:this` with `<script onmount>`, `$props` / `$bindable` and component `<style>`) and `minimal` (one file).
+
+Every project ships `src/grain.d.ts`, which declares `$state`, `$props`, `$bindable` and the `*.grain` module type; the VS Code extension injects the same declarations for the editor.
+
 # How reactivity works in Grain
 Grain does most work during compile time. Grain compiles reactive variable through analyzing dependencies during compile time and generating the reactive code there. For example, the following code:
 ```grain

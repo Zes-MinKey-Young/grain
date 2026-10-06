@@ -1,0 +1,22 @@
+<script>
+    // `$bindable` makes `value` writable from here even though the parent owns it —
+    // the parent writes `bind:value={count}` and both sides stay in sync
+    let { value = $bindable(0) } = $props<{ value: number }>();
+
+    // writes to `value` are rewritten by the compiler, so they go through the
+    // binding (and back to the parent). Keep them in a named function — an inline
+    // arrow is copied verbatim and the rewrite never happens.
+    function bump() {
+        value += 1;
+    }
+</script>
+
+<button onclick={bump}>
+    clicked {value} times
+</button>
+
+<style>
+    button {
+        padding: 0.3rem 0.75rem;
+    }
+</style>

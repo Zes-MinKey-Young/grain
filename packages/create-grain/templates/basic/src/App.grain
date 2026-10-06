@@ -1,0 +1,68 @@
+<script>
+    import Counter from './Counter.grain';
+
+    let count = $state(0);
+    let draft = $state('');
+    let items: string[] = $state([]);
+
+    function add() {
+        if (draft === '') return;
+
+        items.push(draft);
+        draft = '';
+    }
+</script>
+
+<script onmount>
+    // `input` is declared by `bind:this` below — this is the only block that can see it
+    input.focus();
+    input.placeholder = 'type something, then press add';
+</script>
+
+<main>
+    <h1>{{title}}</h1>
+
+    <Counter bind:value={count} />
+    <p>the parent sees {count}</p>
+
+    <p class="row">
+        <input bind:this={input} bind:value={draft} />
+        <button onclick={add}>add</button>
+    </p>
+
+    {#if items.length > 0}
+        <ul>
+            {#for item of items}
+                <li>{item}</li>
+            {/for}
+        </ul>
+    {:else}
+        <p class="empty">nothing here yet</p>
+    {/if}
+</main>
+
+<style>
+    main {
+        font-family: system-ui, sans-serif;
+        margin: 2rem auto;
+        max-width: 32rem;
+    }
+
+    h1 {
+        font-size: 1.25rem;
+    }
+
+    .row {
+        display: flex;
+        gap: 0.5rem;
+    }
+
+    input {
+        flex: 1;
+        padding: 0.3rem 0.5rem;
+    }
+
+    .empty {
+        color: #888;
+    }
+</style>

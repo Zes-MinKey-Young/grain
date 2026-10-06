@@ -1,0 +1,22 @@
+{
+    "name": "@graints/create-grain",
+    "version": "0.1.0",
+    "description": "Scaffold a new Grain project",
+    "license": "MIT",
+    "type": "module",
+    "keywords": ["grain", "scaffold", "template", "vite"],
+    "bin": {
+        "create-grain": "./index.mjs"
+    },
+    "publishConfig": {
+        "access": "public",
+        "registry": "https://registry.npmjs.org"
+    },
+    "files": [
+        "index.mjs",
+        "templates"
+    ],
+    "engines": {
+        "node": ">=18"
+    }
+}

@@ -3,6 +3,8 @@
   "private": true,
   "scripts": {
     "example": "node scripts/example.mjs",
+    "create-grain": "node packages/create-grain/index.mjs",
+    "packages:build": "pnpm --filter @graints/runtime build && pnpm --filter @graints/vite-plugin build",
     "vscode:build": "pnpm --filter grain-vscode build",
     "vscode:watch": "pnpm --filter grain-vscode watch",
     "vscode:package": "pnpm --filter grain-vscode package",
