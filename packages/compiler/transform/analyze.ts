@@ -1,5 +1,7 @@
-import { simpleTraverse } from '@typescript-eslint/typescript-estree';
+import estree from '@typescript-eslint/typescript-estree';
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
+
+const { simpleTraverse } = estree;
 
 
 import type { TSProgram } from '../types.js';

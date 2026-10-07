@@ -1,4 +1,7 @@
-import { type TSESTreeOptions, parse as parse_ts } from '@typescript-eslint/typescript-estree';
+import estree from '@typescript-eslint/typescript-estree';
+import type { TSESTreeOptions } from '@typescript-eslint/typescript-estree';
+
+const { parse: parse_ts } = estree;
 import { ParseError } from '../errors.js';
 import type { RawScript, Script, TSProgram } from '../types.js';
 import { error_range } from '../utils.js';

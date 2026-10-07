@@ -71,6 +71,19 @@ declare module "*.grain" {
 export const VIRTUAL_EXPORT = `declare const __grain_component: GrainComponent;
 export default __grain_component;`;
 
+/**
+ * 磁盘上的 `.grain` -> 虚拟 `.ts` 内容。
+ *
+ * 由 analysis 那边注入（只有它知道怎么把 SFC 铺成虚拟文件），这里只是
+ * 在语言服务问起一个**还没在编辑器里打开过**的文件时临时补上 ——
+ * tsconfig 的 `paths` 指向的文件经常是没打开过的，不补就解析不到。
+ */
+let virtual_provider: ((grain_file: string) => string | null | undefined) | null = null;
+
+export function set_virtual_provider(provider: typeof virtual_provider): void {
+    virtual_provider = provider;
+}
+
 let options: TS.CompilerOptions | null = null;
 /** 当前生效的 tsconfig 路径（按它判断要不要重建语言服务） */
 let tsconfig_path: string | null = null;
@@ -303,11 +316,39 @@ export interface SemanticProblem {
 class TypeScriptService {
     private contents = new Map<string, string>();
     private versions = new Map<string, number>();
+    /** 没打开过的 .grain 临时编出来的虚拟文件，按修改时间决定要不要重编 */
+    private lazy = new Map<string, { text: string; mtime: number }>();
     private service: TS.LanguageService | null = null;
 
     constructor() {
         this.contents.set(GRAIN_TYPES, GRAIN_TYPE_SOURCE);
         this.versions.set(GRAIN_TYPES, 1);
+    }
+
+    /**
+     * 一个 `Foo.grain.ts`（我们给语言服务的虚拟文件名）对应的 SFC 在磁盘上，
+     * 但编辑器没打开过它 —— 现场编一份出来。
+     *
+     * tsconfig 里 `paths` 指向的文件基本都是这种情况，不补就直接
+     * "Cannot find module"。
+     */
+    private lazy_virtual(file: string): string | undefined {
+        if (!file.endsWith('.grain.ts') || this.contents.has(file) || !virtual_provider) return undefined;
+
+        const grain = file.slice(0, -'.ts'.length);
+        if (!get_ts().sys.fileExists(grain)) return undefined;
+
+        const mtime = Math.floor((get_ts().sys.getModifiedTime?.(grain)?.getTime() ?? 0) / 1000);
+        const cached = this.lazy.get(file);
+
+        if (cached && cached.mtime === mtime) return cached.text;
+
+        const text = virtual_provider(grain);
+        if (text === null || text === undefined) return undefined;
+
+        this.lazy.set(file, { text, mtime });
+
+        return text;
     }
 
     private host(): TS.LanguageServiceHost {
@@ -317,9 +358,17 @@ class TypeScriptService {
 
         return {
             getScriptFileNames: () => [...contents.keys()],
-            getScriptVersion: (file) => String(versions.get(file) ?? 1),
+            getScriptVersion: (file) => {
+                const own = versions.get(file);
+                if (own !== undefined) return String(own);
+
+                // 临时编出来的那些：按磁盘上的修改时间当版本号，改了才会重新编
+                const mtime = ts.sys.getModifiedTime?.(file.slice(0, -'.ts'.length))?.getTime();
+
+                return mtime ? String(Math.floor(mtime / 1000)) : '1';
+            },
             getScriptSnapshot: (file) => {
-                const content = contents.get(file);
+                const content = contents.get(file) ?? this.lazy_virtual(file);
 
                 if (content !== undefined) return ts.ScriptSnapshot.fromString(content);
                 if (!ts.sys.fileExists(file)) return undefined;
@@ -329,8 +378,9 @@ class TypeScriptService {
             getCurrentDirectory: () => ts.sys.getCurrentDirectory(),
             getCompilationSettings: () => get_options(),
             getDefaultLibFileName: (settings) => ts.getDefaultLibFilePath(settings),
-            fileExists: (file) => contents.has(file) || ts.sys.fileExists(file),
-            readFile: (file) => contents.get(file) ?? ts.sys.readFile(file),
+            fileExists: (file) =>
+                contents.has(file) || this.lazy_virtual(file) !== undefined || ts.sys.fileExists(file),
+            readFile: (file) => contents.get(file) ?? this.lazy_virtual(file) ?? ts.sys.readFile(file),
             readDirectory: (...args) => ts.sys.readDirectory(...args),
             directoryExists: (dir) => ts.sys.directoryExists(dir),
             getDirectories: (dir) => ts.sys.getDirectories(dir)
@@ -339,6 +389,18 @@ class TypeScriptService {
 
     private get(): TS.LanguageService {
         return (this.service ??= get_ts().createLanguageService(this.host()));
+    }
+
+    /**
+     * 解析一个 import 说明符，按当前编译选项来 —— 所以 tsconfig 的 `paths` 也认。
+     *
+     * 宿主要用我们自己的（认得虚拟文件），否则 `./Foo.grain` 解析不到 `Foo.grain.ts`。
+     * 返回的是虚拟文件路径，要真实文件的话用 `real_name()` 转一下。
+     */
+    resolve_module(specifier: string, from: string): string | null {
+        const resolved = get_ts().resolveModuleName(specifier, from, get_options(), this.host());
+
+        return resolved.resolvedModule?.resolvedFileName ?? null;
     }
 
     /** 丢掉已建好的语言服务，下次用到时按新配置重建 */

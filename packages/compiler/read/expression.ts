@@ -1,4 +1,6 @@
-import { parse as parse_ts } from '@typescript-eslint/typescript-estree';
+import estree from '@typescript-eslint/typescript-estree';
+
+const { parse: parse_ts } = estree;
 import { ParseError } from '../errors.js';
 import type {
     BindingValue,

@@ -3,11 +3,11 @@ import * as vscode from 'vscode';
 import type { Analysis } from './analysis.js';
 import { update_diagnostics } from './diagnostics.js';
 import { register_providers, SELECTOR } from './providers.js';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 import { log, set_debug } from './log.js';
-import { forget_tsconfig, use_tsconfig } from './typescript.js';
+import { forget_tsconfig, set_virtual_provider, use_tsconfig } from './typescript.js';
 
 /** 缓存的分析连带它当时的文档版本：版本对不上就说明文档又改过了，这份不能再用 */
 const analyses = new Map<string, { analysis: Analysis; version: number }>();
@@ -175,6 +175,18 @@ async function show_compiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Pro
 export function activate(context: vscode.ExtensionContext): void {
     // 无条件的：用来确认扩展到底有没有激活（「输出 → Grain」里看）
     log('extension activated', 'version', String(context.extension.packageJSON?.version ?? '?'));
+
+    // 语言服务要解析一个没打开过的 .grain（tsconfig 的 `paths` 经常指向这种文件）时，
+    // 由这里临时编一份虚拟文件给它
+    set_virtual_provider((file) => {
+        try {
+            return get_analysis_module().analyze(readFileSync(file, 'utf8'), file).virtual_text();
+        } catch (error) {
+            log('virtual provider failed', file, String(error));
+
+            return null;
+        }
+    });
 
     const collection = vscode.languages.createDiagnosticCollection('grain');
     context.subscriptions.push(collection);

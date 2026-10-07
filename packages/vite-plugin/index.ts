@@ -3,7 +3,17 @@ import { dirname, resolve } from 'node:path';
 
 import type { Plugin } from 'vite';
 
-import { compile, parse, type CompileOptions, type CompileResult, type Root } from '../compiler/index.js';
+import {
+    compile,
+    nearest_tsconfig,
+    parse,
+    read_paths,
+    resolve_alias,
+    type CompileOptions,
+    type CompileResult,
+    type PathConfig,
+    type Root
+} from '../compiler/index.js';
 
 /**
  * 组件里的 `<style>` 通过虚拟模块交给 Vite 的 CSS 管线：
@@ -75,6 +85,8 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
     // transform（JS）和 load（CSS）会各编译一次同一个文件，按内容缓存掉
     const cache = new Map<string, CompileResult>();
     let is_dev = false;
+    /** tsconfig 的 `paths`；Vite 自己那套认不了 `.grain`，这里补上 */
+    let paths: PathConfig | null = null;
 
     const is_grain = (file: string) => extensions.some((extension) => file.endsWith(extension));
 
@@ -103,8 +115,23 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         name: 'grain',
         enforce: 'pre',
 
+        // Vite 认 tsconfig 的 `paths`，但默认是关的（resolve.tsconfigPaths）。
+        // 项目里 alias 很常用，这里替用户打开；自己设过就听他的
+        config(config) {
+            return {
+                resolve: {
+                    ...config.resolve,
+                    tsconfigPaths: config.resolve?.tsconfigPaths ?? true
+                }
+            };
+        },
+
         configResolved(config) {
             is_dev = config.command === 'serve';
+
+            const tsconfig = nearest_tsconfig(config.root);
+
+            paths = tsconfig ? read_paths(tsconfig) : null;
         },
 
         // 虚拟模块
@@ -125,14 +152,18 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
             return null;
         },
 
-        // 虚拟模块不需要 Vite 去文件系统里找
         resolveId(id, importer) {
             const { file, queries } = split_id(id);
-            if (!queries.includes(AST_QUERY) || !is_grain(file)) return null;
 
-            return importer && id.startsWith('.')
-                ? `${resolve(dirname(importer), file)}?${AST_QUERY}`
-                : id;
+            // 虚拟模块不需要 Vite 去文件系统里找
+            if (queries.includes(AST_QUERY) && is_grain(file)) {
+                return importer && id.startsWith('.')
+                    ? `${resolve(dirname(importer), file)}?${AST_QUERY}`
+                    : id;
+            }
+
+            // tsconfig 的 `paths`：`@/Foo.grain` 这种，Vite 的内置支持到不了未知扩展名
+            return resolve_alias(id, paths);
         },
 
         // `<file>.grain` -> JS 模块。

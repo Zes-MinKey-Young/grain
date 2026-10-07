@@ -2,6 +2,8 @@ export { Parser, parse, parse_root, type ParseOptions } from './parser.js';
 export { ParseError } from './errors.js';
 export { scan_script, scan_expression, scan_style, type ScanResult } from './scan.js';
 export { check_bindings } from './check.js';
+export { nearest_tsconfig, read_paths, resolve_alias } from './tsconfig.js';
+export type { PathAlias, PathConfig } from './tsconfig.js';
 export { split_for_header } from './template.js';
 export { parse_expression, parse_expressions, parse_for_of } from './read/expression.js';
 export { parse_script } from './read/script.js';

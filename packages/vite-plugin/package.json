@@ -26,6 +26,6 @@
     "dependencies": {
         "@typescript-eslint/typescript-estree": "^8.71.0",
         "css-tree": "^3.2.1",
-        "typescript": ">=5.0.0"
+        "typescript": ">=5.0.0 <7.0.0"
     }
 }

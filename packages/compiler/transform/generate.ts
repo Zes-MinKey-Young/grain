@@ -1,5 +1,7 @@
-import { simpleTraverse } from '@typescript-eslint/typescript-estree';
+import estree from '@typescript-eslint/typescript-estree';
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
+
+const { simpleTraverse } = estree;
 
 import type {
     AttributeValue,
@@ -12,7 +14,11 @@ import type {
     Script,
     TemplateNode
 } from '../types.js';
-import { transpileModule, ModuleKind, ScriptTarget } from 'typescript';
+// npm 上的 typescript 是 CommonJS：ESM 里具名导入它，Node 认不出具名导出
+// （打包工具会替我们转换，但发布出去的 dist 是直接被 Node 加载的）
+import ts from 'typescript';
+
+const { transpileModule, ModuleKind, ScriptTarget } = ts;
 
 import {
     analyze_script,

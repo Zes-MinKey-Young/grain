@@ -57,6 +57,32 @@ prop hints inside `.grain` files.
 there is no declaration file to copy into your project. The extension injects the same
 declarations for the editor.
 
+## Path aliases
+
+`tsconfig.json` 里的 `paths` 两边都认：
+
+```json
+{
+    "compilerOptions": {
+        "baseUrl": ".",
+        "paths": { "@/*": ["src/*"] }
+    }
+}
+```
+
+```grain
+<script>
+    import Counter from '@/Counter.grain';
+</script>
+```
+
+- **编辑器**：`paths` 会喂给语言服务，alias 指向的文件就算从没打开过也会被临时载入，
+  所以跳转、补全、组件属性提示都正常
+- **构建**：Vite 自带 `resolve.tsconfigPaths`，但它认不了 `.grain` 这种扩展名，
+  所以插件自己按 tsconfig 又解析了一遍
+
+`paths` 是启动时读的，改完 tsconfig 要重启 dev server。
+
 # How reactivity works in Grain
 Grain does most work during compile time. Grain compiles reactive variable through analyzing dependencies during compile time and generating the reactive code there. For example, the following code:
 ```grain

@@ -14,6 +14,7 @@ import { log } from './log.js';
 import {
     build_virtual,
     typescript_service,
+    real_name,
     virtual_name,
     VIRTUAL_EXPORT,
     type CompletionDetail,
@@ -66,6 +67,8 @@ export interface ElementInfo {
 export interface Analysis {
     root: Root | null;
     error: ParseError | null;
+    /** 虚拟文件当前的内容；语言服务临时加载别的文件时要它 */
+    virtual_text(): string;
     /** script（含 module）顶层的声明，补全用 */
     declarations: Map<string, Declaration>;
     /** 所有层级的声明（含函数内部），script 里 hover / 跳转用 */
@@ -718,7 +721,14 @@ function imported_components(script: Script | null, filename: string): Map<strin
 
         if (!binding?.local?.name) continue;
 
-        components.set(binding.local.name, component_props_at(resolve(dirname(filename), specifier)));
+        // 交给 TS 解析（自己的话拼不出 tsconfig 里 `paths` 映射过的路径）；
+        // 解析不到再退回按相对路径猜一次
+        const target = typescript_service.resolve_module(specifier, virtual_name(filename));
+
+        components.set(
+            binding.local.name,
+            component_props_at(target ? real_name(target) : resolve(dirname(filename), specifier))
+        );
     }
 
     return components;
@@ -903,13 +913,18 @@ export function analyze(source: string, filename: string): Analysis {
         cursor = to;
     }
 
-    typescript_service.update(virtual, build_virtual(source, scripts, regions, tail_lines.join('\n')));
+    const virtual_text = build_virtual(source, scripts, regions, tail_lines.join('\n'));
+
+    typescript_service.update(virtual, virtual_text);
 
     return {
         root,
         error,
         declarations,
         all,
+
+        /** 虚拟文件当前的内容；语言服务要临时加载别的文件时用它 */
+        virtual_text: () => virtual_text,
 
         expression_at(offset: number): Expression | null {
             return (
