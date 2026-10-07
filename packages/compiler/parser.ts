@@ -1,7 +1,7 @@
 import { check_bindings } from './check.js';
 import { ParseError } from './errors.js';
 import { expand_macros, type MacroReparse } from './macro.js';
-
+import { find_nodes } from './nodes.js';
 import { parse_expressions } from './read/expression.js';
 import { parse_script } from './read/script.js';
 import { parse_style } from './read/style.js';
@@ -80,6 +80,7 @@ export class Parser {
             expanded: '',
             replacements: [],
             macros: [],
+            nodes: [],
             template: root.template as Template<TemplateNode>
         };
 
@@ -102,6 +103,9 @@ export class Parser {
         result.expanded = run.appended;
         result.replacements = run.replacements;
         result.macros = run.macros;
+
+        // `$node(...)`：宏展开之后再找（它的参数里可能就用了宏）
+        result.nodes = find_nodes(result, this.source, reparse);
 
         // 都解析完了才检查 `bind:value={ ... }` 里那三个函数的形状
         check_bindings(result);

@@ -20,6 +20,9 @@ import ts from 'typescript';
 
 const { transpileModule, ModuleKind, ScriptTarget } = ts;
 
+import { parse_inline } from '../nodes.js';
+import { ParseError } from '../errors.js';
+
 import {
     analyze_script,
     collect_reads,
@@ -492,6 +495,16 @@ class Generator {
     private refresh_names = new Map<string, string>();
     /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
     private pending_refreshes: Array<{ name: string; deps: Set<string> }> = [];
+    /** 刷新函数开头要跑的赋值（`$node` 的重算） */
+    private refresh_assigns = new Map<string, string>();
+    /** `$node`：源变量 -> 重算它的刷新函数 */
+    private node_triggers: Array<{ refresh: string; deps: Set<string> }> = [];
+    /** `$node` 的变量名 -> 读写对 / 刷新函数（写入改写要用） */
+    private node_pairs = new Map<string, { pair: string; refresh: string; set: boolean }>();
+    /** `$node` 变量的写入改写（事件处理器复制函数体时也要应用） */
+    private node_write_edits: Edit[] = [];
+    /** `$node` 的订阅：等元素建好再挂 */
+    private node_listens: Array<{ pair: string; refresh: string }> = [];
 
 
     constructor(
@@ -561,6 +574,14 @@ class Generator {
         if (listen_slots.length > 0) instance.push('', ...listen_slots);
 
         instance.push('', '/* template */', ...this.statements);
+
+        // `$node` 的订阅：元素建好之后才挂（刷新函数要用到它们）
+        if (this.node_listens.length > 0) {
+            instance.push(
+                '',
+                ...this.node_listens.map((item) => `${item.pair}.listen?.(${item.refresh});`)
+            );
+        }
 
         // 监听本身等元素都建好再挂：同一总线 + 同一事件只挂一次，谓词合并成 if 树
         const listens = this.listen_registrations();
@@ -670,7 +691,13 @@ class Generator {
         this.bindable_edits = this.bindable_writes(block, bindables);
         edits.push(...this.bindable_edits);
 
-        // 5. 读写对的声明，插在 `let { ... } = $props()` 之后
+        // 5. `$node(...)` -> 读写对 + 变量；它的写入走 setter（没有 `set` 就报错）
+        edits.push(...this.node_declarations(block));
+
+        this.node_write_edits = this.node_writes(block);
+        edits.push(...this.node_write_edits);
+
+        // 6. 读写对的声明，插在 `let { ... } = $props()` 之后
         for (const bindable of bindables) {
             const { start, end } = { start: bindable.statement_end, end: bindable.statement_end };
 
@@ -791,9 +818,138 @@ class Generator {
     private refresh_statements(): string[] {
         return this.pending_refreshes.map((refresh) => {
             const updates = this.update_calls(refresh.deps);
+            // `$node` 的刷新函数：先重算这个节点
+            const assign = this.refresh_assigns.get(refresh.name) ?? '';
 
-            return `function ${refresh.name}() {${updates ? ` ${updates}` : ' '}}`;
+            return `function ${refresh.name}() {${assign ? ` ${assign}` : ''}${updates ? ` ${updates}` : ' '}}`;
         });
+    }
+
+    /**
+     * `$node` 变量的写入：有 `set` 就走 setter，没有就报错——单向就是单向。
+     *
+     * ```js
+     * shown = 'x';   // ->  shown = __node$1.set('x'); __refresh$2();
+     * shown++;       // ->  shown = __node$1.set(shown + 1); __refresh$2();
+     * ```
+     */
+    private node_writes(block: Script): Edit[] {
+        if (this.node_pairs.size === 0) return [];
+
+        const edits: Edit[] = [];
+
+        for (const statement of block.content.body) {
+            simpleTraverse(statement as unknown as TSESTree.Node, {
+                enter: (node, parent) => {
+                    const target =
+                        node.type === 'AssignmentExpression' && node.left.type === 'Identifier'
+                            ? node.left.name
+                            : node.type === 'UpdateExpression' && node.argument.type === 'Identifier'
+                              ? node.argument.name
+                              : null;
+
+                    if (!target) return;
+
+                    const entry = this.node_pairs.get(target);
+                    if (!entry) return;
+
+                    if (!entry.set) {
+                        throw new ParseError(
+                            `\`${target}\` is a one-way \`$node\` — give it a \`set\` to write through it`,
+                            node.range[0],
+                            node.range[1]
+                        );
+                    }
+
+                    let value: string;
+
+                    if (node.type === 'UpdateExpression') {
+                        value = `${target} ${node.operator === '++' ? '+' : '-'} 1`;
+                    } else {
+                        const right = (node as TSESTree.AssignmentExpression).right;
+
+                        value = this.source.slice(right.range[0], right.range[1]);
+                    }
+
+                    const assign = `${target} = ${entry.pair}.set(${value})`;
+
+                    if (parent?.type === 'ExpressionStatement') {
+                        edits.push({
+                            start: parent.range[0],
+                            end: parent.range[1],
+                            text: `${assign}; ${entry.refresh}();`
+                        });
+
+                        return;
+                    }
+
+                    // 塞在表达式里的写入展开不成语句，用逗号
+                    edits.push({
+                        start: node.range[0],
+                        end: node.range[1],
+                        text: `(${assign}, ${entry.refresh}())`
+                    });
+                }
+            });
+        }
+
+        return edits;
+    }
+
+    /**
+     * `$node(...)`：声明换成读写对，变量名照旧。
+     *
+     * 变量还是个普通变量（`{doubled}` 照常读它），刷新函数负责"重算 + 刷依赖它的片段"，
+     * 所以源变量一变就调那个刷新函数（见 `update_calls`）。
+     */
+    private node_declarations(block: Script): Edit[] {
+        const edits: Edit[] = [];
+
+        const nodes = this.root.nodes.filter(
+            (node) => node.statement[0] >= block.contentStart && node.statement[1] <= block.contentEnd
+        );
+
+        for (const node of nodes) {
+            const pair = `__node$${this.counter++}`;
+            const refresh = `__refresh$${this.counter++}`;
+            // 没有 `get` 时值由 listener 推，得有个地方放
+            const current = node.get ? null : `__current$${this.counter++}`;
+
+            const parts: string[] = [node.get ? `get: ${node.get}` : `get: () => ${current}`];
+
+            if (node.set) parts.push(`set: ${node.set}`);
+            if (node.active) parts.push('active: true');
+
+            if (node.listen) {
+                parts.push(
+                    current
+                        ? `listen: (__update) => (${node.listen})((__value) => { if (__value !== undefined) ${current} = __value; __update(); })`
+                        : `listen: ${node.listen}`
+                );
+            }
+
+            // 订阅等元素都建好再挂（见 instance 里的 node_listens）——
+            // 这时候调的话，刷新函数里引用的 update$N 还没声明
+            this.node_listens.push({ pair, refresh });
+
+            const lines = [
+                ...(current ? [`let ${current};`] : []),
+                `const ${pair} = { ${parts.join(', ')} };`,
+                `let ${node.name} = ${pair}.get();`
+            ];
+
+            edits.push({ start: node.statement[0], end: node.statement[1], text: lines.join('\n') });
+
+            this.node_pairs.set(node.name, { pair, refresh, set: Boolean(node.set) });
+
+            const deps = node.get ? collect_reads(parse_inline(node.get)) : new Set<string>();
+
+            this.pending_refreshes.push({ name: refresh, deps: new Set([node.name]) });
+            this.refresh_assigns.set(refresh, `${node.name} = ${pair}.get();`);
+            this.node_triggers.push({ refresh, deps });
+        }
+
+        return edits;
     }
 
 
@@ -801,9 +957,12 @@ class Generator {
     private body_source(range: [number, number]): string {
         const [from, to] = range;
 
-        if (this.bindable_edits.length === 0) return this.source.slice(from, to);
+        // `$bindable` 的写入改写、`$node` 的写入改写，都算进去
+        const edits = [...this.bindable_edits, ...this.node_write_edits];
 
-        const inside = this.bindable_edits.filter((edit) => edit.start >= from && edit.end <= to);
+        if (edits.length === 0) return this.source.slice(from, to);
+
+        const inside = edits.filter((edit) => edit.start >= from && edit.end <= to);
 
         return apply_edits(this.source.slice(from, to), inside, from);
     }
@@ -964,6 +1123,11 @@ class Generator {
         for (const [update, indices] of grouped) {
             indices.sort((a, b) => a - b);
             calls.push(`${update}(${indices.join(', ')});`);
+        }
+
+        // `$node` 的源变量变了：重算那个节点，再由它刷自己的片段
+        for (const trigger of this.node_triggers) {
+            if (intersects(trigger.deps, writes)) calls.push(`${trigger.refresh}();`);
         }
 
         return calls.join(' ');

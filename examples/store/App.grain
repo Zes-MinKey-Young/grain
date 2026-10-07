@@ -2,6 +2,9 @@
     import { name } from './store';
     import Box from './Box.grain';
 
+    // 派生：store 变了它重算。编译器看不见这层依赖，所以要给它一个 listen
+    const upper = $node({ get: () => name.get().toUpperCase(), listen: (update) => name.subscribe(update) });
+
     function reset() {
         name.set('ada');
     }
@@ -17,6 +20,9 @@
 
 <h2>Same store, from another component</h2>
 <Box />
+
+<h2>Derived in the script ($node)</h2>
+<p>Upper: {upper}</p>
 
 <p>
     <button onclick={reset}>reset</button>

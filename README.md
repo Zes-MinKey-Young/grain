@@ -413,6 +413,37 @@ Give `get` and the value comes from it; leave it out and the value comes from th
 (`subscribe` calls back with the current value right away). A binding value cannot be mixed
 into text — it has to be the whole value.
 
+## $node: derived values in `<script>`
+
+`$node` declares a derived value. Its argument is a **binding value** — the same syntax as an
+attribute or a template interpolation, even though it looks like a TypeScript object:
+
+```grain
+<script>
+    let count = $state(0);
+
+    const doubled = $node({ get: () => count * 2 });                         // one-way
+    const tripled = $node(count * 3);                                        // short form, one-way
+    const shown   = $node({ get: () => name.get(), set: (v) => name.set(v) }); // two-way
+    const pushed  = $node({ listen: (update) => name.subscribe(update) });     // value from listen
+</script>
+```
+
+- **`set` decides the direction.** With it, `shown = x` goes through the setter; without it, writing
+  to the variable is a compile error — one-way means one-way
+- **`get` is optional.** Missing it, the value comes from `listen` (`subscribe` calls back with the
+  current value right away), exactly like a one-way attribute. Neither `get` nor `listen` is an error
+- **`active` has to be written `active: true`**, so the argument stays valid TypeScript
+- **Compile-time only.** No object survives into the output — just a getter/setter pair plus a
+  function that recomputes the variable and refreshes whatever reads it
+
+`listen` on a `$node` only triggers a recompute; the value always comes from `get`. So a `$node`
+whose source is a store needs a `listen` — the compiler cannot see that dependency:
+
+```grain
+const upper = $node({ get: () => name.get().toUpperCase(), listen: (update) => name.subscribe(update) });
+```
+
 ## bind:this
 `bind:this` hands you the element itself instead of one of its properties.
 

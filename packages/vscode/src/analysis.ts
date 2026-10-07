@@ -950,6 +950,15 @@ export function analyze(source: string, filename: string): Analysis {
         ...loops.map((name) => `declare let ${name}: any;`),
         // 内置宏：不用定义也不用 import，但补全和"找得到这个名字"要有
         'declare function $store<T>(store: { subscribe(listener: (value: T) => void): unknown; set(next: T): T }): void;',
+        // `$node`：编译期的派生节点。
+        // 第一条最常用：`get` 的返回类型就是这个变量的类型，顺带给 `listen` 的
+        // update 一个上下文类型（否则它会报 implicit any）；
+        // 第二条是"只有 listen"的形态（值由它推，类型说不出来）；
+        // 第三条是纯表达式。
+        'declare function $node<T>(value: { get: () => T; set?: (value: any) => any; listen?: (update: (value?: any) => void) => void; active?: boolean }): T;',
+        // `get?: undefined` 是刻意的：这样只有真的没写 `get` 时才会落到这条（否则会被第一条抢先）
+        'declare function $node(value: { get?: undefined; listen: (update: (value?: any) => void) => void; set?: (value: any) => any; active?: boolean }): any;',
+        'declare function $node<T>(value: T): T;',
 
         // 只补 bind:this **自己声明**的变量；script 里已有的不重复声明
         ...this_bindings

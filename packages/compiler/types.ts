@@ -292,12 +292,35 @@ export interface Root extends Position {
     replacements: MacroReplacement[];
     /** 这个组件里用过的宏（编辑器用） */
     macros: MacroUse[];
+    /** `<script>` 里的 `$node(...)` */
+    nodes: NodeDecl[];
 }
 
 /** 宏在 script 里展开出来的一段替换 */
 export interface MacroReplacement extends Position {
     /** 展开后的代码 */
     text: string;
+}
+
+/**
+ * `$node({ ... })` / `$node(expr)`：`<script>` 里的一个派生节点。
+ *
+ * 规则跟属性 / 模板插值的绑定值完全一样（那是 grain 的语法，不是 TS 对象字面量）：
+ * 有 `set` 就是双向，没有就是单向；没有 `get` 时值由 `listen` 推。
+ * 纯编译期——产物里不会留下这个对象。
+ */
+export interface NodeDecl {
+    /** 变量名 */
+    name: string;
+    /** 整条声明语句 */
+    statement: [number, number];
+    /** `get` 的源码；没有就是"值由 listener 推" */
+    get: string | null;
+    /** `set` 的源码：有它才是双向 */
+    set: string | null;
+    /** `listen` 的源码 */
+    listen: string | null;
+    active: boolean;
 }
 
 /**
