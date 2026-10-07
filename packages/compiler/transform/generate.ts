@@ -300,6 +300,63 @@ function escape_template(text: string): string {
     return text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 }
 
+function is_identifier(text: string): boolean {
+    return /^[A-Za-z_$][\w$]*$/.test(text);
+}
+
+/** 子树里有没有用到这些变量 */
+function mentions(node: TSESTree.Node, names: Set<string>): boolean {
+    let found = false;
+
+    simpleTraverse(node, {
+        enter: (child) => {
+            if (child.type === 'Identifier' && names.has(child.name)) found = true;
+        }
+    });
+
+    return found;
+}
+
+/**
+ * 这些变量在 `node` 里的写入是不是**全是赋值**。
+ *
+ * `x = v`、`x += v`、`x++` 用"新旧值比一比"就知道有没有变；
+ * 但 `arr.push(v)` 改的是引用里面的内容，变量本身一直相等 ——
+ * 有这种写法就别加比较，老老实实刷新，否则列表永远不会更新。
+ */
+function writes_are_assignments(node: TSESTree.Node, names: Set<string>): boolean {
+    if (names.size === 0) return false;
+
+    let plain = true;
+
+    simpleTraverse(node, {
+        enter: (child) => {
+            if (child.type === 'CallExpression') {
+                const object = child.callee.type === 'MemberExpression' ? child.callee.object : null;
+
+                if (object?.type === 'Identifier' && names.has(object.name)) plain = false;
+
+                return;
+            }
+
+            if (child.type === 'AssignmentExpression') {
+                // 给别的变量赋值无所谓；目标变量被赋成别的东西（obj.x、[a]）就算不了
+                if (child.left.type === 'Identifier' && names.has(child.left.name)) return;
+                if (mentions(child.left, names)) plain = false;
+
+                return;
+            }
+
+            if (child.type === 'UpdateExpression') {
+                if (child.argument.type === 'Identifier' && names.has(child.argument.name)) return;
+                if (mentions(child.argument, names)) plain = false;
+            }
+        }
+    });
+
+    return plain;
+}
+
 class Generator {
     private statements: string[] = [];
     private slots: Slot[] = [];
@@ -310,11 +367,13 @@ class Generator {
      */
     private pending_binds: Array<{
         name: string;
-        render: (updates: string) => string;
+        /** `names` 是这次写入涉及到的响应式变量，用来生成"值没变就不刷新"的判断 */
+        render: (updates: string, names: string[]) => string;
         writes: Set<string>;
     }> = [];
     private counter = 0;
     private wrapper_counter = 0;
+    private prev_counter = 0;
     private root_name = 'update$0';
     /** `$bindable` 声明的双向绑定 prop */
     private bindables: BindableInfo[] = [];
@@ -528,7 +587,7 @@ class Generator {
      * a++;
      * // ->
      * if (__binding$a.external) __binding$a.set(a + 1);        // 受控：值归父组件管，只推过去
-     * else { a = a + 1; __refresh$a(); }                        // 非受控：binding 不掺和，自己改自己刷
+     * else { const __next$1 = a + 1; if (__next$1 !== a) { a = __next$1; __refresh$a(); } }
      * ```
      */
     private bindable_writes(block: Script, bindables: BindableInfo[]): Edit[] {
@@ -536,6 +595,7 @@ class Generator {
 
         const by_name = new Map(bindables.map((bindable) => [bindable.name, bindable]));
         const edits: Edit[] = [];
+        let next_counter = 0;
 
         /** 每个变量一个"刷新依赖它的片段"的函数，片段收集完之后才生成 */
         const refresh_of = (name: string): string => {
@@ -592,14 +652,17 @@ class Generator {
 
                 const { name, value, binding } = write;
 
-                // 赋值语句：展开成 if / else 两条路
+                // 赋值语句：展开成 if / else 两条路。
+                // 非受控那一路比一下新旧值 —— 值没变就别刷新（受控那一路交给父组件的 setter 比）
                 if (parent?.type === 'ExpressionStatement') {
+                    const next = `__next$${++next_counter}`;
+
                     edits.push({
                         start: parent.range[0],
                         end: parent.range[1],
                         text:
                             `if (${binding}.external) ${binding}.set(${value}); ` +
-                            `else { ${name} = ${value}; ${refresh_of(name)}(); }`
+                            `else { const ${next} = ${value}; if (${next} !== ${name}) { ${name} = ${next}; ${refresh_of(name)}(); } }`
                     });
 
                     return;
@@ -646,7 +709,8 @@ class Generator {
         for (const wrapper of this.wrappers) {
             const node = wrapper.node;
             const params = node.params.map((param) => this.slice(param.range)).join(', ');
-            const updates = this.update_calls(this.reactive_writes(wrapper.writes));
+            const reactive = [...this.reactive_writes(wrapper.writes)];
+            const updates = this.update_calls(new Set(reactive));
 
             const head =
                 node.type === 'ArrowFunctionExpression'
@@ -656,10 +720,14 @@ class Generator {
             let body: string;
 
             if (node.body.type === 'BlockStatement') {
-                const source = this.body_source(node.body.range);
-                body = updates ? `${source.slice(0, -1)} ${updates}}` : source;
+                // 去掉外层花括号，交给 guard_changes 重新包一层
+                const inner = this.body_source(node.body.range).slice(1, -1);
+
+                body = `{ ${this.guard_changes(reactive, updates, writes_are_assignments(node, new Set(reactive)), inner)} }`;
             } else {
-                body = `{ ${this.body_source(node.body.range)}${updates ? `; ${updates}` : ''} }`;
+                const inner = this.body_source(node.body.range);
+
+                body = `{ ${this.guard_changes(reactive, updates, writes_are_assignments(node, new Set(reactive)), inner)} }`;
             }
 
             output.push(`const ${wrapper.name} = ${head} ${body};`);
@@ -671,10 +739,32 @@ class Generator {
     /** `bind:` 的 setter：赋值 + 刷新受影响的片段（延迟到这里才能算全片段） */
     private bind_statements(): string[] {
         return this.pending_binds.map((bind) => {
-            const updates = this.update_calls(this.reactive_writes(bind.writes));
+            const reactive = [...this.reactive_writes(bind.writes)];
+            const updates = this.update_calls(new Set(reactive));
 
-            return `const ${bind.name} = ${bind.render(updates)};`;
+            return `const ${bind.name} = ${bind.render(updates, reactive)};`;
         });
+    }
+
+    /**
+     * 值真的变了才刷新：`const 旧值 = x; ...写入...; if (x !== 旧值) { 刷新 }`
+     *
+     * `plain` 为 false（写入里有 `arr.push(v)` 之类）时不加比较 ——
+     * 那种写法变量本身不会变，加了就永远不刷新了。
+     */
+    private guard_changes(names: string[], updates: string, plain: boolean, inner: string): string {
+        // 函数体源码结尾通常已经有 `;` 或 `}`，别再补一个
+        const joiner = /[;}]$/.test(inner.trim()) ? ' ' : '; ';
+
+        if (!updates || !plain || names.length === 0) {
+            return updates ? `${inner}${joiner}${updates}` : inner;
+        }
+
+        const previous = names.map(() => `__prev$${this.prev_counter++}`);
+        const snapshot = previous.map((name, index) => `${name} = ${names[index]}`).join(', ');
+        const changed = names.map((name, index) => `${name} !== ${previous[index]}`).join(' || ');
+
+        return `const ${snapshot}; ${inner}${joiner}if (${changed}) { ${updates} }`;
     }
 
     /**
@@ -684,23 +774,36 @@ class Generator {
      */
     private props_statements(): string[] {
         const changed = new Set<string>();
-        const body: string[] = [];
+        const assignments: string[] = [];
         // `$bindable` 的 prop 是个绑定对象，不能直接赋给变量，下面单独处理
         const bound = new Set(this.bindables.map((bindable) => bindable.name));
 
         for (const entry of this.prop_names) {
             if (bound.has(entry.name)) continue;
 
-            body.push(`  ${entry.name} = $props[${JSON.stringify(entry.key)}];`);
+            assignments.push(`  ${entry.name} = $props[${JSON.stringify(entry.key)}];`);
             changed.add(entry.name);
         }
 
         // `$bindable`：只有受控（父用了 `bind:`）才跟着父的值走。
         // 父只是普通传值时，子组件自己维护，父推过来的值不再覆盖它
         for (const bindable of this.bindables) {
-            body.push(`  if (${bindable.binding}.external) ${bindable.name} = ${bindable.binding}.get();`);
+            assignments.push(
+                `  if (${bindable.binding}.external) ${bindable.name} = ${bindable.binding}.get();`
+            );
             changed.add(bindable.name);
         }
+
+        // 先存旧值，赋完再比 —— 父推过来一样的值就不用刷新了
+        const names = [...changed];
+        const previous = names.map(() => `__prev$${this.prev_counter++}`);
+        const body: string[] = [];
+
+        if (names.length > 0) {
+            body.push(`  const ${previous.map((name, index) => `${name} = ${names[index]}`).join(', ')};`);
+        }
+
+        body.push(...assignments);
 
         const updates = this.update_calls(changed);
 
@@ -714,7 +817,11 @@ class Generator {
             body.push('  }');
         }
 
-        if (updates) body.push(`  ${updates}`);
+        if (updates) {
+            const test = names.map((name, index) => `${name} !== ${previous[index]}`).join(' || ');
+
+            body.push(test ? `  if (${test}) { ${updates} }` : `  ${updates}`);
+        }
 
         // 既没有 props 也没有插槽，就不用给父组件留这个入口了
         if (body.length === 0) return [];
@@ -1002,13 +1109,19 @@ class Generator {
         const setter = `__bind$${this.counter++}`;
         const written = binding.set
             ? this.setter_from(binding.set)
-            : { param: '$value', body: `${get.raw} = $value; `, writes: collect_reads(get.content) };
+            : {
+                  param: '$value',
+                  body: `${get.raw} = $value; `,
+                  writes: collect_reads(get.content),
+                  // 简写形式生成的是一句赋值；`bind:value={obj.x}` 这种不是，比较不出来
+                  plain: is_identifier(get.raw.trim())
+              };
 
         this.pending_binds.push({
             name: setter,
             // setter 把最终值返回：子组件 `x = binding.set(v)` 拿到的就是父组件的值
-            render: (updates) =>
-                `(${written.param}) => { ${written.body}${updates ? ` ${updates}` : ''} return (${getter})(); }`,
+            render: (updates, names) =>
+                `(${written.param}) => { ${this.guard_changes(names, updates, written.plain, written.body)} return (${getter})(); }`,
             writes: written.writes
         });
 
@@ -1024,17 +1137,23 @@ class Generator {
     }
 
     /** 用户自己写的 `set`：参数名和主体都搬进产物，写过的变量拿去算 update 调用 */
-    private setter_from(set: Expression): { param: string; body: string; writes: Set<string> } {
+    private setter_from(set: Expression): {
+        param: string;
+        body: string;
+        writes: Set<string>;
+        plain: boolean;
+    } {
         const node = set.content;
 
         if (!is_function_like(node)) {
-            // 不是函数就当成一个可调用的 setter
-            return { param: '$value', body: `(${set.raw})($value); `, writes: new Set() };
+            // 不是函数就当成一个可调用的 setter，写没写到响应式变量看不出来
+            return { param: '$value', body: `(${set.raw})($value); `, writes: new Set(), plain: false };
         }
 
         const { param, body } = this.setter_source(node);
+        const writes = collect_writes(node);
 
-        return { param, body, writes: collect_writes(node) };
+        return { param, body, writes, plain: writes_are_assignments(node, writes) };
     }
 
     /** getter：`() => target.value` 这样的箭头函数，或者干脆就是一个表达式 */
