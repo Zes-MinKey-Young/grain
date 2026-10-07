@@ -30,12 +30,28 @@ const GRAIN_TYPES = 'grain-runtime.d.ts';
 const GRAIN_TYPE_SOURCE = `/**
  * Reactive state. Compiled down to a plain variable; functions that write to it
  * get the matching update calls appended.
+ *
+ * @example
+ * \`\`\`ts
+ * let count = $state(0);
+ *
+ * function bump() {
+ *     count += 1;      // writes to it get the refresh calls appended
+ * }
+ * \`\`\`
  */
 declare function $state<T>(initial: T): T;
 
 /**
  * Component props — the type parameter is the props type.
- * \`let { label, children } = $props<{ label: string; children?: () => unknown }>();\`
+ *
+ * @example
+ * \`\`\`ts
+ * let { label, children } = $props<{
+ *     label: string;
+ *     children?: () => unknown
+ * }>();
+ * \`\`\`
  */
 declare function $props<T extends Record<string, unknown> = Record<string, unknown>>(): T;
 
@@ -43,8 +59,93 @@ declare function $props<T extends Record<string, unknown> = Record<string, unkno
  * A prop that supports two-way binding. When the parent writes \`bind:name={x}\`,
  * assigning to it in the child writes back to the parent's \`x\`.
  * The parameter is the fallback used when the parent passes nothing and binds nothing.
+ *
+ * @example
+ * \`\`\`ts
+ * let { value = $bindable(0) } = $props();
+ * \`\`\`
  */
 declare function $bindable<T>(fallback?: T): T;
+
+/**
+ * A derived value in \`<script>\`.
+ *
+ * The argument is a **binding value** — grain syntax, not a TypeScript object — so \`set\`
+ * decides the direction, and \`get\` may be omitted when \`listen\` supplies the value.
+ * Purely compile-time: no object survives into the output.
+ *
+ * @example one-way (read-only)
+ * \`\`\`ts
+ * let count = $state(0);
+ * const doubled = $node({ get: () => count * 2 });
+ * \`\`\`
+ *
+ * @example short form — the same thing
+ * \`\`\`ts
+ * const tripled = $node(count * 3);
+ * \`\`\`
+ *
+ * @example two-way
+ * \`\`\`ts
+ * const shown = $node({ get: () => name.get(), set: (v) => name.set(v) });
+ * \`\`\`
+ *
+ * @example no \`get\` — the value comes from \`listen\`
+ * \`\`\`ts
+ * const pushed = $node({ listen: (update) => name.subscribe(update) });
+ * \`\`\`
+ *
+ * @example derived from a store — \`listen\` triggers the recompute
+ * \`\`\`ts
+ * const upper = $node({
+ *     get: () => name.get().toUpperCase(),
+ *     listen: (update) => name.subscribe(update)
+ * });
+ * \`\`\`
+ */
+declare function $node<T>(value: {
+    get: () => T;
+    set?: (value: any) => any;
+    listen?: (update: (value?: any) => void) => void;
+    active?: boolean;
+}): T;
+declare function $node(value: {
+    get?: undefined;
+    listen: (update: (value?: any) => void) => void;
+    set?: (value: any) => any;
+    active?: boolean;
+}): any;
+declare function $node<T>(value: T): T;
+
+/**
+ * Built-in macro: connects a cross-module \`writable\` to a binding — two-way.
+ * Only usable as the value of \`bind:\`.
+ *
+ * @example on a \`bind:\` attribute — shown as a comment, since this is template syntax
+ * \`\`\`ts
+ * // <input bind:value={$store(name)} />
+ * \`\`\`
+ */
+declare function $store<T>(store: {
+    subscribe(listener: (value: T) => void): unknown;
+    set(next: T): T;
+}): void;
+
+/**
+ * Built-in macro: read-only — emits only the \`listen\` part, so the value is pushed onto
+ * the element and nothing flows back. Only usable on a plain attribute or in a template
+ * interpolation.
+ *
+ * @example on an attribute and in an interpolation — template syntax, so as a comment
+ * \`\`\`ts
+ * // <p>value is {$read(name)}</p>
+ * // <span title={$read(name)}></span>
+ * \`\`\`
+ */
+declare function $read<T>(store: {
+    subscribe(listener: (value: T) => void): unknown;
+    set?(next: T): T;
+}): void;
 
 /** What a compiled component looks like from the outside */
 interface GrainComponent {
@@ -57,13 +158,19 @@ interface GrainComponent {
 }
 
 /**
- * Only used when the imported component is not open in the editor.
- * When it is, TS resolves \`./Child.grain\` to \`Child.grain.ts\` (its virtual file)
- * and this ambient declaration no longer applies — see VIRTUAL_EXPORT below.
+ * Only used when TS cannot resolve an imported component by itself — for example when the
+ * \`.grain\` file is not open in the editor and nothing maps it to a type. Once it can be
+ * resolved, this ambient declaration no longer applies.
  */
-declare module "*.grain" {
+declare module '*.grain' {
     const component: GrainComponent;
     export default component;
+}
+
+declare module '*?grain-ast' {
+    /** \`App.grain?grain-ast\` returns the parse result (Root) of that component */
+    const root: unknown;
+    export default root;
 }
 `;
 
@@ -378,34 +485,42 @@ class TypeScriptService {
             getScriptSnapshot: (file) => {
                 if (file === RUNTIME_DECL_FILE) return ts.ScriptSnapshot.fromString(RUNTIME_MODULE_TEXT);
 
-                // `@graints/runtime`：用户项目不一定装了这个包，直接给内置声明
+                const content = contents.get(file) ?? this.lazy_virtual(file);
+
+                if (content !== undefined) return ts.ScriptSnapshot.fromString(content);
+
+                // 装了 `@graints/runtime` 就用它自己的声明；没装才用内置那份
+                if (ts.sys.fileExists(file)) {
+                    return ts.ScriptSnapshot.fromString(ts.sys.readFile(file) ?? '');
+                }
+
                 if (is_runtime_file(file)) {
                     return ts.ScriptSnapshot.fromString(
                         file.endsWith('.json') ? runtime_package_json() : RUNTIME_TYPES
                     );
                 }
 
-                const content = contents.get(file) ?? this.lazy_virtual(file);
-
-                if (content !== undefined) return ts.ScriptSnapshot.fromString(content);
-                if (!ts.sys.fileExists(file)) return undefined;
-
-                return ts.ScriptSnapshot.fromString(ts.sys.readFile(file) ?? '');
+                return undefined;
             },
             getCurrentDirectory: () => ts.sys.getCurrentDirectory(),
             getCompilationSettings: () => get_options(),
             getDefaultLibFileName: (settings) => ts.getDefaultLibFilePath(settings),
+            // 装了 `@graints/runtime` 就用它自己的声明，`is_runtime_file` 那条是没装时的兜底
             fileExists: (file) =>
-                is_runtime_file(file) ||
                 contents.has(file) ||
                 this.lazy_virtual(file) !== undefined ||
-                ts.sys.fileExists(file),
+                ts.sys.fileExists(file) ||
+                is_runtime_file(file),
             readFile: (file) =>
-                is_runtime_file(file)
-                    ? file.endsWith('.json')
-                        ? runtime_package_json()
-                        : RUNTIME_TYPES
-                    : (contents.get(file) ?? this.lazy_virtual(file) ?? ts.sys.readFile(file)),
+                (contents.get(file) ??
+                    this.lazy_virtual(file) ??
+                    ts.sys.readFile(file) ??
+                    (is_runtime_file(file)
+                        ? file.endsWith('.json')
+                            ? runtime_package_json()
+                            : RUNTIME_TYPES
+                        : null)) ??
+                undefined,
             readDirectory: (...args) => ts.sys.readDirectory(...args),
             directoryExists: (dir) => ts.sys.directoryExists(dir),
             getDirectories: (dir) => ts.sys.getDirectories(dir)

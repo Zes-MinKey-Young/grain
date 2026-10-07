@@ -437,11 +437,19 @@ attribute or a template interpolation, even though it looks like a TypeScript ob
 - **Compile-time only.** No object survives into the output — just a getter/setter pair plus a
   function that recomputes the variable and refreshes whatever reads it
 
-`listen` on a `$node` only triggers a recompute; the value always comes from `get`. So a `$node`
-whose source is a store needs a `listen` — the compiler cannot see that dependency:
+`listen` plays two different roles, depending on whether there is also a `get`:
+
+- **with a `get`** — it only *triggers* a recompute. This is what you need when the source is a
+  store: the compiler cannot see that dependency, so nothing would refresh without it
+- **without a `get`** — it *is* the source. Whatever it hands to `update(newValue)` becomes the
+  value, same as a one-way attribute
 
 ```grain
+// listen triggers; get supplies the value
 const upper = $node({ get: () => name.get().toUpperCase(), listen: (update) => name.subscribe(update) });
+
+// listen is the source; there is no get
+const pushed = $node({ listen: (update) => name.subscribe(update) });
 ```
 
 ## bind:this
