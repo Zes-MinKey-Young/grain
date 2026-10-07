@@ -212,6 +212,29 @@ The guard is optional: `listen(operationList, "do")` is the always-true predicat
 <input bind:value={ get: () => stamp, set: (value) => stamp = value, listen(bus, "tick") } />
 ```
 
+Listeners that share an event bus **and** an event name are merged into a single
+`addEventListener` call. When the guards are `&&` chains, the leading conditions they have in
+common are hoisted into one `if`:
+
+```grain
+<input bind:value={ one, listen(bus, "tick", (ev) => ev.open && ev.mine) } />
+<input bind:value={ two, listen(bus, "tick", (ev) => ev.open && !ev.mine) } />
+<input bind:value={ three, listen(bus, "tick") } />
+```
+```js
+bus.addEventListener('tick', ($event) => {
+    const ev = $event;
+    __listen$0[2]?.();                       // no guard — runs on every event
+    if (ev.open) {                           // shared by both guards, evaluated once
+        if (ev.mine) __listen$0[0]?.();
+        if (!ev.mine) __listen$0[1]?.();
+    }
+});
+```
+
+Only the shorthand form merges — a hand-written `listen: (update) => ...` is passed through
+untouched, since the compiler cannot see what it subscribes to.
+
 ## bind: shape of get / set / listen
 `bind:value={ ... }` is grain syntax, not TypeScript, so the three functions are checked at compile time:
 

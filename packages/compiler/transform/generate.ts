@@ -259,6 +259,63 @@ function is_function_like(node: TSESTree.Node): node is FunctionLike {
     );
 }
 
+/** `A && B && C` -> `['A', 'B', 'C']`（带括号的整体算一个条件） */
+function split_and(node: TSESTree.Node, source: string): string[] {
+    if (node.type === 'LogicalExpression' && node.operator === '&&') {
+        return [...split_and(node.left, source), ...split_and(node.right, source)];
+    }
+
+    return [source.slice(node.range[0], node.range[1])];
+}
+
+/** 谓词合并出来的 if 树：一层是一个条件，叶子是要跑的槽位 */
+interface ListenBranch {
+    /** 走到这一步就该跑的槽位（没有更多条件了） */
+    leaves: number[];
+    /** 条件 -> 下一层 */
+    branches: Map<string, ListenBranch>;
+}
+
+/**
+ * 把一组槽位的条件链织成一棵树。
+ *
+ * `A && B` 和 `A && C` 共用 A 那一层，于是 A 只求一次：
+ * `if (A) { if (B) { … } if (C) { … } }`
+ */
+function build_branch(slots: Array<{ chain: string[] }>): ListenBranch {
+    const root: ListenBranch = { leaves: [], branches: new Map() };
+
+    slots.forEach((slot, index) => {
+        let at = root;
+
+        for (const condition of slot.chain) {
+            let next = at.branches.get(condition);
+
+            if (!next) {
+                next = { leaves: [], branches: new Map() };
+                at.branches.set(condition, next);
+            }
+
+            at = next;
+        }
+
+        at.leaves.push(index);
+    });
+
+    return root;
+}
+
+function emit_branch(node: ListenBranch, slots: string): string {
+    const parts: string[] = [];
+
+    for (const leaf of node.leaves) parts.push(`${slots}[${leaf}]?.();`);
+    for (const [condition, child] of node.branches) {
+        parts.push(`if (${condition}) { ${emit_branch(child, slots)} }`);
+    }
+
+    return parts.join(' ');
+}
+
 /** 绑定值没有 `type` 字段，表达式有 */
 function is_binding_value(value: string | Expression | BindingValue): value is BindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
@@ -377,6 +434,17 @@ class Generator {
         render: (updates: string, names: string[]) => string;
         writes: Set<string>;
     }> = [];
+    /**
+     * 简写 `listen(bus, "event", guard)` 按「总线 + 事件」分到一组。
+     *
+     * 同组的只挂**一次**监听：每个绑定把自己的 update 存进槽位数组
+     * （运行时挂载时填），再由组里那一个 handler 按谓词决定叫谁。
+     */
+    private listen_groups: Array<{
+        bus: string;
+        event: string;
+        slots: Array<{ chain: string[]; params: string[] }>;
+    }> = [];
     private counter = 0;
     private wrapper_counter = 0;
     private prev_counter = 0;
@@ -473,7 +541,15 @@ class Generator {
             instance.push('', `/* bind:this 声明的变量 */`, `let ${[...this.this_names].join(', ')};`);
         }
 
+        // 槽位数组要在元素创建之前声明——元素创建时会往里填各自的 update
+        const listen_slots = this.listen_slot_declarations();
+        if (listen_slots.length > 0) instance.push('', ...listen_slots);
+
         instance.push('', '/* template */', ...this.statements);
+
+        // 监听本身等元素都建好再挂：同一总线 + 同一事件只挂一次，谓词合并成 if 树
+        const listens = this.listen_registrations();
+        if (listens.length > 0) instance.push('', '/* 合并的事件监听 */', ...listens);
 
         // 属性修改触发器：得等所有片段都收集完，才知道 props 变了要刷哪些
         const set_props = this.props_statements();
@@ -1236,16 +1312,72 @@ class Generator {
         const [bus, event, guard] = call.arguments;
         if (!bus || !event) return this.slice(listen.range);
 
-        // guard 存成函数再调用，这样表达式体和块体都支持
-        const guard_code = guard ? `const $guard = (${this.slice(guard.range)}); ` : '';
-        const handler = guard ? '($event) => { if ($guard($event)) update(); }' : '() => update()';
+        const bus_text = this.slice(bus.range);
+        const event_text = this.slice(event.range);
 
-        return (
-            `(update) => { ` +
-            `const $bus = (${this.slice(bus.range)}); ${guard_code}` +
-            `($bus.addEventListener ?? $bus.on).call($bus, ${this.slice(event.range)}, ${handler}); ` +
-            `}`
-        );
+        let index = this.listen_groups.findIndex((item) => item.bus === bus_text && item.event === event_text);
+
+        if (index < 0) {
+            this.listen_groups.push({ bus: bus_text, event: event_text, slots: [] });
+            index = this.listen_groups.length - 1;
+        }
+
+        const group = this.listen_groups[index];
+        const slot = group.slots.length;
+
+        group.slots.push(this.guard_chain(guard));
+
+        // 不在这儿挂监听：把 update 存进槽位，等所有元素建好由组里那一个 handler 统一处理
+        return `(update) => { __listen$${index}[${slot}] = update; }`;
+    }
+
+    /**
+     * 谓词 -> 条件链。
+     *
+     * `(ev) => A && B` 拆成 `['A', 'B']`——公共前缀（A）就能在同组里共用一个 `if`。
+     * 拆不开的（块体、不是函数字面量）整条当一个条件，用 `$event` 调它。
+     */
+    private guard_chain(guard: TSESTree.Node | undefined): { chain: string[]; params: string[] } {
+        if (!guard) return { chain: [], params: [] };
+
+        if (guard.type === 'ArrowFunctionExpression' || guard.type === 'FunctionExpression') {
+            const first = guard.params[0];
+            const name = first?.type === 'Identifier' ? first.name : null;
+
+            // 表达式体的 && 链能拆；块体没法拆，整条当谓词
+            if (guard.body.type !== 'BlockStatement') {
+                return { chain: split_and(guard.body, this.source), params: name ? [name] : [] };
+            }
+        }
+
+        return { chain: [`(${this.slice(guard.range)})($event)`], params: [] };
+    }
+
+    /** 槽位数组的声明：得在元素创建之前（元素创建时会往里填 update） */
+    private listen_slot_declarations(): string[] {
+        return this.listen_groups.map((_group, index) => `const __listen$${index} = [];`);
+    }
+
+    /** 每组挂一次监听，handler 里是合并好的 if 树 */
+    private listen_registrations(): string[] {
+        return this.listen_groups.map((group, index) => {
+            const slots = `__listen$${index}`;
+
+            // 各槽位的谓词可能给事件参数起了不同的名字，这里统一绑到 $event 上
+            const names = [...new Set(group.slots.flatMap((slot) => slot.params))].filter(
+                (name) => name !== '$event'
+            );
+            const bindings = names.map((name) => `const ${name} = $event;`).join(' ');
+
+            const body = emit_branch(build_branch(group.slots), slots);
+            const handler = `($event) => { ${bindings} ${body} }`;
+
+            return (
+                `const $bus$${index} = (${group.bus}); ` +
+                `($bus$${index}.addEventListener ?? $bus$${index}.on)` +
+                `.call($bus$${index}, ${group.event}, ${handler});`
+            );
+        });
     }
 
     private plain_element(node: Element): string {
