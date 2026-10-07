@@ -4,7 +4,8 @@
 Grain is a framework that prioritizes TypeScript. You don't need a `lang="ts"` attribute on your `<script>` tags.
 
 # Getting started
-Scaffold a project with `@graints/create-grain` (`packages/create-grain`), then start the dev server:
+
+## Scaffold a project
 
 ```sh
 npx @graints/create-grain my-app
@@ -16,9 +17,45 @@ pnpm install
 pnpm dev
 ```
 
-Templates: `basic` (default — `App.grain` + a child component, covering `$state`, `{#if}` / `{#for}`, `bind:value`, `bind:this` with `<script onmount>`, `$props` / `$bindable` and component `<style>`) and `minimal` (one file).
+Templates: `basic` (default — `App.grain` + a child component, covering `$state`, `{#if}` / `{#for}`, `bind:value`, `bind:this` with `<script onmount>`, `$props` / `$bindable` and component `<style>`) and `minimal` (one file). Pick one with `--template minimal`.
 
-Types for `$state`, `$props`, `$bindable` and the `*.grain` module live in the runtime package (`@graints/runtime`), picked up by `tsconfig.json` via `"types": ["@graints/runtime"]`. The VS Code extension injects the same declarations for the editor.
+## What you get
+
+```
+index.html          has #app
+src/main.ts         mounts the root component into #app
+src/App.grain       root component
+src/Counter.grain   child component (basic template only)
+vite.config.mts     the grain vite plugin
+tsconfig.json       types: ["@graints/runtime"]
+```
+
+`pnpm dev` / `pnpm build` / `pnpm preview` / `pnpm typecheck` do what you expect.
+
+The smallest useful component:
+
+```grain
+<script>
+  let count = $state(0);
+</script>
+
+<button onclick={() => count++}>
+  clicked {count} times
+</button>
+```
+
+## Editor
+
+Install the **`grain.grain-vscode`** extension (`.vscode/extensions.json` in the template
+recommends it) for highlighting, diagnostics, completion, go-to-definition and component
+prop hints inside `.grain` files.
+
+## Types
+
+`$state`, `$props`, `$bindable` and the `*.grain` module type come from the runtime
+(`@graints/runtime`), picked up by `tsconfig.json` via `"types": ["@graints/runtime"]` —
+there is no declaration file to copy into your project. The extension injects the same
+declarations for the editor.
 
 # How reactivity works in Grain
 Grain does most work during compile time. Grain compiles reactive variable through analyzing dependencies during compile time and generating the reactive code there. For example, the following code:
@@ -43,6 +80,54 @@ const increment = () => {
 const update$0 = creEle('button', { onclick: increment_$1 }, ["count is", () => count]);
 ```
 Here `update$0(1)` tells `() => count` to re-evaluate after `increment` is called. No functions like `$.get` is presented. Dependencies are tracked during compile time.
+
+# Blocks: if and for
+
+Block tags always carry a `#`, and are closed with `{/if}` / `{/for}`:
+
+```grain
+{#if count > 0}
+    <p>{count} clicks</p>
+{:else if count === 0}
+    <p>click something</p>
+{:else}
+    <p>how did we get here</p>
+{/if}
+```
+
+The test is an ordinary TypeScript expression, so it is checked and completed like any
+other one. `{:else if ...}` and `{:else}` are both optional.
+
+## for
+
+The loop head is `binding of iterable` — **no parentheses**, exactly like `for...of` in ES6:
+
+```grain
+<ul>
+    {#for item of items}
+        <li>{item}</li>
+    {:else}
+        <li>nothing here yet</li>
+    {/for}
+</ul>
+```
+
+`{:else}` renders when the iterable is empty. The binding can be a destructuring pattern,
+and `const` / `let` in front of it is optional:
+
+```grain
+{#for [key, value] of entries}   <li>{key}: {value}</li>  {/for}
+{#for { name } of people}        <li>{name}</li>          {/for}
+{#for const item of items}       <li>{item}</li>          {/for}
+```
+
+## Notes
+
+- A block tag without the `#` is an error: `Block tags need a `#`: write `{#if ...}`.
+- The loop variable only exists inside the block — the editor declares it for you, so it is
+  typed and completed there, and go-to-definition jumps to the loop head.
+- Blocks nest freely and can contain elements, components, expressions and other blocks.
+- Iterating a `$state` array re-renders the block when it changes (`push`, `splice`, …).
 
 # bind
 `bind:` is used for two-way binding. It is used to bind a reactive variable to a non-reactive variable.
