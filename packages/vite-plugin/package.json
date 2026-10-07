@@ -1,6 +1,6 @@
 {
     "name": "@graints/vite-plugin",
-    "version": "0.1.3",
+    "version": "0.1.10",
     "description": "Vite plugin that compiles .grain components",
     "license": "MIT",
     "type": "module",

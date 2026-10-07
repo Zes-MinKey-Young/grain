@@ -7,6 +7,7 @@ export type { PathAlias, PathConfig } from './tsconfig.js';
 export { split_for_header } from './template.js';
 export { parse_expression, parse_expressions, parse_for_of } from './read/expression.js';
 export { parse_script } from './read/script.js';
+export { MacroScope, expand_macros, type MacroReparse } from './macro.js';
 export { parse_style } from './read/style.js';
 export {
     compile,

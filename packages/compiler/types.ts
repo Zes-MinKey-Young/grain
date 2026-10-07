@@ -208,12 +208,14 @@ export interface BlockBase extends Position {
 }
 
 /**
- * script 的三种：
+ * script 的四种：
  * - `default`：组件实例脚本
  * - `module`：模块级，随模块只跑一次
  * - `onmount`：组件元素挂载后跑，能看见 `bind:this` 声明的变量
+ * - `macro`：编译期脚本，里面的函数（宏）返回一段源码，用来生成别的语法；
+ *   它不会出现在产物里
  */
-export type ScriptContext = 'default' | 'module' | 'onmount';
+export type ScriptContext = 'default' | 'module' | 'onmount' | 'macro';
 
 /** Root 阶段产出的原始 script 块，尚未解析 TS */
 export interface RawScript extends BlockBase {
@@ -253,6 +255,7 @@ export interface RootStage extends Position {
     module: RawScript | null;
     script: RawScript | null;
     onmount: RawScript | null;
+    macro: RawScript | null;
     stylesheet: RawStyle | null;
     template: Template<RawTemplateNode>;
 }
@@ -263,6 +266,44 @@ export interface Root extends Position {
     module: Script | null;
     script: Script | null;
     onmount: Script | null;
+    macro: Script | null;
     stylesheet: Stylesheet | null;
     template: Template<TemplateNode>;
+    /**
+     * 宏展开出来的片段原文。
+     *
+     * 生成阶段是拿 AST 的 range 去源码里切片的，而这些片段不在源码里——
+     * 所以登记在这里，编译时追加到源码末尾，range 就有东西可切了。
+     */
+    expanded: string;
+    /**
+     * 宏在 `<script>` 里展开出来的替换（源码区间 -> 展开后的代码）。
+     *
+     * script 的代码是按区间整段切下来的，光换掉 AST 节点没用——得连原文一起换，
+     * 所以走生成阶段那套 edit 机制（跟 `$state(...)` 展开同一条路）。
+     */
+    replacements: MacroReplacement[];
+    /** 这个组件里用过的宏（编辑器用） */
+    macros: MacroUse[];
+}
+
+/** 宏在 script 里展开出来的一段替换 */
+export interface MacroReplacement extends Position {
+    /** 展开后的代码 */
+    text: string;
+}
+
+/**
+ * 一次宏调用：位置 + 展开出来的文本。
+ *
+ * 编辑器拿它做两件事：光标停在宏调用上时预览展开结果，以及把 script 里的宏调用
+ * 换成等长的占位符（宏返回的是要插进去的源码，不是它的值——照字面检查会误报）。
+ */
+export interface MacroUse extends Position {
+    /** 宏名（带 `$`） */
+    name: string;
+    /** 展开出来的文本 */
+    text: string;
+    /** 用在哪种位置 */
+    where: 'bind' | 'attribute' | 'script';
 }

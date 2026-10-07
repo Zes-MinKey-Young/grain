@@ -9,7 +9,14 @@ import {
     split_for_header,
     ParseError
 } from '../../compiler/index.js';
-import type { Expression, Root, RootStage, Script, TemplateNode } from '../../compiler/index.js';
+import type {
+    Expression,
+    MacroUse,
+    Root,
+    RootStage,
+    Script,
+    TemplateNode
+} from '../../compiler/index.js';
 import { log } from './log.js';
 import {
     build_virtual,
@@ -77,6 +84,8 @@ export interface Analysis {
     expression_at(offset: number): Expression | null;
     /** 找出覆盖某个偏移的 script（模板之外、script 内容之内） */
     script_at(offset: number): Script | null;
+    /** 光标停在一次宏调用上（bind / 属性 / script 三种位置都算） */
+    macro_at(offset: number): MacroUse | null;
     /** 找出覆盖某个偏移的元素（模板里） */
     element_at(offset: number): ElementInfo | null;
     /** 导入的某个组件接受哪些属性（来自它自己的 `$props<...>()`） */
@@ -422,6 +431,34 @@ function component_spans_of(nodes: readonly unknown[], source: string): Semantic
     return spans;
 }
 
+/**
+ * 把 script 原文里的宏调用换成**等长**的占位符（`_macro$0`）。
+ *
+ * 宏返回的是要插进去的源码，但它在 script 里展开成的是**另一段代码**——照字面检查的话
+ * `const flip = $flip('name')` 会被认为 flip 是个数组，后面 `flip()` 就报"不可调用"。
+ *
+ * 展开出来的代码比调用长得多，塞不回原来的位置（虚拟文件靠等长来对齐偏移），
+ * 所以这里只放一个占位符，真正的 `var _macro$0 = <展开结果>` 拼在文件末尾
+ * —— 那里想多长都行，`flip` 的类型也就跟着展开结果走了。
+ */
+function mask_macro_calls(block: Script, macros: Array<{ use: MacroUse; index: number }>): Script {
+    let raw = block.raw;
+
+    for (const { use, index } of macros) {
+        if (use.start < block.contentStart || use.end > block.contentEnd) continue;
+
+        const from = use.start - block.contentStart;
+        const to = use.end - block.contentStart;
+        const name = `_macro$${index}`;
+
+        if (to - from < name.length) continue;
+
+        raw = raw.slice(0, from) + name + ' '.repeat(to - from - name.length) + raw.slice(to);
+    }
+
+    return { ...block, raw };
+}
+
 /** 已经自己写了 `export default` 的就别再补一个 */
 function has_default_export(scripts: VirtualScript[]): boolean {
     return scripts.some((script) => /export\s+default\b/.test(script.raw));
@@ -475,6 +512,12 @@ function this_leaks(
 
 /** `(value) => ...` / `(ev) => ...` 这种参数，类型不在我们手里，不报 */
 const REGEX_IMPLICIT_ANY = /implicitly has an 'any' type/;
+
+/**
+ * script 里的宏调用换成占位符（`const flip = _macro$0`）之后，
+ * 赋值只能拼在文件末尾，TS 会报"用了还没赋值"——那是虚拟文件的拼法带来的，不是用户的错
+ */
+const REGEX_MACRO_PLACEHOLDER = /Variable '_macro\$\d+' is used before being assigned/;
 
 /**
  * 模板里的表达式 / 绑定项：只要区间和原文。
@@ -844,12 +887,20 @@ export function analyze(source: string, filename: string): Analysis {
 
     // 把 script 铺到虚拟 .ts 文件里交给 TS 语言服务
     // 注意用 `!=`：解析失败时 root 为 null，root?.script 是 undefined，用 !== 会漏过去
-    const parsed: VirtualScript[] = [root?.module, root?.script].filter(
-        (script): script is Script => script != null
-    );
+    // script 里的宏调用要事先换成等长的占位符（见 mask_macro_calls）
+    const used = (root?.macros ?? [])
+        .filter((use) => use.where === 'script')
+        .map((use, index) => ({ use, index }));
+
+    const parsed: VirtualScript[] = [root?.module, root?.script]
+        .filter((script): script is Script => script != null)
+        .map((script) => mask_macro_calls(script, used));
 
     // onmount 跟 script 一样铺进虚拟文件
-    if (root?.onmount) parsed.push(root.onmount);
+    if (root?.onmount) parsed.push(mask_macro_calls(root.onmount, used));
+    // macro 也铺进去：它只在编译期存在，但写宏的时候该有 TS 支持。
+    // 里面是宏的**定义**，不用遮
+    if (root?.macro) parsed.push(root.macro);
     // 解析失败时第一阶段那两个块只有原文，照样能铺；再不行才用正则抠
     const scripts: VirtualScript[] =
         parsed.length > 0
@@ -883,6 +934,12 @@ export function analyze(source: string, filename: string): Analysis {
             code: check.code,
             start: check.region.contentStart,
             end: check.region.contentEnd
+        })),
+        // 宏展开出来的代码：拼在末尾，既给了正确的类型，报错也能映射回那个宏调用
+        ...used.map(({ use, index }) => ({
+            code: `var _macro$${index} = ${use.text};`,
+            start: use.start,
+            end: use.end
         }))
     ];
 
@@ -949,7 +1006,7 @@ export function analyze(source: string, filename: string): Analysis {
 
             if (expression) return identifier_at(expression.content, offset);
 
-            for (const script of [root?.script, root?.module, root?.onmount]) {
+            for (const script of [root?.script, root?.module, root?.onmount, root?.macro]) {
                 if (!script) continue;
                 if (offset < script.contentStart || offset > script.contentEnd) continue;
 
@@ -961,11 +1018,16 @@ export function analyze(source: string, filename: string): Analysis {
         },
 
         script_at(offset: number): Script | null {
-            for (const script of [root?.script, root?.module, root?.onmount]) {
+            for (const script of [root?.script, root?.module, root?.onmount, root?.macro]) {
                 if (script && offset >= script.contentStart && offset <= script.contentEnd) return script;
             }
 
             return null;
+        },
+
+        /** 光标停在一次宏调用上：拿它展开出来的东西（hover 预览用） */
+        macro_at(offset: number): MacroUse | null {
+            return root?.macros.find((use) => offset >= use.start && offset <= use.end) ?? null;
         },
 
         element_at(offset: number): ElementInfo | null {
@@ -1026,6 +1088,8 @@ export function analyze(source: string, filename: string): Analysis {
             const kept: SemanticProblem[] = [];
 
             for (const problem of typescript_service.semantic_problems(virtual)) {
+                if (REGEX_MACRO_PLACEHOLDER.test(problem.message)) continue;
+
                 // 拼在末尾的 `bind:this` 类型检查：位置挪回模板里那一处
                 const span = tail_spans.find(
                     (item) => problem.start >= item.from && problem.start < item.to

@@ -254,6 +254,84 @@ Compile-time rules for a binding without `get`:
 | `listen(bus, "tick")` shorthand | error — it expands to `update()` and cannot supply a value; write the listener by hand |
 | listener never calls `update(value)` | error — the value would never change |
 
+## Macros
+
+`<script macro>` defines functions that run **at compile time**. A macro returns the code to
+splice in — a string, or an array of strings (which is joined with spaces, handy for writing
+it across a few lines):
+
+```grain
+<script macro>
+    import { flip as $flip } from './macros';
+
+    function $field(name) {
+        return ['get', ':', `() => ${name}`, ',', 'set', ':', `(v) => ${name} = v`];
+    }
+</script>
+
+<script>
+    let name = $state('ada');
+
+    // expands into a function
+    const flip = $flip('name');
+</script>
+
+<input bind:value={$field('name')} />
+<button onclick={flip}>flip</button>
+```
+
+Whatever it returns is re-read with the syntax of whatever spot the macro sits in, so
+`$field('name')` above expands to exactly `bind:value={ get: () => name, set: (v) => name = v }`.
+
+These are **not** lexical tokens — each piece is arbitrary code; the compiler hands the whole
+thing to that spot's parser. Returning a plain string (`'get: () => name, set: (v) => name = v'`)
+does the same thing as the array above.
+
+### Naming
+
+A macro is named like a rune — `$` prefix — and may not shadow one, because the two are
+handled at different stages:
+
+| | runes (`$state`, `$props`, `$bindable`) | macros |
+| --- | --- | --- |
+| when | part of the language, handled by the compiler itself | run first, purely at compile time |
+| what they do | `$state` becomes a read/write pair, `$props()` becomes the props argument | expand into other syntax |
+| where | `<script>` | `bind:`, attribute values, `<script>` |
+
+So `function $state()` in a macro script is an error, and so is a macro named `field`.
+
+### Where a macro can be used
+
+- **`bind:`** — read as a binding value
+- **an attribute value** — read as an attribute value; a result without `{` or quotes
+  is treated as one expression (`() => count++` on `onclick` becomes a handler)
+- **inside `<script>`** — expands into an expression
+
+Not in a template `{ ... }` interpolation: macros do not exist at runtime, so using one there
+is a compile error rather than a `ReferenceError` later.
+
+### Imports in `<script macro>`
+
+Macros may import, but only **relative paths** — a package from `node_modules` is not
+guaranteed to be loadable at build time — and the local name must be renamed with a `$`:
+
+```grain
+<script macro>
+    import { flip as $flip } from './macros';   // ok
+    import { flip } from './macros';            // error: local name needs the `$`
+    import { flip as $flip } from 'lodash';     // error: not a relative path
+</script>
+```
+
+Namespace imports are rejected for the same reason. `<script macro>` still cannot `export` —
+it never reaches the output.
+
+### Arguments
+
+Arguments are evaluated at compile time: literals (`'name'`, `3`, `true`) arrive as values,
+anything else arrives as **source text**. The return value must be a string, or an array of
+strings.
+
 ## bind:this
 `bind:this` hands you the element itself instead of one of its properties.
 

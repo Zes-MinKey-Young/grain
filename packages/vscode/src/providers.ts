@@ -310,6 +310,28 @@ export function register_providers(
                 const analysis = get_analysis(document);
                 if (!analysis) return null;
 
+                // 宏调用：预览它展开出来的东西。
+                // 宏不会进产物，光看编译结果看不到它做了什么，所以这里直接给展开结果
+                const macro = analysis.macro_at(offset_at(document, position));
+
+                if (macro) {
+                    const contents = new vscode.MarkdownString();
+                    const where =
+                        macro.where === 'bind'
+                            ? 'a `bind:` value'
+                            : macro.where === 'attribute'
+                              ? 'an attribute value'
+                              : '`<script>`';
+
+                    contents.appendCodeblock(macro.text, 'grain');
+                    contents.appendMarkdown(`_\`${macro.name}\` — expands to this in ${where}, at compile time_`);
+
+                    return new vscode.Hover(
+                        contents,
+                        new vscode.Range(document.positionAt(macro.start), document.positionAt(macro.end))
+                    );
+                }
+
                 // `<script>` 里：用 TS 语言服务，能看到类型
                 const info = analysis.quick_info(offset_at(document, position));
 

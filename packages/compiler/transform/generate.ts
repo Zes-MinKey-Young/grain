@@ -1,7 +1,7 @@
-import estree from '@typescript-eslint/typescript-estree';
+// 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
+// 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
+import { simpleTraverse } from '@typescript-eslint/typescript-estree';
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
-
-const { simpleTraverse } = estree;
 
 import type {
     AttributeValue,
@@ -529,6 +529,13 @@ class Generator {
      */
     private script(block: Script): { head: string[]; body: string } {
         const edits: Edit[] = [];
+
+        // 0. 宏展开：script 里的宏调用换成宏返回的源码
+        edits.push(
+            ...this.root.replacements.filter(
+                (item) => item.start >= block.contentStart && item.end <= block.contentEnd
+            )
+        );
 
         // 1. import / export 留在模块顶层
         const hoisted = block.content.body.filter(

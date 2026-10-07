@@ -445,7 +445,7 @@ function slice_item(source: string, start: number, end: number): RawExpression {
  * 自己按顶层逗号断开、认键名，不交给 TS 去猜 —— 这是 grain 的语法，
  * 只有里面那些具体的值（getter、setter、表达式）才归 TS 管。
  */
-function read_binding_value(parser: Parser): RawBindingValue {
+export function read_binding_value(parser: Parser): RawBindingValue {
     const source = parser.source;
     const start = parser.index;
 
@@ -584,7 +584,7 @@ function read_plain_value(parser: Parser): string {
     return decode_entities(parser.source.slice(start, i));
 }
 
-function read_attribute_value(parser: Parser): RawAttributeValue {
+export function read_attribute_value(parser: Parser): RawAttributeValue {
     const quote = parser.source[parser.index];
 
     if (quote === '"' || quote === "'") {

@@ -1,10 +1,11 @@
 import { check_bindings } from './check.js';
 import { ParseError } from './errors.js';
+import { expand_macros, type MacroReparse } from './macro.js';
 import { parse_expressions } from './read/expression.js';
 import { parse_script } from './read/script.js';
 import { parse_style } from './read/style.js';
 import { scan_script, scan_style } from './scan.js';
-import { read_block_attributes, read_fragment } from './template.js';
+import { read_attribute_value, read_binding_value, read_block_attributes, read_fragment } from './template.js';
 import type {
     RawScript,
     RawStyle,
@@ -57,6 +58,7 @@ export class Parser {
         const module = root.module ? parse_script(root.module, masked) : null;
         const script = root.script ? parse_script(root.script, masked) : null;
         const onmount = root.onmount ? parse_script(root.onmount, masked) : null;
+        const macro = root.macro ? parse_script(root.macro, masked) : null;
 
         // 模板里的 `{ ... }` 表达式同样交给 TS 解析器
         parse_expressions(root.template, masked);
@@ -67,8 +69,27 @@ export class Parser {
             module,
             script,
             onmount,
+            macro,
+            expanded: '',
+            replacements: [],
+            macros: [],
             template: root.template as Template<TemplateNode>
         };
+
+        // `bind:` 的值可能是宏调用，先展开成真正的绑定值，再检查形状
+        if (macro) {
+            // 重解析用的是 Parser 实例，从这里传进去——避免 macro 反过来 import parser
+            const reparse: MacroReparse = {
+                binding: (text, filename) => read_binding_value(new Parser(text, { filename })),
+                attribute: (text, filename) => read_attribute_value(new Parser(text, { filename }))
+            };
+
+            const run = expand_macros(result, this.source, this.options.filename, reparse);
+
+            result.expanded = run.appended;
+            result.replacements = run.replacements;
+            result.macros = run.macros;
+        }
 
         // 都解析完了才检查 `bind:value={ ... }` 里那三个函数的形状
         check_bindings(result);
@@ -86,6 +107,7 @@ export class Parser {
         let script: RawScript | null = null;
         let module: RawScript | null = null;
         let onmount: RawScript | null = null;
+        let macro: RawScript | null = null;
         let stylesheet: RawStyle | null = null;
 
         const children: RawTemplateNode[] = [];
@@ -100,6 +122,9 @@ export class Parser {
                 } else if (block.context === 'onmount') {
                     if (onmount) this.error('A component can only have one `<script onmount>`', block.start, block.end);
                     onmount = block;
+                } else if (block.context === 'macro') {
+                    if (macro) this.error('A component can only have one `<script macro>`', block.start, block.end);
+                    macro = block;
                 } else {
                     if (script) this.error('A component can only have one `<script>`', block.start, block.end);
                     script = block;
@@ -128,6 +153,7 @@ export class Parser {
             module,
             script,
             onmount,
+            macro,
             stylesheet,
             template: { type: 'Template', start, end, children }
         };
@@ -158,9 +184,9 @@ export class Parser {
         let context: ScriptContext = 'default';
 
         for (const [name, value] of Object.entries(attributes)) {
-            if (name !== 'module' && name !== 'onmount') {
+            if (name !== 'module' && name !== 'onmount' && name !== 'macro') {
                 this.error(
-                    `\`<script>\` does not support the \`${name}\` attribute (only \`<script>\`, \`<script module>\` and \`<script onmount>\` are valid)`,
+                    `\`<script>\` does not support the \`${name}\` attribute (only \`<script>\`, \`<script module>\`, \`<script onmount>\` and \`<script macro>\` are valid)`,
                     start,
                     this.index
                 );

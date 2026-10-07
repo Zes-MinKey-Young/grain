@@ -1,10 +1,11 @@
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
 
-import estree from '@typescript-eslint/typescript-estree';
+// 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
+// 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
+import { simpleTraverse } from '@typescript-eslint/typescript-estree';
 
 import { ParseError } from './errors.js';
 
-const { simpleTraverse } = estree;
 import type { AttributeValue, BindingValue, Expression, Root, TemplateNode } from './types.js';
 
 type FunctionLike = TSESTree.ArrowFunctionExpression | TSESTree.FunctionExpression;

@@ -1,0 +1,62 @@
+<script macro>
+    import { flip as $flip, shout as $shout } from './macros';
+
+    // A controlled input: read the variable, write back into it.
+    // Macros run at compile time and return the code to splice in; the compiler
+    // reads that result with the syntax of the spot the macro sits in.
+    function $field(name: string) {
+        return ['get', ':', `() => ${name}`, ',', 'set', ':', `(v) => ${name} = v`];
+    }
+
+    // Same thing, plus `active`: the getter runs again after every write
+    function $strict_field(name: string) {
+        return ['get', ':', `() => ${name}`, ',', 'set', ':', `(v) => ${name} = v`, ',', 'active'];
+    }
+
+    // A macro can just name a variable, too — that expands to `{name}`
+    function $as_variable(name: string) {
+        return [name];
+    }
+</script>
+
+<script>
+    let name = $state('ada');
+    let nick = $state('grain');
+
+    // A macro inside <script> expands into an expression — here, a function
+    const flip = $flip('name');
+</script>
+
+<h2>$field('name') — expands to get + set</h2>
+<p>
+    <input bind:value={$field('name')} />
+</p>
+<p>name = {name}</p>
+
+<h2>$strict_field('nick') — same, plus active</h2>
+<p>
+    <input bind:value={$strict_field('nick')} />
+</p>
+
+<h2>$as_variable('name') — two inputs, one variable</h2>
+<p>
+    <input bind:value={$as_variable('name')} />
+</p>
+
+<h2>$shout('nick') on an attribute, $flip('name') in the script</h2>
+<p title={$shout('nick')}>nick = {nick}</p>
+
+<p>
+    <button onclick={flip}>flip name</button>
+</p>
+
+<style>
+    input {
+        padding: 0.3rem 0.5rem;
+    }
+
+    h2 {
+        font-size: 1rem;
+        margin: 1.5rem 0 0.5rem;
+    }
+</style>
