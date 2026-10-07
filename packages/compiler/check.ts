@@ -1,6 +1,10 @@
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
 
+import estree from '@typescript-eslint/typescript-estree';
+
 import { ParseError } from './errors.js';
+
+const { simpleTraverse } = estree;
 import type { AttributeValue, BindingValue, Expression, Root, TemplateNode } from './types.js';
 
 type FunctionLike = TSESTree.ArrowFunctionExpression | TSESTree.FunctionExpression;
@@ -114,10 +118,68 @@ function check_listen(listen: Expression): void {
     }
 }
 
+/**
+ * 没有 `get`（也没有值形式的表达式）时，值只能由 listener 提供：
+ * 它得调 `update(新值)`，运行时把新值存下来当 getter 的结果。
+ *
+ * 所以两种写法要挡住：
+ * - 压根没写 `listen` —— 这个绑定没有任何值来源
+ * - `listen(bus, "tick")` 简写 —— 展开后是 `update()`，拿不到新值
+ */
+function check_listen_supplies_value(binding: BindingValue): void {
+    const listen = binding.listen;
+
+    if (!listen) {
+        const at = binding.set ?? binding.expression;
+
+        if (at) fail(at, '`get` is required unless you also write `listen` — the listener is the only source of the value');
+
+        return;
+    }
+
+    const node = listen.content;
+
+    if (!is_function_like(node)) {
+        fail(
+            listen,
+            'Without `get`, `listen` must be written by hand — `listen(eventBus, "eventName")` expands to `update()` and cannot supply the new value. Write `listen: (update) => ...` and call `update(newValue)`'
+        );
+    }
+
+    const param = node.params[0];
+    const name = param?.type === 'Identifier' ? param.name : null;
+
+    if (!name) return;
+
+    let supplied = false;
+
+    simpleTraverse(node.body as unknown as TSESTree.Node, {
+        enter: (child) => {
+            if (
+                child.type === 'CallExpression' &&
+                (child.callee as TSESTree.Node).type === 'Identifier' &&
+                (child.callee as TSESTree.Identifier).name === name &&
+                child.arguments.length > 0
+            ) {
+                supplied = true;
+            }
+        }
+    });
+
+    if (!supplied) {
+        fail(
+            listen,
+            `\`get\` is missing, so the value must come from the listener: call \`${name}(newValue)\`, not \`${name}()\``
+        );
+    }
+}
+
 function check_binding(binding: BindingValue): void {
     if (binding.get) check_get(binding.get);
     if (binding.set) check_set(binding.set);
     if (binding.listen) check_listen(binding.listen);
+
+    if (!binding.get && !binding.expression) check_listen_supplies_value(binding);
 }
 
 /**

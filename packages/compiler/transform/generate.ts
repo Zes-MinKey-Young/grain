@@ -1102,13 +1102,38 @@ class Generator {
         const get = binding.get ?? binding.expression;
 
         if (!get) {
-            // 连值都没有：只剩个监听，照挂不误
-            const empty = ['get: () => undefined', 'set: ($value) => $value'];
+            /**
+             * 没有 getter：值由 listener 提供（`update(新值)`），运行时存下来当 getter 的结果。
+             * 所以这里**不能**生成 `get` —— 生成了就把 listener 喂的值盖住了。
+             * 连 listener 都没有、或者 listener 提供不了值的写法，编译期已经报过。
+             */
+            // 连 listener 都没有的写法编译期已经报错了，这里兜个底
+            if (!binding.listen) return { code: `${name}: { set: ($value) => $value }`, slot: false };
 
-            if (binding.listen) empty.push(`listen: ${this.listen_source(binding.listen.content)}`);
-            if (binding.active) empty.push('active: true');
+            const parts: string[] = [];
 
-            return { code: `${name}: { ${empty.join(', ')} }`, slot: false };
+            if (binding.set) {
+                const written = this.setter_from(binding.set);
+                const setter_name = `__bind$${this.counter++}`;
+
+                // 没有 getter，所以 setter 的"最终值"就是它拿到的那个值；
+                // 刷新依赖 set 自己写了哪些 state，其余刷新全靠 listener 那次 update
+                this.pending_binds.push({
+                    name: setter_name,
+                    render: (updates, names) =>
+                        `(${written.param}) => { ${this.guard_changes(names, updates, written.plain, written.body)} return ${written.param}; }`,
+                    writes: written.writes
+                });
+
+                parts.push(`set: ${setter_name}`);
+            } else {
+                parts.push('set: ($value) => $value');
+            }
+
+            parts.push(`listen: ${this.listen_source(binding.listen.content)}`);
+            if (binding.active) parts.push('active: true');
+
+            return { code: `${name}: { ${parts.join(', ')} }`, slot: false };
         }
 
         const getter = this.getter_source(get.content);

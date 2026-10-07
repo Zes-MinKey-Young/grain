@@ -2,7 +2,7 @@
     "name": "grain-vscode",
     "displayName": "Grain",
     "description": "Grain language support: syntax highlighting, diagnostics, go-to-definition, hover, completion and component prop hints",
-    "version": "0.1.14",
+    "version": "0.1.15",
     "publisher": "grain",
     "license": "MIT",
     "icon": "images/icon.png",

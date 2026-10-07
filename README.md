@@ -233,6 +233,26 @@ The guard is optional: `listen(operationList, "do")` is the always-true predicat
 } />
 ```
 
+## listen-only bindings
+
+A binding does not need a `get` if it has a `listen` — the listener becomes the **only**
+source of the value. The `update` callback it receives then takes one extra argument:
+
+```grain
+<input bind:value={ set: (v) => save(v), listen: (update) => bus.on('tick', () => update(next())) } />
+```
+
+`update(newValue)` stores the value and re-runs the element's property.
+`update()` without an argument just refreshes, and the value stays whatever it was.
+
+Compile-time rules for a binding without `get`:
+
+| case | result |
+| --- | --- |
+| no `listen` either | error — nothing supplies the value |
+| `listen(bus, "tick")` shorthand | error — it expands to `update()` and cannot supply a value; write the listener by hand |
+| listener never calls `update(value)` | error — the value would never change |
+
 ## bind:this
 `bind:this` hands you the element itself instead of one of its properties.
 

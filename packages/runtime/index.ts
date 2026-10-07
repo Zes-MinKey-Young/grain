@@ -175,7 +175,9 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
     for (const [key, value] of Object.entries(props)) {
         if (key.startsWith('bind:')) {
             const name = key.slice('bind:'.length);
-            const binding = value as Binding;
+            // 过一遍 to_binding：`bind:value={ set, listen }` 这种没有 getter 的绑定
+            // 要由它补上一个"值由 listener 提供"的 getter
+            const binding = to_binding(value);
 
             // 注册成属性片段，`update()` 全量刷新时会重新跑 getter
             const apply = () => apply_prop(element, name, binding.get());
@@ -405,18 +407,49 @@ function is_binding(value: unknown): value is Binding {
 
     const candidate = value as Partial<Binding>;
 
-    return typeof candidate.get === 'function' && typeof candidate.set === 'function';
+    if (typeof candidate.set !== 'function') return false;
+
+    // 值要么有个 getter，要么由 listener 通过 `update(新值)` 喂进来
+    return typeof candidate.get === 'function' || typeof candidate.listen === 'function';
 }
 
 /**
  * `$bindable` 声明的 prop 在子组件里的落地形式。
  *
- * 父组件用了 `bind:x` 时传进来的是 `{ get, set }`，直接用它——子组件写入就会写回父组件的变量。
+ * 父组件用了 `bind:x` 时传进来的就是绑定本身，直接用它——子组件写入就会写回父组件的变量。
  * 父组件只是普通传值时，退化成一个本地读写对，子组件自己玩。
+ *
+ * 父那边如果**没有 getter 但有 listener**（`bind:value={ set, listen }`），
+ * 值由 listener 提供：它调 `update(新值)`，这里把新值存下来当 getter 的结果。
  */
-export function to_binding<T>(value: unknown, fallback: T): Binding<T> {
-    // 父组件用了 `bind:` 时传进来的就是绑定本身，直接用它（external 由父那边打上）
-    if (is_binding(value)) return value as Binding<T>;
+export function to_binding<T>(value: unknown, fallback?: T): Binding<T> {
+    if (is_binding(value)) {
+        // 用 Partial 看它：没有 getter 的绑定（值由 listener 提供）也是合法的
+        const binding = value as Partial<Binding<T>>;
+
+        if (binding.get) return binding as Binding<T>;
+
+        // 没有 getter：拿 listen 喂进来的值当当前值
+        let current = fallback as T;
+        const listen: ((update: () => void) => void) | undefined = binding.listen;
+        const write: ((next: T) => T) | undefined = binding.set;
+
+        return {
+            external: binding.external ?? true,
+            get: () => current,
+            set: (next: T) => (current = write ? write(next) : next),
+            // 包一层：listener 给的 `update(新值)` 先存下来，再让元素重跑 getter
+            listen: listen
+                ? (update: () => void) =>
+                      listen((next?: unknown) => {
+                          if (next !== undefined) current = next as T;
+
+                          update();
+                      })
+                : undefined,
+            active: binding.active
+        };
+    }
 
     let current = (value === undefined ? fallback : value) as T;
 
