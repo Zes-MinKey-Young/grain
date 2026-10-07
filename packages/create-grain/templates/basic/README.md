@@ -19,8 +19,8 @@ index.html          mounts #app
 src/main.ts         entry — mounts the root component
 src/App.grain       root component
 src/Counter.grain   child component (props + two-way binding)
-src/grain.d.ts      $state / $props / $bindable / *.grain types
 vite.config.mts     the grain vite plugin
+tsconfig.json       types: ["@graints/runtime"] — that is where $state comes from
 ```
 
 ## What the starter shows
@@ -38,5 +38,8 @@ for highlighting, diagnostics, completion and go-to-definition inside `.grain` f
 
 ## Types
 
-`src/grain.d.ts` declares `$state`, `$props`, `$bindable` and the `*.grain` module
-type. Keep it — `pnpm typecheck` and the editor both rely on it.
+`$state`, `$props`, `$bindable` and the `*.grain` module type come from the runtime:
+`@graints/runtime` ships an ambient declaration file, and `tsconfig.json` picks it up
+with `"types": ["@graints/runtime"]`. Nothing to copy into your project — just keep
+that line in `tsconfig.json`. The VS Code extension injects the same declarations for
+the editor.

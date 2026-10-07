@@ -29,9 +29,10 @@ node packages/create-grain/index.mjs my-app
   `bind:this` with `<script onmount>`, `$props` / `$bindable`, component `<style>`
 - `minimal` — one `App.grain` with a counter
 
-Both ship `index.html`, `vite.config.mts`, `tsconfig.json`, `src/main.ts`,
-`src/grain.d.ts` (the `$state` / `$props` / `$bindable` / `*.grain` types) and a
-`.vscode/extensions.json` recommending `grain.grain-vscode`.
+Both ship `index.html`, `vite.config.mts`, `tsconfig.json`, `src/main.ts` and a
+`.vscode/extensions.json` recommending `grain.grain-vscode`. The `$state` / `$props` /
+`$bindable` / `*.grain` types come from `@graints/runtime` (via `types` in tsconfig),
+so there is no declaration file to copy around.
 
 Files that npm would drop when packing a tarball are stored with a `_` prefix
 (`_gitignore`, `_vscode`) and renamed while copying.

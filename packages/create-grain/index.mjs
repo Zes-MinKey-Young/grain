@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const template_root = join(here, 'templates');
 
 /** registry 模式下写的版本号（包发布后这里就是给新项目用的版本） */
-const REGISTRY_VERSION = '^0.1.1';
+const REGISTRY_VERSION = '^0.1.2';
 
 const HELP = `
 create-grain — scaffold a new Grain project

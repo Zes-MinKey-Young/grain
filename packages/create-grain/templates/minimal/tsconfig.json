@@ -8,7 +8,8 @@
         "skipLibCheck": true,
         "isolatedModules": true,
         "verbatimModuleSyntax": true,
-        "noEmit": true
+        "noEmit": true,
+        "types": ["@graints/runtime"]
     },
     "include": ["src"]
 }

@@ -1,6 +1,6 @@
 {
     "name": "@graints/runtime",
-    "version": "0.1.1",
+    "version": "0.1.2",
     "description": "Runtime for compiled Grain components",
     "license": "MIT",
     "type": "module",
@@ -14,7 +14,7 @@
     },
     "files": ["dist"],
     "scripts": {
-        "build": "tsc -p ."
+        "build": "tsc -p . && node build.mjs"
     },
     "publishConfig": {
         "access": "public",

@@ -18,7 +18,7 @@ pnpm dev
 
 Templates: `basic` (default — `App.grain` + a child component, covering `$state`, `{#if}` / `{#for}`, `bind:value`, `bind:this` with `<script onmount>`, `$props` / `$bindable` and component `<style>`) and `minimal` (one file).
 
-Every project ships `src/grain.d.ts`, which declares `$state`, `$props`, `$bindable` and the `*.grain` module type; the VS Code extension injects the same declarations for the editor.
+Types for `$state`, `$props`, `$bindable` and the `*.grain` module live in the runtime package (`@graints/runtime`), picked up by `tsconfig.json` via `"types": ["@graints/runtime"]`. The VS Code extension injects the same declarations for the editor.
 
 # How reactivity works in Grain
 Grain does most work during compile time. Grain compiles reactive variable through analyzing dependencies during compile time and generating the reactive code there. For example, the following code:

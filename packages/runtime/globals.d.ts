@@ -1,9 +1,14 @@
 /**
- * Global types every grain project needs (`$state`, `$props`, `$bindable`,
- * `import x from './x.grain'`).
+ * Grain 的全局类型。
  *
- * The VS Code extension injects the same declarations for the editor, so this
- * file is what makes `tsc --noEmit` agree with it.
+ * 这个文件是 ambient 的（没有 import / export），所以里面的 `$state` / `$props` /
+ * `$bindable` 和 `*.grain` 模块声明都是全局的 —— 只要它被加进 TS 程序就生效。
+ *
+ * 项目里不需要拷贝它：包的 `types` 入口（`dist/index.d.ts`）引用了这里，
+ * tsconfig 里写 `"types": ["@graints/runtime"]` 即可。
+ *
+ * VS Code 扩展注入的是同一份声明（见 packages/vscode 的 GRAIN_TYPE_SOURCE），
+ * 改这里的时候记得同步。
  */
 
 /**

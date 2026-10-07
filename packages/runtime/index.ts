@@ -8,6 +8,8 @@
  *    运行时不需要再做任何依赖追踪
  */
 
+/// <reference path="./globals.d.ts" />
+
 /**
  * `creEle` / `creFragment` 的返回值：既是更新调度器，也带着根节点。
  *

@@ -8,6 +8,6 @@ pnpm dev
 ```
 
 - `src/App.grain` — the whole app
-- `src/grain.d.ts` — `$state` / `$props` / `$bindable` / `*.grain` types
+- `tsconfig.json` — `types: ["@graints/runtime"]` brings in `$state` / `$props` / `$bindable` / `*.grain`
 
 Install the **`grain.grain-vscode`** extension to work on `.grain` files.

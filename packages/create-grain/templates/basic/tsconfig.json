@@ -9,7 +9,9 @@
         "skipLibCheck": true,
         "isolatedModules": true,
         "verbatimModuleSyntax": true,
-        "noEmit": true
+        "noEmit": true,
+        // `$state` / `$props` / `$bindable` / `*.grain` 来自这里（runtime 包自带的全局声明）
+        "types": ["@graints/runtime"]
     },
     "include": ["src"]
 }
