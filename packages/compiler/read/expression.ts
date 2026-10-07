@@ -60,6 +60,15 @@ function is_binding(value: RawAttributeValue): value is RawBindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
 }
 
+/** 绑定值里的各项（`get` / `set` / `listen` / 变量）分别用 TS 解析 */
+function parse_binding(binding: RawBindingValue, masked: string, label: string): void {
+    for (const key of ['expression', 'get', 'set', 'listen'] as const) {
+        const item = binding[key];
+
+        if (item) (item as Expression).content = parse_snippet(item, masked, `the ${key} of ${label}`);
+    }
+}
+
 /**
  * 解析绑定值里的一项（`get` / `set` / `listen` / 变量）。
  *
@@ -157,18 +166,18 @@ export function parse_expressions(template: Template<RawTemplateNode>, masked: s
         if (value === true || typeof value === 'string') return;
 
         if (Array.isArray(value)) {
-            for (const chunk of value) visit_chunk(chunk);
+            for (const chunk of value) {
+                if (typeof chunk === 'string') continue;
+                if (is_binding(chunk)) parse_binding(chunk, masked, 'the value');
+                else visit_chunk(chunk);
+            }
+
             return;
         }
 
         // 绑定值：`{ get, set, listen, active }`，各项分别解析
         if (is_binding(value)) {
-            const binding = value as RawBindingValue;
-
-            for (const key of ['expression', 'get', 'set', 'listen'] as const) {
-                const item = binding[key];
-                if (item) (item as Expression).content = parse_snippet(item, masked, `the ${key} of bind`);
-            }
+            parse_binding(value as RawBindingValue, masked, 'the value');
 
             return;
         }
@@ -178,6 +187,13 @@ export function parse_expressions(template: Template<RawTemplateNode>, masked: s
 
     function visit(nodes: RawTemplateNode[]): void {
         for (const node of nodes) {
+            // 模板插值 / 属性值里的绑定值（`{ get: ..., listen: ... }`）——单向的
+            if (!('type' in node)) {
+                parse_binding(node as RawBindingValue, masked, 'the value');
+
+                continue;
+            }
+
             switch (node.type) {
                 case 'expression':
                     (node as Expression).content = parse_expression(node, masked);

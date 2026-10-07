@@ -127,7 +127,7 @@ other one. `{:else if ...}` and `{:else}` are both optional.
 
 ## for
 
-The loop head is `binding of iterable` — **no parentheses**, exactly like `for...of` in ES6:
+The loop head is `binding of iterable` — like `for (const item of items)` in ES6, but with **no parentheses**:
 
 ```grain
 <ul>
@@ -150,14 +150,14 @@ and `const` / `let` in front of it is optional:
 
 ## Notes
 
-- A block tag without the `#` is an error: `Block tags need a `#`: write `{#if ...}`.
+- A block tag without the `#` is an error: ``Block tags need a `#`: write `{#if ...}`.``.
 - The loop variable only exists inside the block — the editor declares it for you, so it is
   typed and completed there, and go-to-definition jumps to the loop head.
 - Blocks nest freely and can contain elements, components, expressions and other blocks.
 - Iterating a `$state` array re-renders the block when it changes (`push`, `splice`, …).
 
 # bind
-`bind:` is used for two-way binding. It is used to bind a reactive variable to a non-reactive variable.
+`bind:` is used for two-way binding. It is used to bind a reactive variable to a sub-component that has a `$bindable` property or some native elements (like `<input>`).
 ```grain
 <script>
   let count = $state(0);
@@ -198,8 +198,6 @@ You may want to interop with a system that is non-reactive but armed with a stro
         }
       })
     }
-  },
-  active
 }>
 ```
 
@@ -259,7 +257,7 @@ untouched, since the compiler cannot see what it subscribes to.
 
 ## listen-only bindings
 
-A binding does not need a `get` if it has a `listen` — the listener becomes the **only**
+`get` can be omitted if the `bind:` has a `listen` — the listener becomes the **only**
 source of the value. The `update` callback it receives then takes one extra argument:
 
 ```grain
@@ -354,6 +352,66 @@ it never reaches the output.
 Arguments are evaluated at compile time: literals (`'name'`, `3`, `true`) arrive as values,
 anything else arrives as **source text**. The return value must be a string, or an array of
 strings.
+
+## Stores: state that crosses modules
+
+`$state` is compile-time — the compiler can only track dependencies it can see, and two
+components that import the same module are invisible to each other. Shared state therefore
+needs a little runtime: `writable` from the runtime package.
+
+```ts
+// counter.ts
+import { writable } from '@graints/runtime';
+
+export const counter = writable(0);
+```
+
+```grain
+<script>
+    import { counter } from './counter';
+</script>
+
+<input bind:value={$store(counter)} />
+```
+
+`$store` is a **built-in macro** — no `<script macro>` needed, no import. It expands to:
+
+```js
+{ listen: (update) => counter.subscribe(update), set: (v) => counter.set(v) }
+```
+
+`subscribe` calls back straight away with the current value, which is why there is no `get`:
+the listener supplies the value (see *listen-only bindings*). Every subscriber is notified on
+`set`, so any number of components stay in sync, in either direction.
+
+- `set` returns the value written; writing the same value notifies nobody
+- `subscribe` returns an unsubscribe function — hold onto it if you need to detach
+- `$store` is reserved: you cannot define a macro with that name
+
+### Showing a store's value
+
+`{counter.get()}` in the template is evaluated at runtime like anything else, but **nothing
+re-runs it**: refreshes are wired up at compile time and only for `$state`, while a store
+announces changes through `subscribe`. So it renders once and then never moves.
+
+`$read` is the read-only counterpart of `$store` — it emits only the `listen` part:
+
+```grain
+<p>value is {$read(counter)}</p>
+<span title={$read(counter)}></span>
+```
+
+It works because `listen:` is not exclusive to `bind:` — a **plain attribute** or a **template
+interpolation** can be written as a binding value too, and then it is one-way: the value gets
+pushed onto the element, nothing flows back. The long form does the same thing:
+
+```grain
+<span title={ get: () => counter.get(), listen: (update) => counter.subscribe(update) }></span>
+```
+
+Give `get` and the value comes from it; leave it out and the value comes from the listener
+(`subscribe` calls back with the current value right away). A binding value cannot be mixed
+into text — it has to be the whole value.
 
 ## bind:this
 `bind:this` hands you the element itself instead of one of its properties.

@@ -64,6 +64,17 @@ function template_reads(node: TemplateNode): Set<string> {
     const names = new Set<string>();
 
     const visit = (current: TemplateNode): void => {
+        // 单向绑定（模板插值 / 属性值）：读的是它的 get / 变量形式
+        if (!('type' in current)) {
+            const binding = current as BindingValue;
+            const source = binding.get ?? binding.expression;
+
+            if (source) add_all(names, collect_reads(source.content));
+            if (binding.listen) add_all(names, collect_reads(binding.listen.content));
+
+            return;
+        }
+
         switch (current.type) {
             case 'expression':
                 add_all(names, collect_reads(current.content));
@@ -465,6 +476,8 @@ class Generator {
     private inside_slot = false;
     /** 用到了 creText */
     private needs_text = false;
+    /** 用到了 creBound（单向属性 / 模板插值的绑定） */
+    private needs_bound = false;
     /** `$props()` 解构出来的变量，生成 `set_props` 要用 */
     private prop_names: Array<{ name: string; key: string }> = [];
     /**
@@ -479,6 +492,7 @@ class Generator {
     private refresh_names = new Map<string, string>();
     /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
     private pending_refreshes: Array<{ name: string; deps: Set<string> }> = [];
+
 
     constructor(
         private source: string,
@@ -505,6 +519,7 @@ class Generator {
         const imported = ['creEle', 'creFragment', 'component'];
         if (this.bindables.length > 0) imported.push('to_binding');
         if (this.needs_text) imported.push('creText');
+        if (this.needs_bound) imported.push('creBound');
 
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
 
@@ -780,6 +795,7 @@ class Generator {
             return `function ${refresh.name}() {${updates ? ` ${updates}` : ' '}}`;
         });
     }
+
 
     /** 函数体源码；`$bindable` 的写入顺带改成读写对调用 */
     private body_source(range: [number, number]): string {
@@ -1428,6 +1444,11 @@ class Generator {
             return this.binding_attribute(name, value as BindingValue, owner, slot_index);
         }
 
+        // 普通属性也可以写绑定值（`title={ get: ..., listen: ... }`）：单向，不往回写
+        if (!Array.isArray(value) && is_binding_value(value)) {
+            return { code: `${name}: ${this.bound_source(value)}`, slot: false };
+        }
+
         if (key.startsWith('on')) {
             const expression = expressions[0];
 
@@ -1484,7 +1505,27 @@ class Generator {
         return items;
     }
 
+    /**
+     * 单向绑定：普通属性 / 模板插值用的绑定值（`{ get: ..., listen: ... }`）。
+     *
+     * 产物是 `creBound(render, listen)`：render 给出值（不给就是"值由 listen 推"），
+     * listen 决定什么时候重跑——编译期不需要知道依赖是什么，所以跨模块的 store
+     * 也能驱动它。跟 `bind:` 的区别是不往回写。
+     */
+    private bound_source(binding: BindingValue): string {
+        const getter = binding.get ?? binding.expression;
+        const render = getter ? this.getter_source(getter.content) : 'null';
+        const listen = binding.listen ? this.listen_source(binding.listen.content) : null;
+
+        this.needs_bound = true;
+
+        return `creBound(${render}${listen ? `, ${listen}` : ''})`;
+    }
+
     private child(node: TemplateNode, index: number, owner: string | null): string | string[] | null {
+        // 模板插值里的绑定值：`{ listen: (update) => ... }`
+        if (!('type' in node)) return this.bound_source(node as BindingValue);
+
         switch (node.type) {
             case 'comment':
                 return null;

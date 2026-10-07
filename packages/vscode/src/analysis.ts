@@ -779,6 +779,9 @@ function imported_components(script: Script | null, filename: string): Map<strin
 
 function element_at(nodes: TemplateNode[], offset: number): ElementInfo | null {
     for (const node of nodes) {
+        // 单向绑定（模板插值 / 属性值的绑定值）：不是元素，跳过
+        if (!('type' in node)) continue;
+
         const children: TemplateNode[] =
             node.type === 'element' || node.type === 'IfBlock' || node.type === 'ForBlock'
                 ? [
@@ -945,6 +948,9 @@ export function analyze(source: string, filename: string): Analysis {
 
     const tail_lines: string[] = [
         ...loops.map((name) => `declare let ${name}: any;`),
+        // 内置宏：不用定义也不用 import，但补全和"找得到这个名字"要有
+        'declare function $store<T>(store: { subscribe(listener: (value: T) => void): unknown; set(next: T): T }): void;',
+
         // 只补 bind:this **自己声明**的变量；script 里已有的不重复声明
         ...this_bindings
             .filter((item) => item.declared)

@@ -1,11 +1,18 @@
 import { check_bindings } from './check.js';
 import { ParseError } from './errors.js';
 import { expand_macros, type MacroReparse } from './macro.js';
+
 import { parse_expressions } from './read/expression.js';
 import { parse_script } from './read/script.js';
 import { parse_style } from './read/style.js';
 import { scan_script, scan_style } from './scan.js';
-import { read_attribute_value, read_binding_value, read_block_attributes, read_fragment } from './template.js';
+import {
+    REGEX_BINDING_VALUE,
+    read_attribute_value,
+    read_binding_value,
+    read_block_attributes,
+    read_fragment
+} from './template.js';
 import type {
     RawScript,
     RawStyle,
@@ -76,20 +83,25 @@ export class Parser {
             template: root.template as Template<TemplateNode>
         };
 
-        // `bind:` 的值可能是宏调用，先展开成真正的绑定值，再检查形状
-        if (macro) {
-            // 重解析用的是 Parser 实例，从这里传进去——避免 macro 反过来 import parser
-            const reparse: MacroReparse = {
-                binding: (text, filename) => read_binding_value(new Parser(text, { filename })),
-                attribute: (text, filename) => read_attribute_value(new Parser(text, { filename }))
-            };
+        // `bind:` 的值可能是宏调用，先展开成真正的绑定值，再检查形状。
+        // 无条件跑：内置宏（`$store`）不需要写 `<script macro>`
+        // 重解析用的是 Parser 实例，从这里传进去——避免 macro 反过来 import parser
+        const reparse: MacroReparse = {
+            binding: (text, filename) => read_binding_value(new Parser(`{${text}}`, { filename })),
+            attribute: (text, filename) => read_attribute_value(new Parser(text, { filename })),
+            // 绑定语法（`listen: ...`）按绑定值读；否则按属性值——
+            // 值里没有 `{` 就补一对花括号，不然会被当成一段字面文本
+            value: (text, filename) =>
+                REGEX_BINDING_VALUE.test(text)
+                    ? read_binding_value(new Parser(`{${text}}`, { filename }))
+                    : read_attribute_value(new Parser(text.includes('{') ? text : `{${text}}`, { filename }))
+        };
 
-            const run = expand_macros(result, this.source, this.options.filename, reparse);
+        const run = expand_macros(result, this.source, this.options.filename, reparse);
 
-            result.expanded = run.appended;
-            result.replacements = run.replacements;
-            result.macros = run.macros;
-        }
+        result.expanded = run.appended;
+        result.replacements = run.replacements;
+        result.macros = run.macros;
 
         // 都解析完了才检查 `bind:value={ ... }` 里那三个函数的形状
         check_bindings(result);

@@ -153,21 +153,27 @@ function check_listen_supplies_value(binding: BindingValue): void {
     if (!name) return;
 
     let supplied = false;
+    let passed = false;
 
     simpleTraverse(node.body as unknown as TSESTree.Node, {
-        enter: (child) => {
-            if (
-                child.type === 'CallExpression' &&
-                (child.callee as TSESTree.Node).type === 'Identifier' &&
-                (child.callee as TSESTree.Identifier).name === name &&
-                child.arguments.length > 0
-            ) {
-                supplied = true;
+        enter: (child, parent) => {
+            if (child.type !== 'Identifier' || child.name !== name) return;
+
+            const call = parent as TSESTree.CallExpression | undefined;
+
+            // `update(newValue)` —— 直接给出值
+            if (call?.type === 'CallExpression' && call.callee === child) {
+                if (call.arguments.length > 0) supplied = true;
+
+                return;
             }
+
+            // `something.subscribe(update)` —— 把 update 交出去，对方会带值调它
+            passed = true;
         }
     });
 
-    if (!supplied) {
+    if (!supplied && !passed) {
         fail(
             listen,
             `\`get\` is missing, so the value must come from the listener: call \`${name}(newValue)\`, not \`${name}()\``
@@ -230,6 +236,13 @@ function check_value(key: string, value: AttributeValue | true): void {
 export function check_bindings(root: Root): void {
     const visit = (nodes: TemplateNode[]): void => {
         for (const node of nodes) {
+            // 模板插值里的绑定值（`{ get: ..., listen: ... }`）——没有 type 字段的那个
+            if (!('type' in node)) {
+                check_binding(node);
+
+                continue;
+            }
+
             switch (node.type) {
                 case 'element':
                     for (const [key, value] of Object.entries(node.attributes)) check_value(key, value);

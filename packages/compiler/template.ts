@@ -165,7 +165,7 @@ function read_nodes(parser: Parser, top_level: boolean): RawTemplateNode[] {
         // 分支 / 结束标记应由对应的块读取器消费，出现在这里说明没有可配对的块
         if (parser.match('{:') || parser.match('{/')) parser.error('There is no block to close');
 
-        return [read_expression(parser)];
+        return [read_brace(parser)];
     }
 
     return [read_element(parser)];
@@ -296,6 +296,24 @@ function read_expression(parser: Parser): RawExpression {
 }
 
 /**
+ * 模板里的 `{ ... }`：可能是绑定值，也可能是普通表达式。
+ *
+ * 绑定值（`get:` / `set:` / `listen:` / `active`）不只是 `bind:` 的专利——
+ * 单向属性和模板插值也认这套，它们只取 `get` + `listen`，不往回写。
+ */
+function read_brace(parser: Parser): RawExpression | RawBindingValue {
+    const after = parser.index + 1;
+    const { contentEnd } = scan_expression(parser.source, after, parser.locate);
+    const text = parser.source.slice(after, contentEnd);
+
+    if (REGEX_BINDING_KEY.test(text) || REGEX_BINDING_FLAG.test(text) || REGEX_LISTEN_CALL.test(text)) {
+        return read_binding_value(parser);
+    }
+
+    return read_expression(parser);
+}
+
+/**
  * 从当前位置读到配对的 `}` 并消费掉，产出一个表达式节点。
  * 块的 `{if ...}` / `{:else if ...}` 也用它读条件。
  */
@@ -420,6 +438,10 @@ const REGEX_BINDING_KEY = /^\s*(get|set|listen|active)\s*:/;
 const REGEX_BINDING_FLAG = /^\s*(active)\s*$/;
 /** 不带键名的 listen 简写：`listen(eventBus, eventName, guard)` */
 const REGEX_LISTEN_CALL = /^\s*listen\s*\(/;
+
+/** 一段文本是不是绑定值语法（不带花括号） */
+export const REGEX_BINDING_VALUE =
+    /^\s*(get|set|listen|active)\s*:|^\s*active\s*$|^\s*listen\s*\(/;
 
 /** 裁剪出绑定值里一项的内容（去掉两端空白），做成一个待解析的片段 */
 function slice_item(source: string, start: number, end: number): RawExpression {
@@ -606,7 +628,7 @@ function read_chunks(
     is_end: (source: string, index: number) => boolean
 ): RawAttributeValue {
     const source = parser.source;
-    const chunks: Array<string | RawExpression> = [];
+    const chunks: Array<string | RawExpression | RawBindingValue> = [];
 
     let start = parser.index;
     let i = start;
@@ -616,7 +638,7 @@ function read_chunks(
             if (i > start) chunks.push(decode_entities(source.slice(start, i)));
 
             parser.index = i;
-            chunks.push(read_expression(parser));
+            chunks.push(read_brace(parser));
 
             start = parser.index;
             i = start;

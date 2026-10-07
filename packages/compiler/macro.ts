@@ -39,6 +39,11 @@ import type {
 export interface MacroReparse {
     binding: (text: string, filename?: string) => RawBindingValue;
     attribute: (text: string, filename?: string) => RawAttributeValue;
+    /**
+     * 属性值 / 模板插值的位置：可能是绑定值（`listen: ...`），也可能是普通表达式。
+     * 宏展开出来的东西两种都有可能，所以交给它判断。
+     */
+    value: (text: string, filename?: string) => RawAttributeValue;
 }
 
 /** 绑定值里的键，顺序跟 `read_binding_value` 认的一致 */
@@ -53,6 +58,42 @@ const BINDING_KEYS = ['expression', 'get', 'set', 'listen'] as const;
  */
 const BUILT_IN_RUNES = new Set(['$state', '$props', '$bindable']);
 
+/**
+ * 内置宏：不用在 `<script macro>` 里定义，也不用 import。
+ *
+ * 参数跟用户宏一样，拿不到值，拿到的是那段表达式的**源码文本**。
+ */
+const BUILT_IN_MACROS: Record<string, (...args: unknown[]) => string> = {
+    /**
+     * `$store(counter)`：把跨模块的 writable 接成一个绑定。
+     *
+     * `subscribe` 会立刻用当前值调一次 update，所以不需要 `get`——
+     * 值由 listener 提供（正是"没有 getter 的绑定"那条规则）。
+     */
+    $store(source: unknown) {
+        const store = String(source ?? '').trim();
+
+        if (!store) throw new Error('`$store` needs a writable, for example `$store(counter)`');
+
+        return `listen: (update) => (${store}).subscribe(update), set: (v) => (${store}).set(v)`;
+    },
+
+    /**
+     * `$read(counter)`：单向——只订阅，不写回。
+     *
+     * 用在**普通属性**和**模板插值**上（`bind:` 用 `$store`）。
+     * 没有 `get` 时值由 subscribe 推（它立刻回调当前值）；
+     * 也可以自己给值：`title={counter.get(), $read(counter)}`。
+     */
+    $read(source: unknown) {
+        const store = String(source ?? '').trim();
+
+        if (!store) throw new Error('`$read` needs a writable, for example `$read(counter)`');
+
+        return `listen: (update) => (${store}).subscribe(update)`;
+    }
+};
+
 /** 宏名（或导入进来的本地名）必须是 `$` 开头，且不能是内置 rune */
 function check_macro_name(name: string, start: number, end: number): void {
     if (!name.startsWith('$')) {
@@ -65,6 +106,10 @@ function check_macro_name(name: string, start: number, end: number): void {
 
     if (BUILT_IN_RUNES.has(name)) {
         throw new ParseError(`\`${name}\` is a built-in rune — a macro cannot reuse its name`, start, end);
+    }
+
+    if (name in BUILT_IN_MACROS) {
+        throw new ParseError(`\`${name}\` is a built-in macro — pick another name`, start, end);
     }
 }
 
@@ -158,13 +203,13 @@ export class MacroScope {
         this.functions = this.run(block);
     }
 
-    /** 定义了多少个宏 */
+    /** 可用的宏：内置的那几个总在，加上自己定义的 */
     get size(): number {
-        return this.names.length;
+        return this.names.length + Object.keys(BUILT_IN_MACROS).length;
     }
 
     has(name: string): boolean {
-        return Object.prototype.hasOwnProperty.call(this.functions, name);
+        return name in BUILT_IN_MACROS || Object.prototype.hasOwnProperty.call(this.functions, name);
     }
 
     /**
@@ -177,6 +222,20 @@ export class MacroScope {
      * 交给对应位置的语法去解析，不是自己分词。
      */
     call(name: string, args: unknown[], start: number, end: number): string {
+        const built_in = BUILT_IN_MACROS[name];
+
+        if (built_in) {
+            try {
+                return built_in(...args);
+            } catch (error) {
+                throw new ParseError(
+                    `The macro \`${name}\`: ${error instanceof Error ? error.message : String(error)}`,
+                    start,
+                    end
+                );
+            }
+        }
+
         const macro = this.functions[name];
 
         let result: unknown;
@@ -432,12 +491,10 @@ function binding_from_text(
     reparse: MacroReparse,
     filename?: string
 ): BindingValue {
-    const value = `{ ${text} }`;
-
     let raw: RawBindingValue;
 
     try {
-        raw = reparse.binding(value, filename);
+        raw = reparse.binding(text, filename);
     } catch (error) {
         throw new ParseError(
             `The macro \`${name}\` did not produce a binding value: ${error instanceof Error ? error.message : String(error)}`,
@@ -473,7 +530,66 @@ function binding_from_text(
  * 语法读一遍。宏给的东西里没有花括号时（比如 `() => count++`）当成
  * 单个表达式，自动补上花括号——否则会被读成一段字面文本。
  */
-function attribute_from_text(
+/**
+ * 属性值 / 模板插值的位置：宏给回来的可能是绑定值（`listen: ...`），也可能是普通表达式。
+ *
+ * 单向属性（`title={$read(store)}`）和模板插值（`{$read(store)}`）走这里——
+ * 它们只往元素上推，不往回写。
+ */
+/** 把重新读出来的值解析成最终形式（表达式 / 绑定值都要过一遍 TS） */
+function realize_value(
+    raw: RawAttributeValue,
+    name: string,
+    at: { start: number; end: number },
+    placement: Placement
+): AttributeValue {
+    if (typeof raw === 'string') return raw;
+
+    if (Array.isArray(raw)) {
+        return raw.map((chunk) => {
+            if (typeof chunk === 'string') return chunk;
+
+            // 绑定值只能独占一个位置，跟文本混在一起没法表达
+            if (!('type' in chunk)) {
+                throw new ParseError(
+                    `A binding value cannot be mixed with text — use it as the whole value`,
+                    at.start,
+                    at.end
+                );
+            }
+
+            return expression_from_raw(chunk, at, placement, `A chunk from the macro \`${name}\``);
+        });
+    }
+
+    // 绑定值：`get` / `set` / `listen` 各自解析
+    if (!('type' in raw)) {
+        const source = raw as RawBindingValue;
+
+        const binding: BindingValue = {
+            start: at.start,
+            end: at.end,
+            expression: null,
+            get: null,
+            set: null,
+            listen: null,
+            active: source.active
+        };
+
+        for (const key of BINDING_KEYS) {
+            const item = source[key] as RawExpression | null;
+            if (!item) continue;
+
+            binding[key] = expression_from_raw(item, at, placement, `The \`${key}\` from the macro \`${name}\``);
+        }
+
+        return binding;
+    }
+
+    return expression_from_raw(raw as RawExpression, at, placement, `The result of the macro \`${name}\``);
+}
+
+function value_from_text(
     text: string,
     name: string,
     at: { start: number; end: number },
@@ -481,37 +597,19 @@ function attribute_from_text(
     reparse: MacroReparse,
     filename?: string
 ): AttributeValue {
-    // 没有花括号、也不是引号开头时当成单个表达式，补上花括号（否则会被读成一段字面文本）
-    const shape = /^\s*["']/.test(text) || text.includes('{') ? text : `{${text}}`;
-
-    let value: RawAttributeValue;
+    let raw: RawAttributeValue;
 
     try {
-        value = reparse.attribute(shape, filename);
+        raw = reparse.value(text, filename);
     } catch (error) {
         throw new ParseError(
-            `The macro \`${name}\` did not produce an attribute value: ${error instanceof Error ? error.message : String(error)}`,
+            `The macro \`${name}\` did not produce a value: ${error instanceof Error ? error.message : String(error)}`,
             at.start,
             at.end
         );
     }
 
-    if (typeof value === 'string') return value;
-
-    if (Array.isArray(value)) {
-        return value.map((chunk) =>
-            typeof chunk === 'string'
-                ? chunk
-                : expression_from_raw(chunk, at, placement, `A chunk from the macro \`${name}\``)
-        );
-    }
-
-    return expression_from_raw(
-        value as RawExpression,
-        at,
-        placement,
-        `The result of the macro \`${name}\``
-    );
+    return realize_value(raw, name, at, placement);
 }
 
 /** 绑定值没有 `type` 字段，表达式有 */
@@ -663,7 +761,54 @@ export function expand_macros(
     }
 
     function visit_value(node: Element, key: string, value: AttributeValue | true): void {
-        if (value === true || typeof value === 'string' || Array.isArray(value)) return;
+        if (value === true || typeof value === 'string') return;
+
+        // 混合值（文本 + 表达式）：宏调用可以展开成表达式；展开成绑定值就不行了
+        // —— 那得是整个值才表达得了
+        if (Array.isArray(value)) {
+            for (let at = 0; at < value.length; at += 1) {
+                const chunk = value[at];
+
+                if (typeof chunk === 'string' || !('type' in chunk)) continue;
+
+                const expression = chunk as Expression;
+                const call = macro_call(expression.content, scope);
+
+                if (!call) {
+                    reject(expression.content, expression.start, expression.end);
+
+                    continue;
+                }
+
+                const name = (call.callee as TSESTree.Identifier).name;
+                const args = call_arguments(call, source, expression.start, expression.end);
+                const text = scope.call(name, args, expression.start, expression.end);
+                const expanded = value_from_text(
+                    text,
+                    name,
+                    { start: expression.start, end: expression.end },
+                    placement,
+                    reparse,
+                    filename
+                );
+
+                macros.push({ name, start: expression.start, end: expression.end, text, where: 'attribute' });
+
+                if (typeof expanded === 'string' || 'type' in expanded) {
+                    value[at] = expanded as string | Expression;
+
+                    continue;
+                }
+
+                throw new ParseError(
+                    `The macro \`${name}\` expands to a binding value, which cannot be mixed with text — use it as the whole value`,
+                    expression.start,
+                    expression.end
+                );
+            }
+
+            return;
+        }
 
         const expression = value as Expression;
         const at = { start: expression.start, end: expression.end };
@@ -706,20 +851,53 @@ export function expand_macros(
 
         macros.push({ name, start: at.start, end: at.end, text, where: 'attribute' });
 
-        node.attributes[key] = attribute_from_text(text, name, at, placement, reparse, filename);
+        node.attributes[key] = value_from_text(text, name, at, placement, reparse, filename);
     }
 
     function visit(nodes: TemplateNode[]): void {
-        for (const node of nodes) {
+        for (let index = 0; index < nodes.length; index += 1) {
+            const node = nodes[index];
+
+            // 绑定值节点（`{ get: ..., listen: ... }`）：已经是展开的结果，不用管
+            if (!('type' in node)) continue;
+
             switch (node.type) {
                 case 'element':
                     for (const [key, value] of Object.entries(node.attributes)) visit_value(node, key, value);
                     visit(node.children);
                     break;
 
-                case 'expression':
-                    reject(node.content, node.start, node.end);
+                case 'expression': {
+                    // 模板插值：整个插值是一个宏调用时可以展开（`{$read(store)}`）
+                    const call = macro_call(node.content, scope);
+
+                    if (!call) {
+                        reject(node.content, node.start, node.end);
+
+                        break;
+                    }
+
+                    const name = (call.callee as TSESTree.Identifier).name;
+                    const at = { start: node.start, end: node.end };
+                    const args = call_arguments(call, source, at.start, at.end);
+                    const text = scope.call(name, args, at.start, at.end);
+
+                    macros.push({ name, start: at.start, end: at.end, text, where: 'attribute' });
+
+                    const expanded = value_from_text(text, name, at, placement, reparse, filename);
+
+                    if (typeof expanded === 'string') {
+                        throw new ParseError(
+                            `The macro \`${name}\` cannot expand to plain text in a template interpolation`,
+                            at.start,
+                            at.end
+                        );
+                    }
+
+                    nodes[index] = expanded as TemplateNode;
+
                     break;
+                }
 
                 case 'IfBlock':
                     reject(node.test.content, node.test.start, node.test.end);

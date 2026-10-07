@@ -1,0 +1,34 @@
+<script>
+    import { name } from './store';
+    import Box from './Box.grain';
+
+    function reset() {
+        name.set('ada');
+    }
+</script>
+
+<h2>Two inputs, one store</h2>
+<p>
+    <input bind:value={$store(name)} />
+</p>
+<p>
+    <input bind:value={$store(name)} />
+</p>
+
+<h2>Same store, from another component</h2>
+<Box />
+
+<p>
+    <button onclick={reset}>reset</button>
+</p>
+
+<style>
+    input {
+        padding: 0.3rem 0.5rem;
+    }
+
+    h2 {
+        font-size: 1rem;
+        margin: 1.5rem 0 0.5rem;
+    }
+</style>

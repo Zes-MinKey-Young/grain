@@ -3,6 +3,13 @@
 import type * as TS from 'typescript';
 
 import { log } from './log.js';
+import {
+    is_runtime_file,
+    RUNTIME_DECL_FILE,
+    RUNTIME_MODULE_TEXT,
+    RUNTIME_TYPES,
+    runtime_package_json
+} from './runtime-types.js';
 
 import type { Script } from '../../compiler/index.js';
 
@@ -357,7 +364,8 @@ class TypeScriptService {
         const versions = this.versions;
 
         return {
-            getScriptFileNames: () => [...contents.keys()],
+            // 末尾那份是 `@graints/runtime` 的全局声明（项目不一定装了这个包）
+            getScriptFileNames: () => [...contents.keys(), RUNTIME_DECL_FILE],
             getScriptVersion: (file) => {
                 const own = versions.get(file);
                 if (own !== undefined) return String(own);
@@ -368,6 +376,15 @@ class TypeScriptService {
                 return mtime ? String(Math.floor(mtime / 1000)) : '1';
             },
             getScriptSnapshot: (file) => {
+                if (file === RUNTIME_DECL_FILE) return ts.ScriptSnapshot.fromString(RUNTIME_MODULE_TEXT);
+
+                // `@graints/runtime`：用户项目不一定装了这个包，直接给内置声明
+                if (is_runtime_file(file)) {
+                    return ts.ScriptSnapshot.fromString(
+                        file.endsWith('.json') ? runtime_package_json() : RUNTIME_TYPES
+                    );
+                }
+
                 const content = contents.get(file) ?? this.lazy_virtual(file);
 
                 if (content !== undefined) return ts.ScriptSnapshot.fromString(content);
@@ -379,8 +396,16 @@ class TypeScriptService {
             getCompilationSettings: () => get_options(),
             getDefaultLibFileName: (settings) => ts.getDefaultLibFilePath(settings),
             fileExists: (file) =>
-                contents.has(file) || this.lazy_virtual(file) !== undefined || ts.sys.fileExists(file),
-            readFile: (file) => contents.get(file) ?? this.lazy_virtual(file) ?? ts.sys.readFile(file),
+                is_runtime_file(file) ||
+                contents.has(file) ||
+                this.lazy_virtual(file) !== undefined ||
+                ts.sys.fileExists(file),
+            readFile: (file) =>
+                is_runtime_file(file)
+                    ? file.endsWith('.json')
+                        ? runtime_package_json()
+                        : RUNTIME_TYPES
+                    : (contents.get(file) ?? this.lazy_virtual(file) ?? ts.sys.readFile(file)),
             readDirectory: (...args) => ts.sys.readDirectory(...args),
             directoryExists: (dir) => ts.sys.directoryExists(dir),
             getDirectories: (dir) => ts.sys.getDirectories(dir)

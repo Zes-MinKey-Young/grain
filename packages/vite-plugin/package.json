@@ -1,6 +1,6 @@
 {
     "name": "@graints/vite-plugin",
-    "version": "0.1.11",
+    "version": "0.2.0",
     "description": "Vite plugin that compiles .grain components",
     "license": "MIT",
     "type": "module",
@@ -12,7 +12,9 @@
             "default": "./dist/vite-plugin/index.js"
         }
     },
-    "files": ["dist"],
+    "files": [
+        "dist"
+    ],
     "scripts": {
         "build": "tsc -p ."
     },

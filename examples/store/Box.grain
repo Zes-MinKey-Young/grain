@@ -1,0 +1,20 @@
+<script>
+    import { name } from './store';
+</script>
+
+<div>
+<p>
+    <input bind:value={$store(name)} />
+</p>
+
+<!-- `$read` 是单向的：只订阅，不写回。用在模板插值和普通属性上，
+     `bind:` 那边用 `$store` -->
+<p>Box sees: {$read(name)}</p>
+</div>
+
+<style>
+
+div {
+    background-color: #99AAFF
+}
+</style>

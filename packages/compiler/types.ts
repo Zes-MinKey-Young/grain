@@ -73,7 +73,7 @@ export type RawAttributeValue =
     | string
     | RawExpression
     | RawBindingValue
-    | Array<string | RawExpression>;
+    | Array<string | RawExpression | RawBindingValue>;
 
 export interface Position {
     /** 相对整个 SFC 源文本的起始偏移 */
@@ -179,13 +179,20 @@ export interface ForBlock extends ForBlockBase<TemplateNode, Expression> {
     content: TSForOf;
 }
 
-export type TemplateNode = Element | Text | Comment | Expression | IfBlock | ForBlock;
+/**
+ * 模板节点。
+ *
+ * 绑定值（`{ get: ..., listen: ... }`）也可以是节点：模板插值用它做**单向**绑定
+ * ——由 listen 推着走，不往回写（区别于 `bind:` 那种双向的）。
+ */
+export type TemplateNode = Element | Text | Comment | Expression | IfBlock | ForBlock | BindingValue;
 
 export type RawTemplateNode =
     | Element<RawTemplateNode, RawAttributeValue>
     | Text
     | Comment
     | RawExpression
+    | RawBindingValue
     | RawIfBlock
     | RawForBlock;
 

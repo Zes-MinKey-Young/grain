@@ -69,6 +69,95 @@ export interface Binding<T = unknown> {
     active?: boolean;
 }
 
+/**
+ * 跨模块共享的可写状态。
+ *
+ * `$state` 只在编译期可见——两个组件各自 import 同一个模块时，编译器看不到它们
+ * 之间的依赖，所以跨模块的追踪交回给运行时：值变了就通知订阅者。
+ *
+ * 配合内置宏 `$store` 使用（它生成订阅代码），手写 `bind:value` 也能直接用。
+ */
+export interface Writable<T> {
+    /** 当前值 */
+    get(): T;
+    /** 写新值，返回**最终值**；值没变就不通知 */
+    set(next: T): T;
+    /**
+     * 订阅：立刻用当前值调一次，之后值变了再调。返回退订函数。
+     *
+     * 立刻调这一次是刻意的：绑定因此拿到初始值，不需要另外的 getter。
+     */
+    subscribe(listener: (value: T) => void): () => void;
+}
+
+/**
+ * 一个带外部订阅的渲染函数。
+ *
+ * 属性值和文本插值都可以是它：`listen` 决定什么时候重跑（store 的通知走这里），
+ * 编译期不需要知道依赖是什么。
+ */
+export interface Bound {
+    (): unknown;
+    listen?: (update: () => void) => void;
+}
+
+/**
+ * 单向绑定（属性值 / 文本插值用）：只往元素上推，不往回写。
+ *
+ * - 给了 `render`：值由它算（比如 `() => name.get()`）
+ * - 没给 `render`：值由 listener 推 —— `update(新值)` 存下来当当前值
+ *   （跟 `bind:` 里"没有 getter 的绑定"一个道理）
+ */
+export function creBound(
+    render?: (() => unknown) | null,
+    listen?: (update: (value?: unknown) => void) => void
+): Bound {
+    let current: unknown;
+
+    const bound = (() => (render ? render() : current)) as Bound;
+
+    if (listen) {
+        bound.listen = (update) => {
+            listen((value) => {
+                if (value !== undefined) current = value;
+
+                update();
+            });
+        };
+    }
+
+    return bound;
+}
+
+export function writable<T>(initial: T): Writable<T> {
+    const listeners = new Set<(value: T) => void>();
+
+    let current = initial;
+
+    return {
+        get: () => current,
+
+        set(next) {
+            if (next === current) return current;
+
+            current = next;
+
+            for (const listener of [...listeners]) listener(current);
+
+            return current;
+        },
+
+        subscribe(listener) {
+            listeners.add(listener);
+            listener(current);
+
+            return () => {
+                listeners.delete(listener);
+            };
+        }
+    };
+}
+
 type Props = Record<string, unknown>;
 
 const FRAGMENT_NODE = 11;
@@ -199,9 +288,14 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
         } else if (key.startsWith('on') && typeof value === 'function') {
             element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
         } else if (typeof value === 'function') {
-            const render = value as () => unknown;
-            prop_slots.push(() => apply_prop(element, key, render()));
-            apply_prop(element, key, render());
+            const render = value as Bound;
+            const apply = () => apply_prop(element, key, render());
+
+            prop_slots.push(apply);
+            apply();
+
+            // 外部源驱动的单向属性：`title={$read(store)}` —— 由 listen 决定什么时候重跑
+            render.listen?.(apply);
         } else {
             apply_prop(element, key, value);
         }
@@ -237,9 +331,14 @@ function create(tag: string | null, props: Props, children: unknown[]): Updater 
             const anchor = document.createComment('');
             el.appendChild(anchor);
 
-            const slot: Slot = { anchor, render: child as () => unknown, nodes: [] };
+            const render = child as Bound;
+            const slot: Slot = { anchor, render, nodes: [] };
+
             slots[index] = slot;
             render_slot(slot);
+
+            // 模板插值也可以是单向绑定：`{$read(store)}`
+            render.listen?.(() => render_slot(slot));
         } else {
             for (const node of to_nodes(child)) el.appendChild(node);
         }
