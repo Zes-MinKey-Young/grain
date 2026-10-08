@@ -80,7 +80,91 @@ function is_block_mark(source: string, index: number): boolean {
  */
 export function split_for_header(
     raw: string
-): { binding: string; iterable: string } | null {
+): {
+    binding: string;
+    iterable: string;
+    key: string | null;
+    key_at: number;
+    /** 循环头"for 那一段"的结束（也就是 `with` 在哪儿，没写就是末尾） */
+    head_end: number;
+    head: string;
+} | null {
+    /**
+     * 先把 `with key = ...` 摘掉（如果写了），剩下的再按 `of` 切。
+     *
+     * 摘出来的这段才是要交给 TS 的循环头 —— 带着 `with` 的话 `for (...)` 拼出来是
+     * 一条语法错误的语句。
+     */
+    let head = raw;
+    let head_end = raw.length;
+    let key: string | null = null;
+    let key_at = -1;
+
+    const with_at = find_word(raw, 'with');
+
+    if (with_at >= 0) {
+        const after = raw.slice(with_at + 4);
+        const clause = after.trim();
+        const leading = after.length - clause.length;
+        const equal = clause.indexOf('=');
+
+        if (!clause.startsWith('key') || equal < 0) return null;
+
+        const value = clause.slice(equal + 1);
+        const before_value = value.length - value.trimStart().length;
+
+        head_end = with_at;
+        head = raw.slice(0, with_at);
+        key = value.trim();
+        // key 表达式在 raw 里的起点，read_for_block 拿它换算出源码里的绝对位置
+        key_at = with_at + 4 + leading + equal + 1 + before_value;
+    }
+
+    let depth = 0;
+    let quote: string | null = null;
+
+    for (let i = 0; i < head.length; i += 1) {
+        const char = head[i];
+
+        if (quote) {
+            if (char === '\\') i += 1;
+            else if (char === quote) quote = null;
+
+            continue;
+        }
+
+        if (char === '"' || char === "'" || char === '`') {
+            quote = char;
+            continue;
+        }
+
+        if (char === '(' || char === '[' || char === '{') depth += 1;
+        else if (char === ')' || char === ']' || char === '}') depth -= 1;
+        else if (depth === 0 && char === 'o' && head.startsWith('of', i)) {
+            const before = head[i - 1];
+            const after = head[i + 2];
+
+            if (!before_match(before) && !before_match(after)) {
+                return {
+                    binding: head.slice(0, i).trim(),
+                    iterable: head.slice(i + 2).trim(),
+                    key,
+                    key_at,
+                    head_end,
+                    head
+                };
+            }
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 在字符串外面、括号外面找单词 `word`（前后都不能是标识符字符）。
+ * 用来定位 `with` —— 它跟 `of` 一样，得是关键字而不是名字的一部分。
+ */
+function find_word(raw: string, word: string): number {
     let depth = 0;
     let quote: string | null = null;
 
@@ -101,17 +185,15 @@ export function split_for_header(
 
         if (char === '(' || char === '[' || char === '{') depth += 1;
         else if (char === ')' || char === ']' || char === '}') depth -= 1;
-        else if (depth === 0 && char === 'o' && raw.startsWith('of', i)) {
+        else if (depth === 0 && raw.startsWith(word, i)) {
             const before = raw[i - 1];
-            const after = raw[i + 2];
+            const after = raw[i + word.length];
 
-            if (!before_match(before) && !before_match(after)) {
-                return { binding: raw.slice(0, i).trim(), iterable: raw.slice(i + 2).trim() };
-            }
+            if (!before_match(before) && !before_match(after)) return i;
         }
     }
 
-    return null;
+    return -1;
 }
 
 /** 标识符字符：`of` 两边得是空白之类的，才说明它是关键字而不是名字的一部分 */
@@ -210,6 +292,11 @@ function read_for_block(parser: Parser): RawForBlock {
     const parts = split_for_header(raw);
 
     if (!parts || parts.binding === '' || parts.iterable === '') {
+        // 写了 `with` 但格式不对：单独给一句提示，免得只看到"must be binding of iterable"
+        if (raw.includes('with')) {
+            parser.error('`{#for ...}` with a key must look like `with key = expr`, for example `{#for item of list with key = item.id}`', start, end);
+        }
+
         parser.error(
             '`{#for ...}` must be `binding of iterable`, for example `{#for item of list}`',
             start,
@@ -224,13 +311,27 @@ function read_for_block(parser: Parser): RawForBlock {
 
     expect_close(parser, 'for');
 
+    const key =
+        parts.key === null
+            ? null
+            : ({
+                  type: 'expression',
+                  raw: parts.key,
+                  contentStart: content_start + parts.key_at,
+                  contentEnd: content_start + parts.key_at + parts.key.length,
+                  start: content_start + parts.key_at,
+                  end: content_start + parts.key_at + parts.key.length
+              } as RawExpression);
+
     return {
         type: 'ForBlock',
-        raw,
+        // raw 和 contentEnd 都只到 `with` 之前：那一段才是完整的循环头
+        raw: parts.head,
         contentStart: content_start,
-        contentEnd,
+        contentEnd: content_start + parts.head_end,
         children,
         fallback,
+        key,
         start,
         end: parser.index
     };

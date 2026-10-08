@@ -31,6 +31,41 @@ export function creBound(
     render?: (() => unknown) | null,
     listen?: (update: (value?: unknown) => void) => void
 ): Bound;
+
+/** 一次容器改动：for 块拿它决定动哪几行 */
+export type ContainerChange =
+    | { type: 'push'; items: unknown[] }
+    | { type: 'pop' }
+    | { type: 'shift' }
+    | { type: 'unshift'; items: unknown[] }
+    | { type: 'splice'; at: number; removed: number; items: unknown[] }
+    | { type: 'set' }
+    | { type: 'delete' }
+    | { type: 'clear' }
+    | { type: 'unknown' };
+
+/**
+ * 自己会通知改动的容器。用在"编译器看不全所有改动"的场景 —— 容器被传出去、
+ * 在回调里改、或者改它的代码不在这个组件里。
+ */
+export interface ReactiveContainer {
+    subscribe(listener: (change: ContainerChange) => void): () => void;
+}
+
+/** 会通知改动的数组 */
+export function reactive_array<T>(initial?: T[]): T[] & ReactiveContainer;
+
+/** 会通知改动的 Map */
+export function reactive_map<K, V>(initial?: Map<K, V>): Map<K, V> & ReactiveContainer;
+
+/** 会通知改动的 Set */
+export function reactive_set<T>(initial?: Set<T>): Set<T> & ReactiveContainer;
+
+/**
+ * 响应式循环的检测点。dev 下由编译器埋进每个刷新函数；
+ * 短时间内被叫太多次就抛。产物代码才会用到，手写组件时不用管它。
+ */
+export function guard(name: string): void;
 `;
 
 /** 语言服务里认这个模块名 */

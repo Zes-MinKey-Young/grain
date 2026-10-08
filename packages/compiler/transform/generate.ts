@@ -38,6 +38,14 @@ export interface CompileOptions {
     runtimeModule?: string;
     /** 文件名，参与 scope id 计算 */
     filename?: string;
+    /**
+     * 开发模式。
+     *
+     * 会往刷新函数里埋循环检测点（`guard`），循环了就在运行时抛 ——
+     * 编译期抓不到的那些环（store 通知、条件分支）靠它兜底。产物会变大一点，
+     * 所以只有 dev 下埋。
+     */
+    dev?: boolean;
 }
 
 export interface CompileResult {
@@ -265,6 +273,59 @@ function binary_operator(operator: string): string {
     return operator.slice(0, -1);
 }
 
+/**
+ * 能精确定位到"动了哪几行"的容器方法。
+ *
+ * `reverse` / `sort` / `fill` 之类的改动是全局的，没有"受影响的行"可言 —— 它们仍然
+ * 走整块比对。
+ */
+const LIST_MUTATIONS = new Set(['push', 'pop', 'shift', 'unshift', 'splice']);
+
+/** 这些工厂造出来的是"自己会通知改动"的容器 */
+const REACTIVE_FACTORIES = new Set(['reactive_array', 'reactive_map', 'reactive_set']);
+
+/**
+ * 找出用 `reactive_array(...)` 之类声明的变量。
+ *
+ * 它们自己知道动了什么，所以 `for` 订阅它就行 —— 不用编译期去猜。
+ */
+function reactive_containers_in(root: Root): Set<string> {
+    const names = new Set<string>();
+
+    for (const block of [root.script, root.module]) {
+        if (!block) continue;
+
+        for (const statement of block.content.body) {
+            if (statement.type !== 'VariableDeclaration') continue;
+
+            for (const item of statement.declarations) {
+                const init = item.init;
+
+                if (item.id.type !== 'Identifier') continue;
+                if (init?.type !== 'CallExpression') continue;
+                if (init.callee.type !== 'Identifier') continue;
+                if (!REACTIVE_FACTORIES.has(init.callee.name)) continue;
+
+                names.add(item.id.name);
+            }
+        }
+    }
+
+    return names;
+}
+
+/**
+ * `for` 的源是不是"直接就是这个容器变量"。
+ *
+ * 只认 `items` —— 这样 `items.push(x)` 才能换成列表自己的 `push`。
+ * `items.entries()` 也指向同一个容器，但它的每一项是 `[index, value]`：加一项会让
+ * 后面所有项的索引都变，不是"追加一行"那么简单，所以它走整块比对。
+ * 别的（`list.filter(...)`、`a.concat(b)`）一概不认。
+ */
+function source_variable_of(right: TSESTree.Expression): string | null {
+    return right.type === 'Identifier' ? right.name : null;
+}
+
 function is_function_like(node: TSESTree.Node): node is FunctionLike {
     return (
         node.type === 'ArrowFunctionExpression' ||
@@ -481,6 +542,19 @@ class Generator {
     private needs_text = false;
     /** 用到了 creBound（单向属性 / 模板插值的绑定） */
     private needs_bound = false;
+    /** 用到了 creList（`{#for ...}`） */
+    private needs_list = false;
+    /**
+     * 容器变量 -> 那个 `for` 产出的列表。
+     *
+     * 只有"of 后面直接跟着这个变量"（或它的 `entries()`）才登记 —— 改的就是这个
+     * 容器，才能换成精确的 `push` / `splice` 调用。
+     */
+    private for_sources = new Map<string, string>();
+    /** 每个 for 在父级里的片段坐标：精确调用顶掉它之后，就别再让它 sync 一遍 */
+    private for_slots = new Map<string, { update: string; index: number }>();
+    /** `reactive_array(...)` 之类声明的变量：它们自己会通知改动 */
+    private readonly reactive_containers: Set<string>;
     /** `$props()` 解构出来的变量，生成 `set_props` 要用 */
     private prop_names: Array<{ name: string; key: string }> = [];
     /**
@@ -501,10 +575,16 @@ class Generator {
     private node_triggers: Array<{ refresh: string; deps: Set<string> }> = [];
     /** `$node` 的变量名 -> 读写对 / 刷新函数（写入改写要用） */
     private node_pairs = new Map<string, { pair: string; refresh: string; set: boolean }>();
+    /** `$node` 变量 -> 它的 `get` 读了哪些变量（环检测用，也决定谁来触发重算） */
+    private node_deps = new Map<string, Set<string>>();
+    /** `$node` 变量 -> 声明语句的位置（环检测报错要指到那儿） */
+    private node_spans = new Map<string, [number, number]>();
     /** `$node` 变量的写入改写（事件处理器复制函数体时也要应用） */
     private node_write_edits: Edit[] = [];
     /** `$node` 的订阅：等元素建好再挂 */
     private node_listens: Array<{ pair: string; refresh: string }> = [];
+    /** 容器的精确调用（`list.push(...)`），紧跟在原调用之后插入 */
+    private mutation_edits: Edit[] = [];
 
 
     constructor(
@@ -514,8 +594,12 @@ class Generator {
         private analysis: ScriptAnalysis | null,
         /** 组件级样式的类名；`<style global>` 或没有样式时为 null */
         private scope_id: string | null,
-        private filename: string
-    ) {}
+        private filename: string,
+        /** 开发模式：往刷新函数里埋循环检测点 */
+        private dev: boolean
+    ) {
+        this.reactive_containers = reactive_containers_in(root);
+    }
 
     run(): CompileResult {
         // 先定下根调度器的名字：bindactive 的 setter 要在最后触发它的全量刷新
@@ -533,6 +617,8 @@ class Generator {
         if (this.bindables.length > 0) imported.push('to_binding');
         if (this.needs_text) imported.push('creText');
         if (this.needs_bound) imported.push('creBound');
+        if (this.needs_list) imported.push('creList');
+        if (this.dev && this.pending_refreshes.length > 0) imported.push('guard');
 
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
 
@@ -586,6 +672,9 @@ class Generator {
         // 监听本身等元素都建好再挂：同一总线 + 同一事件只挂一次，谓词合并成 if 树
         const listens = this.listen_registrations();
         if (listens.length > 0) instance.push('', '/* 合并的事件监听 */', ...listens);
+
+        // 静态看得出来的环：直接报错，别让它过编译
+        this.check_reactive_cycles();
 
         // 属性修改触发器：得等所有片段都收集完，才知道 props 变了要刷哪些
         const set_props = this.props_statements();
@@ -820,9 +909,57 @@ class Generator {
             const updates = this.update_calls(refresh.deps);
             // `$node` 的刷新函数：先重算这个节点
             const assign = this.refresh_assigns.get(refresh.name) ?? '';
+            // dev 下埋个检测点：真循环起来，运行时会抛
+            const guard = this.dev ? `guard(${JSON.stringify(refresh.name)}); ` : '';
 
-            return `function ${refresh.name}() {${assign ? ` ${assign}` : ''}${updates ? ` ${updates}` : ' '}}`;
+            return `function ${refresh.name}() {${guard}${assign ? ` ${assign}` : ''}${updates ? ` ${updates}` : ' '}}`;
         });
+    }
+
+    /**
+     * 响应式循环里**静态看得出来**的那部分。
+     *
+     * `$node` 之间互相依赖时，重算链自己就成环了（`x` 的 `get` 读 `y`，`y` 又读 `x`），
+     * 跑起来必然停不下来 —— 这种编译期就能定下来，直接报错，别让它过编译。
+     *
+     * 靠运行时的条件分支或者 store 通知才成立的环抓不到（那些路径静态看不见），
+     * 交给 dev 下埋的 `guard`。
+     */
+    private check_reactive_cycles(): void {
+        if (this.node_deps.size === 0) return;
+
+        const done = new Set<string>();
+        const visiting = new Set<string>();
+        const stack: string[] = [];
+
+        const visit = (name: string): void => {
+            if (done.has(name)) return;
+
+            if (visiting.has(name)) {
+                const cycle = [...stack.slice(stack.indexOf(name)), name];
+                const [start, end] = this.node_spans.get(name) ?? [0, 0];
+
+                throw new ParseError(
+                    `Reactive loop: ${cycle.join(' -> ')} — each one reads the next, so recomputing never settles`,
+                    start,
+                    end
+                );
+            }
+
+            visiting.add(name);
+            stack.push(name);
+
+            for (const read of this.node_deps.get(name) ?? []) {
+                // 只有读的是另一个 `$node` 才可能成环：普通 $state 不会自己重算
+                if (this.node_deps.has(read)) visit(read);
+            }
+
+            stack.pop();
+            visiting.delete(name);
+            done.add(name);
+        };
+
+        for (const name of this.node_deps.keys()) visit(name);
     }
 
     /**
@@ -944,6 +1081,9 @@ class Generator {
 
             const deps = node.get ? collect_reads(parse_inline(node.get)) : new Set<string>();
 
+            this.node_deps.set(node.name, deps);
+            this.node_spans.set(node.name, node.statement);
+
             this.pending_refreshes.push({ name: refresh, deps: new Set([node.name]) });
             this.refresh_assigns.set(refresh, `${node.name} = ${pair}.get();`);
             this.node_triggers.push({ refresh, deps });
@@ -957,8 +1097,8 @@ class Generator {
     private body_source(range: [number, number]): string {
         const [from, to] = range;
 
-        // `$bindable` 的写入改写、`$node` 的写入改写，都算进去
-        const edits = [...this.bindable_edits, ...this.node_write_edits];
+        // `$bindable` 的写入改写、`$node` 的写入改写、容器的精确调用，都算进去
+        const edits = [...this.bindable_edits, ...this.node_write_edits, ...this.mutation_edits];
 
         if (edits.length === 0) return this.source.slice(from, to);
 
@@ -974,7 +1114,14 @@ class Generator {
             const node = wrapper.node;
             const params = node.params.map((param) => this.slice(param.range)).join(', ');
             const reactive = [...this.reactive_writes(wrapper.writes)];
-            const updates = this.update_calls(new Set(reactive));
+
+            // 直接改容器（`items.push(x)`）的话，用列表自己的精确调用顶掉整块比对。
+            // 这些插入紧跟原调用（见 mutation_calls），所以先登记再取函数体
+            const mutations = this.mutation_calls(node);
+
+            this.mutation_edits = mutations.edits;
+
+            const updates = this.update_calls(new Set(reactive), mutations.skip);
 
             const head =
                 node.type === 'ArrowFunctionExpression'
@@ -1106,11 +1253,16 @@ class Generator {
         return new Set([...writes].filter((name) => states.has(name)));
     }
 
-    /** 写了 `writes` 里的 state 之后，需要刷新哪些片段 */
-    private update_calls(writes: Set<string>): string {
+    /**
+     * 写了 `writes` 里的 state 之后，需要刷新哪些片段。
+     *
+     * `skip` 里的是已经被精确调用（`list.push(...)`）顶掉的 for —— 再 sync 一遍就白做了。
+     */
+    private update_calls(writes: Set<string>, skip?: Set<string>): string {
         const grouped = new Map<string, number[]>();
 
         for (const slot of this.slots) {
+            if (skip?.has(`${slot.update}#${slot.index}`)) continue;
             if (!intersects(slot.deps, writes)) continue;
 
             const indices = grouped.get(slot.update) ?? [];
@@ -1751,42 +1903,139 @@ class Generator {
         return `() => { ${body} return []; }`;
     }
 
+    /**
+     * `{#for ...}`：产出一个 `creList`，自己管一段（不用每次重建）。
+     *
+     * 每一项被包成一个 updater（`__row$N`）：块内的片段注册到它身上，于是复用一项时
+     * 只要重新绑一次循环变量再刷那些片段，DOM 不动。写了 `with key = ...` 就按 key
+     * 匹配，没写就按位置 —— 两种都不重建已有的项。
+     */
     private for_block(node: ForBlock, index: number, owner: string | null): string {
         const deps = template_reads(node);
-        const item = `__item$${this.counter++}`;
+        const iter = `__iter$${this.counter++}`;
+        const row = `__row$${this.counter++}`;
         const right = this.slice(node.content.right.range);
         const left = node.content.left;
 
-        // 循环头不写声明方式时（`{#for item of list}`）left 就是个模式，自己补 const
-        const binding =
+        // 循环变量必须是 let：复用一项时要重新绑到新值上
+        const pattern =
             left.type === 'VariableDeclaration'
-                ? `${left.kind} ${this.slice(left.declarations[0].id.range)} = ${item};`
-                : `const ${this.slice(left.range)} = ${item};`;
+                ? this.slice(left.declarations[0].id.range)
+                : this.slice(left.range);
 
-        // 每一项都要新建 DOM，所以块内的 creEle 放进 render 函数里，不注册片段
-        const render = `render$${this.counter++}`;
-        const [inner, inner_statements] = this.capture(() => this.children(node.children, null));
+        const binding = `let ${pattern} = ${iter};`;
 
-        let fallback = '[]';
+        // 块内的片段注册到这一项的 updater 上（以前传 null，等于每次重建）
+        const [inner, inner_statements] = this.capture(() => this.children(node.children, row));
+
+        let fallback = 'null';
 
         if (node.fallback) {
-            // 空列表分支只创建一次，放在 render 外面
+            // 空列表分支：整个 for 共用一份，放在 render 外面
             const [items, statements] = this.capture(() => this.children(node.fallback!.children, null));
-            fallback = `[${items.join(', ')}]`;
+
+            fallback = `() => [${items.join(', ')}]`;
             this.statements.push(...statements);
         }
 
+        // 只有 of 后面直接是这个变量（或它的 entries()）才认：改它就能精确定位
+        const source = source_variable_of(node.content.right);
+
+        // 源先取一次：后面 sync、订阅都用它，避免把表达式求值两遍
+        const source_name = `__src$${this.counter++}`;
+        const render = `render$${this.counter++}`;
+        const list = `__list$${this.counter++}`;
+
+        // `with key = ...`：键是拿循环变量算的，所以参数就是那个绑定模式
+        const key = node.key ? `(${pattern}) => (${node.key.raw})` : 'null';
+
+        this.needs_list = true;
+
         this.statements.push(
-            `const ${render} = (${item}) => {`,
+            `const ${render} = (${iter}) => {`,
             `  ${binding}`,
             ...inner_statements.map((line) => `  ${line}`),
-            `  return [${inner.join(', ')}];`,
-            '};'
+            `  const ${row} = creFragment([${inner.join(', ')}]);`,
+            `  return {`,
+            // 拿 fragment 里的真实节点：fragment 本身一插入就摊平了，不能拿它当节点
+            `    nodes: Array.from(${row}.el.childNodes),`,
+            // 不带编号地刷这一项：把里面所有片段（含属性里的）重跑一遍，DOM 不动
+            `    update: (next) => { ${pattern} = next; ${row}(); },`,
+            `  };`,
+            '};',
+            // 只给订阅判断用（有没有 subscribe）。source 仍写 `${right}`：
+            // 每次重新求值，`entries()` 这种一次性迭代器才不会被耗尽
+            `const ${source_name} = ${right};`,
+            `const ${list} = creList({ render: ${render}, key: ${key}, fallback: ${fallback}, source: () => ${right} });`,
+            `${list}.sync(${right});`,
+            // 响应式容器：订阅它的改动。编译期不一定知道谁是响应式（可能是 import 进来的），
+            // 所以运行时看有没有 subscribe——连"编译期看不见的改动"也能精确更新
+            `if (typeof ${source_name}?.subscribe === 'function') ${source_name}.subscribe((change) => ${list}.apply(change));`
         );
 
+        // 依赖变了由父级刷新这一段 -> creList 重新取一次再比对（不是重建）
         if (owner) this.slots.push({ update: owner, index, deps });
 
-        return `() => { const __nodes$${index} = []; for (const ${item} of ${right}) __nodes$${index}.push(...${render}(${item})); return __nodes$${index}.length ? __nodes$${index} : ${fallback}; }`;
+        // 精确调用（`list.push(...)`）只给 `$state` 的容器：响应式容器有自己的订阅，
+        // 两边都做就重复了。而 `$state` 变量不会是响应式容器，所以这条分得开
+        if (source && this.analysis?.states.has(source)) {
+            this.for_sources.set(source, list);
+
+            if (owner) this.for_slots.set(list, { update: owner, index });
+        }
+
+        return list;
+    }
+
+    /**
+     * 这次写入里有没有"直接改某个 for 的容器"的调用（`items.push(x)` 之类）。
+     *
+     * 有就生成列表自己的精确调用，并把它对应的那次整块 sync 顶掉 —— 数组大了，
+     * 每次都重新取 + 比对是灾难。
+     */
+    /**
+     * @returns `edits` 是"紧跟在原调用之后"的插入（不是追加到函数末尾——
+     * 参数里可能引用了会被后面语句改掉的变量，`next_id` 就是个例子）
+     */
+    private mutation_calls(node: TSESTree.Node): { edits: Edit[]; skip: Set<string> } {
+        const edits: Edit[] = [];
+        const skip = new Set<string>();
+
+        simpleTraverse(node, {
+            enter: (child, parent) => {
+                if (child.type !== 'CallExpression') return;
+
+                const callee = child.callee;
+                if (callee.type !== 'MemberExpression' || callee.property.type !== 'Identifier') return;
+
+                const method = callee.property.name;
+                if (!LIST_MUTATIONS.has(method)) return;
+                if (callee.object.type !== 'Identifier') return;
+
+                const name = callee.object.name;
+
+                // 响应式容器自己会通知 `for`，这里再生成一次就重复了
+                if (this.reactive_containers.has(name)) return;
+
+                const list = this.for_sources.get(name);
+                if (!list) return;
+
+                const args = child.arguments
+                    .filter((arg) => arg.type !== 'SpreadElement')
+                    .map((arg) => this.slice(arg.range))
+                    .join(', ');
+
+                // 紧跟在那句调用之后：此刻参数还是原值
+                const statement = parent?.type === 'ExpressionStatement' ? parent : child;
+
+                edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}.${method}(${args});` });
+
+                const slot = this.for_slots.get(list);
+                if (slot) skip.add(`${slot.update}#${slot.index}`);
+            }
+        });
+
+        return { edits, skip };
     }
 
     /** 临时把生成语句收集到别处，用于 render 函数体 */
@@ -1854,6 +2103,7 @@ export function generate(root: Root, source: string, options: CompileOptions = {
         options.runtimeModule ?? '@graints/runtime',
         analysis,
         scope_id,
-        options.filename ?? 'component.grain'
+        options.filename ?? 'component.grain',
+        options.dev ?? false
     ).run();
 }

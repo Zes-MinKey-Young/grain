@@ -1,14 +1,15 @@
 /**
- * Grain 的全局类型。
+ * Grain's global types.
  *
- * 这个文件是 ambient 的（没有 import / export），所以里面的 `$state` / `$props` /
- * `$bindable` 和 `*.grain` 模块声明都是全局的 —— 只要它被加进 TS 程序就生效。
+ * This file is ambient (it has no import / export), so everything in it — `$state`,
+ * `$props`, `$bindable`, `$node`, the built-in macros and the `*.grain` module
+ * declarations — is global as soon as the file is part of the TS program.
  *
- * 项目里不需要拷贝它：包的 `types` 入口（`dist/index.d.ts`）引用了这里，
- * tsconfig 里写 `"types": ["@graints/runtime"]` 即可。
+ * Projects don't need a copy: the package's `types` entry (`dist/index.d.ts`) points here,
+ * so `"types": ["@graints/runtime"]` in tsconfig is enough.
  *
- * VS Code 扩展注入的是同一份声明（见 packages/vscode 的 GRAIN_TYPE_SOURCE），
- * 改这里的时候记得同步。
+ * The VS Code extension injects the very same declarations (GRAIN_TYPE_SOURCE in
+ * `packages/vscode/src/typescript.ts`) — keep the two in sync when you change this.
  */
 
 /**

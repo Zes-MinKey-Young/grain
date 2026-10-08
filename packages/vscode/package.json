@@ -1,9 +1,9 @@
 {
     "name": "grain-vscode",
-    "displayName": "Grain",
-    "description": "Grain language support: syntax highlighting, diagnostics, go-to-definition, hover, completion and component prop hints",
+    "displayName": "Grain.ts",
+    "description": "Grain.ts language support: syntax highlighting, diagnostics, go-to-definition, hover, completion and component prop hints",
     "version": "0.2.0",
-    "publisher": "grain",
+    "publisher": "grain-ts",
     "license": "MIT",
     "icon": "images/icon.png",
     "keywords": [

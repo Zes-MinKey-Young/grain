@@ -105,7 +105,8 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         const cached = cache.get(key);
         if (cached) return cached;
 
-        const result = compile(code, { ...compiler_options, filename: file });
+        // dev 下编译器会往刷新函数埋循环检测点
+        const result = compile(code, { ...compiler_options, filename: file, dev: is_dev });
         cache.set(key, result);
 
         return result;

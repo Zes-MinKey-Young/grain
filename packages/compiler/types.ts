@@ -165,6 +165,13 @@ export interface ForBlockBase<N = TemplateNode, E = Expression> extends Position
     children: N[];
     /** `{:else}` 分支，列表为空时渲染 */
     fallback: ElseBlockBase<N, E> | null;
+    /**
+     * `with key = ...` 给出来的键（没有写就是 null）。
+     *
+     * 有它才能按 key 复用循环体 —— 于是 `shift` / `unshift` / `splice` 这类
+     * "后面的项整体移位"的操作也能只动受影响的那几行，不用整块重建。
+     */
+    key: E | null;
 }
 
 export type RawElseBlock = ElseBlockBase<RawTemplateNode, RawExpression>;

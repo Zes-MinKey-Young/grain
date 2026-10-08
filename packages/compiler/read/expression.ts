@@ -217,6 +217,10 @@ export function parse_expressions(template: Template<RawTemplateNode>, masked: s
 
                 case 'ForBlock':
                     (node as ForBlock).content = parse_for_of(node, masked);
+
+                    // `with key = ...` 的键也是表达式，单独解析
+                    if (node.key) (node.key as Expression).content = parse_snippet(node.key, masked, 'the key of a `for`');
+
                     visit(node.children);
                     if (node.fallback) visit(node.fallback.children);
                     break;
