@@ -245,7 +245,7 @@ bus.addEventListener('tick', ($event) => {
 ```
 
 ### 没有第二条数据流
-用 `active` 绑上的普通变量不是响应式状态。这个绑定加上 `active` 是它**唯一**的数据流 —— `active` 重新读 getter 并把值写回那个元素，别的都没有。在模板其它地方读同一个变量，它变了也不会更新：
+用 `active` 绑上的普通变量不是响应式状态。这个 `active` 绑定是它**唯一**的数据流 —— `active` 重新读 getter 并把值写回那个元素，别的都没有。在模板其它地方读同一个变量，它变了也不会更新：
 ```grain
 <script>
   let draft = '';
@@ -312,19 +312,17 @@ bus.addEventListener('tick', ($event) => {
 | what they do | `$state` 变成读写对，`$props()` 成为 props 参数 | 展开为其他语法 |
 | where | `<script>` | `bind:`、属性值、`<script>` |
 
-So `function $state()` in a macro script is an error, and so is a macro named `field`.
+所以 `function $state()` 在宏块里面会报错，名为 `field` 的宏也是。
 
-### 宏可以使用的位置
+### 宏可用的位置
 
 - **`bind:`** — 作为绑定值读取
 - **属性值** — 作为属性值读取；没有 `{` 或引号的结果被视为一个表达式（`onclick` 上的 `() => count++` 变为处理器）
 - **在 `<script>` 内** — 展开为表达式
 
-不在模板 `{ ... }` 插值中：宏在运行时不存在，所以在那里使用会是编译错误，而不是稍后的 `ReferenceError`。
-
 ### 在 `<script macro>` 中导入
 
-宏可以导入，但只能导入 **相对路径** —— `node_modules` 中的包在构建时不一定可加载 —— 并且本地名称必须使用 `$` 重命名：
+宏可以导入，但只能导入自 **相对路径** —— `node_modules` 中的包在构建时不一定可加载 —— 并且本地名称必须使用 `$` 重命名：
 
 ```grain
 <script macro>
@@ -373,16 +371,16 @@ export const counter = writable(0);
 
 ### 显示 Store 的值
 
-模板中的 `{counter.get()}` 在运行时像其他普通代码一样被求值，但**没有任何东西会重新运行它**：刷新是在编译时连接的，仅适用于 `$state`，而 store 通过 `subscribe` 宣布变化。所以它只渲染一次，然后永远不会再变动。
+模板中的 `{counter.get()}` 在运行时像其他普通代码一样求值，但**没有任何东西能使它重新求值**，因为编译期追踪的刷新仅适用于 `$state`，而 store 通过 `subscribe` 宣布变化。所以它只渲染一次，然后永远不会再变动。
 
-`$read` 是 `$store` 的只读对应物 —— 它只发出 `listen` 部分：
+`$read` 是 `$store` 的只读对应物 —— 它只展开 `listen` 部分：
 
 ```grain
 <p>value is {$read(counter)}</p>
 <span title={$read(counter)}></span>
 ```
 
-这是可行的，因为 `listen:` 并非专用于 `bind:` —— **普通属性**或**模板插值**也可以写成绑定值的形式。此时它是单向的：值被推送到元素上，没有数据回流。长形式的效果相同：
+这能起作用是因为 `listen:` 并非专用于 `bind:` —— **普通属性**或**模板插值**也可以写成绑定值的形式。此时它是单向的：值被推送到元素上，没有数据回流。长形式的效果相同：
 
 ```grain
 <span title={ get: () => counter.get(), listen: (update) => counter.subscribe(update) }></span>
@@ -392,7 +390,7 @@ export const counter = writable(0);
 
 ## $node：`<script>` 中的派生值
 
-`$node` 声明一个派生值。它的参数是一个 **绑定值（binding value）** —— 语法与属性或模板插值相同，尽管它看起来像是一个 TypeScript 对象：
+`$node` 声明一个派生值。它的参数是一个 **绑定值（binding value）** —— 语法与属性或模板插值相同，尽管它看着像个 TypeScript 对象：
 
 ```grain
 <script>
@@ -407,7 +405,7 @@ export const counter = writable(0);
 
 - **`set` 决定方向。** 如果包含它，对变量赋值（如 `shown = x`）会经过 setter；如果不包含它，对变量赋值会导致编译错误 —— 单向即单向。
 - **`get` 是可选的。** 如果缺失它，值将来自 `listen`（`subscribe` 会立即回调当前值），这与单向属性完全相同。缺少 `get` 或 `listen` 本身都不是错误。
-- **`active` 必须写成 `active: true`**，以保持参数为有效的 TypeScript。
+- **`active` 必须写成 `active: true`**，以保持参数为有效的 TypeScript 语法。
 - **仅编译期生效。** 没有对象会保留到输出中 —— 只有一对 getter/setter 以及一个重新计算该变量并刷新所有读取它的代码的函数。
 
 `listen` 扮演两个不同的角色，取决于是否同时存在 `get`：
@@ -440,13 +438,13 @@ Reactive loop: x -> y -> x — each one reads the next, so recomputing never set
 
 自己读自己（`const a = $node({ get: () => a + 1 })`）是同一件事的单行写法。
 
-**仅 dev。** 只在运行时才成立的环（store 通知、条件分支）静态看不见。所以 dev 下编译器会给每个刷新函数埋一个计数器：10ms 内跑满 100 次就抛，并且指名是哪个函数：
+**仅 dev。** 只在运行时才成立的环（store 通知、条件分支）静态看不见。所以开发模式下编译器会给每个刷新函数埋一个计数器：10ms 内跑满 100 次就抛，并且指名是哪个函数：
 
 ```
 `__refresh$3` ran 100 times within 10ms — this is almost always a reactive loop
 ```
 
-生产构建不带计数器，那里的循环会以栈溢出的形式暴露出来。
+生产构建不带计数器，那里的循环会以栈溢出的形式暴露出来。但也有可能因为尾调用消除导致事件循环直接卡死。
 
 ## Keyed 循环
 
@@ -575,6 +573,6 @@ function add() {
 - **只有 `<script onmount>` 能访问 `bind:this` 变量。** 在别处用是编译期错误：`` `box` is declared by `bind:this` and can only be used inside `<script onmount>` ``
 - 每个组件实例跑一次 —— 根组件是追加进目标之后，子组件是父组件挂上它的时候
 - `$state(...)` 和 `$props()` 在里头照常能用，跟 `<script>` 里一样
-- 它不是事件处理器：在这里写 `$state` 不会安排刷新。要摆弄 DOM 就放这儿，要做响应式的工作就放回 `<script>`
+- 它不是事件处理器，但在这里写 `$state` **会**安排刷新 —— 它跑的时候 DOM 已经就位，所以适合在这里启动响应式的工作
 
 `bind:this` 变量带的是对应的 DOM 接口类型（`<input>` 是 `HTMLInputElement`，`<div>` 是 `HTMLDivElement`……），所以 `box.value` 和 `box.focus()` 都有类型检查和补全。认不出来的标签退回 `HTMLElement`。

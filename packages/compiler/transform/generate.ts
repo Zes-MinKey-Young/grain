@@ -682,7 +682,20 @@ class Generator {
 
         // 挂上之后才跑：这时候 bind:this 的变量已经被赋上元素了
         if (onmount && onmount.body) {
-            instance.push('', '/* <script onmount> */', `${root_name}.onmount = () => {`, onmount.body, '};');
+            // onmount 里的顶层写 $state 也算数据流动 —— 挂载完立刻安排一次刷新。
+            // （里面定义的**函数**本来就有刷新，走的是 wrapper 那条路）
+            const writes = collect_writes(this.root.onmount!.content);
+            const reactive = [...this.reactive_writes(writes)];
+            const updates = this.update_calls(new Set(reactive));
+
+            instance.push(
+                '',
+                '/* <script onmount> */',
+                `${root_name}.onmount = () => {`,
+                onmount.body,
+                updates ? ` ${updates}` : '',
+                '};'
+            );
         }
 
         // 套一层稳定的外壳：HMR 换实例时只换里面，父组件持有的引用不动

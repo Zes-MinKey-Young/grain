@@ -343,9 +343,6 @@ So `function $state()` in a macro script is an error, and so is a macro named `f
   is treated as one expression (`() => count++` on `onclick` becomes a handler)
 - **inside `<script>`** — expands into an expression
 
-Not in a template `{ ... }` interpolation: macros do not exist at runtime, so using one there
-is a compile error rather than a `ReferenceError` later.
-
 ### Imports in `<script macro>`
 
 Macros may import, but only **relative paths** — a package from `node_modules` is not
@@ -625,6 +622,6 @@ Rules:
 - **Only `<script onmount>` can access a `bind:this` variable.** Using it anywhere else is a compile-time error in the editor: `` `box` is declared by `bind:this` and can only be used inside `<script onmount>` ``.
 - It runs once per component instance — for the root component after it is appended to the target, for a child component when the parent attaches it.
 - `$state(...)` and `$props()` work inside it, exactly like in `<script>`.
-- It is not an event handler: writes to a `$state` there do not schedule a refresh. Set up the DOM instead, or do reactive work in `<script>`.
+- It is not an event handler, but writing to a `$state` there **does** schedule a refresh — it runs with the DOM already in place, so it is a fine place to kick off reactive work.
 
 A `bind:this` variable is typed with the matching DOM interface (`HTMLInputElement` for `<input>`, `HTMLDivElement` for `<div>`, …), so `box.value` and `box.focus()` are checked and completed. Unknown tags fall back to `HTMLElement`.
