@@ -46,7 +46,7 @@ The smallest useful component:
 
 ## Editor
 
-Install the **`grain.grain-vscode`** extension (`.vscode/extensions.json` in the template
+Install the **`grain-ts.grain-vscode`** extension (`.vscode/extensions.json` in the template
 recommends it) for highlighting, diagnostics, completion, go-to-definition and component
 prop hints inside `.grain` files.
 
@@ -255,6 +255,21 @@ untouched, since the compiler cannot see what it subscribes to.
 } />
 ```
 
+### no second data flow
+A plain variable bound with `active` is not reactive state. The binding plus `active` is its
+**only** data flow — `active` re-reads the getter and writes the value back to that element,
+and nothing else. Reading the same variable elsewhere in the template does not update when it
+changes:
+```grain
+<script>
+  let draft = '';
+</script>
+
+<input bind:value={ get: () => draft, set: (value) => draft = value, active } />
+<span>draft: {draft}</span>   <!-- never changes; compile time has no way to know -->
+```
+Use `$state` if you want the rest of the template to follow.
+
 ## listen-only bindings
 
 `get` can be omitted if the `bind:` has a `listen` — the listener becomes the **only**
@@ -452,6 +467,103 @@ const upper = $node({ get: () => name.get().toUpperCase(), listen: (update) => n
 const pushed = $node({ listen: (update) => name.subscribe(update) });
 ```
 
+## Reactive loops
+
+A loop is caught at one of two times, depending on whether the compiler can see it.
+
+**Compile time.** When `$node`s read each other, the recompute chain closes into a ring and
+can never settle — that is visible statically, so it fails the build:
+
+```grain
+const x = $node({ get: () => y + 1 });
+const y = $node({ get: () => x + 1 });
+```
+
+```
+Reactive loop: x -> y -> x — each one reads the next, so recomputing never settles
+```
+
+Reading itself (`const a = $node({ get: () => a + 1 })`) is the same thing in one line.
+
+**Dev only.** A loop that only exists at runtime — a store notification, a conditional
+branch — cannot be seen statically. So in dev the compiler puts a counter into every
+refresh function, and if one runs 100 times within 10 ms it throws, naming the function:
+
+```
+`__refresh$3` ran 100 times within 10ms — this is almost always a reactive loop
+```
+
+Production builds carry no counters, so a loop there surfaces as a stack overflow instead.
+
+## Keyed loops
+
+`{#for ...}` reuses the DOM it built: an update compares the list and only builds what is
+new. Without a key it matches **by position** — enough for appends, removals at the end, and
+values changing in place:
+
+```grain
+{#for item of items}
+    <p>{item.name}</p>
+{:else}
+    <p>nothing here</p>
+{/for}
+```
+
+Add `with key = ...` to match **by identity**. Reordering then moves the existing rows instead
+of rewriting them, and an insertion in the middle only touches what follows it:
+
+```grain
+{#for item of items with key = item.id}
+    <p>{item.name}</p>
+{/for}
+```
+
+`entries()` works too, and so do `Map` and `Set`:
+
+```grain
+{#for [i, x] of items.entries() with key = i}
+    <p>{i}: {x}</p>
+{/for}
+```
+
+Plain objects are not tracked — only arrays, `Map` and `Set`.
+
+### Precise updates
+
+When the compiler can see the write, it calls the list's own method instead of re-comparing:
+
+```grain
+function add() {
+    items.push(next);      // -> list.push(next)，已有的行不动
+}
+```
+
+This works when `of` is followed by the container variable itself (or its `entries()`), and the
+method is one of `push` / `pop` / `shift` / `unshift` / `splice`. Anything else — `sort`,
+`reverse`, `list.filter(...)` — has no "affected rows" to speak of, so it falls back to a
+comparison.
+
+### When the compiler cannot see the write
+
+If a container is changed somewhere the compiler cannot trace (handed to a callback, mutated
+outside the component), use a reactive container — it announces its own changes:
+
+```grain
+import { reactive_array } from '@graints/runtime';
+
+const items = reactive_array([{ id: 1, name: 'a' }]);
+
+function add() {
+    items.push({ id: 2, name: 'b' });   // the `for` above updates itself
+}
+```
+
+`reactive_map` and `reactive_set` work the same way. Two things to know:
+
+- they notify **structural** changes (`push`, `shift`, `splice`, `set`, `delete`, `clear`).
+  Mutating a value *inside* an entry (`items[0].name = 'x'`) is not visible; call
+  `items.touch()` after such a change
+
 ## bind:this
 `bind:this` hands you the element itself instead of one of its properties.
 
@@ -516,15 +628,3 @@ Rules:
 - It is not an event handler: writes to a `$state` there do not schedule a refresh. Set up the DOM instead, or do reactive work in `<script>`.
 
 A `bind:this` variable is typed with the matching DOM interface (`HTMLInputElement` for `<input>`, `HTMLDivElement` for `<div>`, …), so `box.value` and `box.focus()` are checked and completed. Unknown tags fall back to `HTMLElement`.
-
-### no second data flow
-A `bind:this` variable is a plain variable, not reactive state. The binding plus `active` is its **only** data flow — `active` re-reads the getter and writes the value back to that element, and nothing else. Reading the same variable elsewhere in the template does not update when it changes:
-```grain
-<script>
-  let draft = '';
-</script>
-
-<input bind:value={ get: () => draft, set: (value) => draft = value, active } />
-<span>draft: {draft}</span>   <!-- never changes; compile time has no way to know -->
-```
-Use `$state` if you want the rest of the template to follow.

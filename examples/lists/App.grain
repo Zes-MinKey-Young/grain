@@ -1,0 +1,109 @@
+<script>
+    import { add_row, add_tag, drop_row, rows, tags } from './rows';
+
+    // A plain `$state` array: the compiler sees every write to it and turns
+    // `push` / `shift` / `splice` into the matching precise call
+    let todos = $state([
+        { id: 1, text: 'write the parser' },
+        { id: 2, text: 'write the runtime' }
+    ]);
+
+    let next_id = $state(3);
+
+    function add_todo() {
+        todos.push({ id: next_id, text: `todo ${next_id}` });
+        next_id += 1;
+    }
+
+    function drop_first() {
+        todos.shift();
+    }
+
+    function replace_second() {
+        todos.splice(1, 1, { id: 100, text: 'replaced' });
+    }
+
+    function flip() {
+        todos = [todos[1], todos[0]];
+    }
+    function flip_in_place() {
+        [todos[0], todos[1]] = [todos[1], todos[0]];
+    }
+</script>
+
+<h2>1 · keyed for over a $state array</h2>
+<p class="hint">matched by id — push / shift / splice only touch the rows they affect</p>
+
+{#for todo of todos with key = todo.id}
+    <p class="row">{todo.id} — {todo.text} <code>Math.random() =</code> {Math.random()}</p>
+{:else}
+    <p class="row">empty</p>
+{/for}
+
+<p class="buttons">
+    <button onclick={add_todo}>push</button>
+    <button onclick={drop_first}>shift</button>
+    <button onclick={replace_second}>splice(1, 1)</button>
+    <button onclick={flip}>reorder (replacing the array)</button>
+    <button onclick={flip_in_place}>reorder (in-place)</button>
+</p>
+
+<h2>2 · keyed for over a reactive array</h2>
+<p class="hint">rows is a reactive_array, and it is mutated in ./rows — outside this component, where the compiler cannot see it</p>
+
+{#for row of rows with key = row}
+    <p class="row">{row} <code>Math.random() =</code> {Math.random()}</p>
+{:else}
+    <p class="row">empty</p>
+{/for}
+
+<p class="buttons">
+    <button onclick={add_row}>push (from the other module)</button>
+    <button onclick={drop_row}>shift (from the other module)</button>
+</p>
+
+<h2>3 · reactive Set</h2>
+
+{#for tag of tags}
+    <p class="row">{tag} <code>Math.random() =</code> {Math.random()}</p>
+{:else}
+    <p class="row">empty</p>
+{/for}
+
+<p class="buttons">
+    <button onclick={add_tag}>add</button>
+</p>
+
+<h2>4 · entries()</h2>
+<p class="hint">the same array, with its index</p>
+
+{#for [i, todo] of todos.entries() with key = i}
+    <p class="row">[{i}] {todo.text} <code>Math.random() =</code> {Math.random()}</p>
+{/for}
+
+<style>
+    h2 {
+        font-size: 1rem;
+        margin: 1.5rem 0 0.5rem;
+    }
+
+    .hint {
+        color: #666;
+        font-size: 0.85rem;
+        margin: 0 0 0.5rem;
+    }
+
+    .row {
+        margin: 0.15rem 0;
+        padding: 0.2rem 0.4rem;
+        background: #f4f4f5;
+    }
+
+    .buttons {
+        margin: 0.5rem 0 0;
+    }
+
+    button {
+        margin-right: 0.4rem;
+    }
+</style>
