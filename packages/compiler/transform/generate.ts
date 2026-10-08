@@ -565,6 +565,13 @@ class Generator {
     private this_names = new Set<string>();
     /** script / module 里声明过的名字（算一次就够） */
     private declared: Set<string> | null = null;
+    /**
+     * 已经自带刷新的顶层函数（写了 `$state` 的那些）。
+     *
+     * 刷新写在函数自己身上，而不是挂在调用处 —— 这样谁调用它都会刷新
+     * （事件处理器、箭头函数、onmount、定时器……），也不用去改调用点的名字。
+     */
+    private wrapped_functions = new Set<string>();
     /** `$bindable` 变量 -> 它的刷新函数名 */
     private refresh_names = new Map<string, string>();
     /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
@@ -799,6 +806,9 @@ class Generator {
         this.node_write_edits = this.node_writes(block);
         edits.push(...this.node_write_edits);
 
+        // 5.5 写了 `$state` 的顶层函数：刷新直接写进函数体
+        edits.push(...this.function_wrappers(block));
+
         // 6. 读写对的声明，插在 `let { ... } = $props()` 之后
         for (const bindable of bindables) {
             const { start, end } = { start: bindable.statement_end, end: bindable.statement_end };
@@ -973,6 +983,49 @@ class Generator {
         };
 
         for (const name of this.node_deps.keys()) visit(name);
+    }
+
+    /**
+     * 写了 `$state` 的顶层函数：把 `function later() { ... }` 换成
+     * `const later = function later() { ... 刷新 }`。
+     *
+     * 名字不变，所以调用处一个字都不用改 —— 无论谁调用它（事件、箭头函数、onmount、
+     * 定时器）都会刷新。之前只有直接挂在事件属性上的函数才带刷新。
+     */
+    private function_wrappers(block: Script): Edit[] {
+        const edits: Edit[] = [];
+
+        for (const [name, info] of this.analysis?.functions ?? []) {
+            const node = info.node;
+
+            if (node.type !== 'FunctionDeclaration' || !node.id) continue;
+            if (node.range[0] < block.contentStart || node.range[1] > block.contentEnd) continue;
+
+            const reactive = [...this.reactive_writes(info.writes)];
+            if (reactive.length === 0) continue;
+
+            const params = node.params.map((param) => this.slice(param.range)).join(', ');
+            // 去掉外层花括号，交给 guard_changes 重新包一层
+            const inner = this.body_source(node.body.range).slice(1, -1);
+            const updates = this.update_calls(new Set(reactive));
+
+            const body = this.guard_changes(
+                reactive,
+                updates,
+                writes_are_assignments(node, new Set(reactive)),
+                inner
+            );
+
+            edits.push({
+                start: node.range[0],
+                end: node.range[1],
+                text: `const ${name} = function ${name}(${params}) {${body}}`
+            });
+
+            this.wrapped_functions.add(name);
+        }
+
+        return edits;
     }
 
     /**
@@ -1804,6 +1857,11 @@ class Generator {
             const info = this.analysis?.functions.get(node.name);
 
             if (info) {
+                // 写了 state 的函数会自带刷新（见 function_wrappers），直接用它。
+                // 这里按写入判断而不是查 wrapped_functions —— 模板先于 script() 处理，
+                // 那时候那张表还是空的
+                if ([...this.reactive_writes(info.writes)].length > 0) return node.name;
+
                 const name = `${node.name}_$${++this.wrapper_counter}`;
                 this.wrappers.push({ name, node: info.node, writes: info.writes });
                 return name;
@@ -1812,7 +1870,9 @@ class Generator {
 
         if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
             const name = `__handler$${this.counter++}`;
+
             this.wrappers.push({ name, node, writes: collect_writes(node) });
+
             return name;
         }
 
