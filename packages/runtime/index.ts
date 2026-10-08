@@ -799,136 +799,187 @@ function render_slot(slot: Slot): void {
 /**
  * @param tag 为 `null` 时创建 fragment（用于组件根）
  */
-function create(tag: string | null, props: Props, children: unknown[]): Updater {
-    const el: Node = tag === null ? document.createDocumentFragment() : document.createElement(tag);
-    const element = el as Element;
+/**
+ * 元素 / 组件根的更新器。
+ *
+ * 刷新逻辑（`invoke`）在原型上，每个元素只建一个空函数当载体 —— 之前每个元素都要
+ * 造一个 `update` 闭包（以及它捕获的那三个数组），这是页面里最密的一处分配。
+ */
+class UpdaterImpl {
+    el!: Node;
+    /** children 里的动态片段，按 children 下标编号 */
+    slots: Array<Slot | null> = [];
+    /** 属性里的动态片段，接着往下编号 */
+    prop_slots: Array<() => void> = [];
+    /** 嵌套的子元素，用于无参全量刷新时的递归 */
+    nested: Updater[] = [];
 
-    // children 里的动态片段按 children 下标编号；属性里的动态片段接着往下编号
-    const slots: Array<Slot | null> = new Array(children.length).fill(null);
-    const prop_slots: Array<() => void> = [];
-    // 嵌套的子元素，用于 `update()` 无参时的递归全量刷新
-    const nested: Updater[] = [];
+    init(tag: string | null, props: Props, children: unknown[]): void {
+        this.el = tag === null ? document.createDocumentFragment() : document.createElement(tag);
+        this.slots = new Array(children.length).fill(null);
+        this.prop_slots = [];
+        this.nested = [];
 
-    for (const [key, value] of Object.entries(props)) {
-        if (key.startsWith('bind:')) {
-            const name = key.slice('bind:'.length);
-            // 过一遍 to_binding：`bind:value={ set, listen }` 这种没有 getter 的绑定
-            // 要由它补上一个"值由 listener 提供"的 getter
-            const binding = to_binding(value);
-
-            // 注册成属性片段，`update()` 全量刷新时会重新跑 getter
-            const apply = () => apply_prop(element, name, binding.get());
-            prop_slots.push(apply);
-            apply();
-
-            // 外部事件源的钩子：挂载时跑一次，它自己决定什么时候叫 update
-            binding.listen?.(apply);
-
-            element.addEventListener(event_for(element, name), () => {
-                binding.set(read_prop(element, name));
-
-                // 源不是响应式变量，编译期没写死任何 update 调用，只能这里主动全量刷一次
-                if (binding.active) update();
-            });
-        } else if (key === 'this' && typeof value === 'function') {
-            // `bind:this`：元素建好就把元素交出去（变量赋值 / 回调都由编译器生成）
-            (value as (element: Element) => void)(element);
-        } else if (key.startsWith('on') && typeof value === 'function') {
-            element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
-        } else if (typeof value === 'function') {
-            const render = value as Bound;
-            const apply = () => apply_prop(element, key, render());
-
-            prop_slots.push(apply);
-            apply();
-
-            // 外部源驱动的单向属性：`title={$read(store)}` —— 由 listen 决定什么时候重跑
-            render.listen?.(apply);
-        } else {
-            apply_prop(element, key, value);
-        }
+        this.build_props(props);
+        this.build_children(children);
     }
 
-    children.forEach((child, index) => {
-        if (typeof child === 'function') {
-            // 属性更新器：占一个片段编号，但不产生 DOM
-            if ((child as Partial<PropsUpdater>).props === true) {
-                slots[index] = { anchor: null, render: child as () => unknown, nodes: [], props: true };
-                return;
-            }
-
-            // 嵌套元素（creEle 的返回值）直接挂上去，不算动态片段
-            const child_el = (child as Partial<Updater>).el;
-            if (child_el) {
-                const before = el.childNodes.length;
-
-                // 块（`{#for ...}` 之类）已经自己渲染过了：它在没挂载时就把节点攒在
-                // `nodes` 里，所以挂载要走这些节点，而不是只有那个锚点
-                const managed = (child as Partial<List>).nodes;
-
-                if (managed && managed.length > 0) {
-                    for (const node of managed) el.appendChild(node);
-                } else {
-                    el.appendChild(child_el);
-                }
-
-                nested.push(child as Updater);
-
-                // 自管理的块（`{#for ...}`）：也登记成片段，精确刷新才叫得到它。
-                // render_slot 认得它，只会调一下让它自己比对，不会去重建
-                if (managed) {
-                    slots[index] = { anchor: null, render: child as () => unknown, nodes: [] };
-                }
-
-                // 组件根是 fragment，appendChild 之后它自己就空了 ——
-                // 记下真正落进去的节点，HMR 换实例时才知道要替换哪一段
-                const meta = (child as Partial<ComponentShell>).__grain;
-                if (meta) meta.nodes = [...el.childNodes].slice(before);
-
-                // 子组件挂上了（根组件由生成出来的 mount 负责）
-                (child as Partial<Updater>).onmount?.();
-
-                return;
-            }
-
-            const anchor = document.createComment('');
-            el.appendChild(anchor);
-
-            const render = child as Bound;
-            const slot: Slot = { anchor, render, nodes: [] };
-
-            slots[index] = slot;
-            render_slot(slot);
-
-            // 模板插值也可以是单向绑定：`{$read(store)}`
-            render.listen?.(() => render_slot(slot));
-        } else {
-            for (const node of to_nodes(child)) el.appendChild(node);
-        }
-    });
-
-    function update(...indices: number[]): void {
-        // 不带编号 = 刷新整棵子树（bindactive 这类编译期算不出依赖的场景用它）
+    /**
+     * 刷新：带编号就只刷那几个片段，不带编号就是整棵子树
+     * （`bind` + `active` 这类编译期算不出依赖的场景走无参）
+     */
+    invoke(...indices: number[]): void {
         if (indices.length === 0) {
-            for (const slot of slots) if (slot) render_slot(slot);
-            for (const run of prop_slots) run();
-            for (const child of nested) child();
+            for (const slot of this.slots) if (slot) render_slot(slot);
+            for (const run of this.prop_slots) run();
+            for (const child of this.nested) child();
+
             return;
         }
 
         for (const index of indices) {
-            if (index < slots.length) {
-                const slot = slots[index];
+            if (index < this.slots.length) {
+                const slot = this.slots[index];
+
                 if (slot) render_slot(slot);
             } else {
-                prop_slots[index - slots.length]?.();
+                this.prop_slots[index - this.slots.length]?.();
             }
         }
     }
 
-    update.el = el;
+    private build_props(props: Props): void {
+        const element = this.el as Element;
 
-    return update as Updater;
+        for (const [key, value] of Object.entries(props)) {
+            if (key.startsWith('bind:')) {
+                const name = key.slice('bind:'.length);
+                // 过一遍 to_binding：`bind:value={ set, listen }` 这种没有 getter 的绑定
+                // 要由它补上一个"值由 listener 提供"的 getter
+                const binding = to_binding(value);
+
+                // 注册成属性片段，`invoke()` 全量刷新时会重新跑 getter
+                const apply = () => apply_prop(element, name, binding.get());
+
+                this.prop_slots.push(apply);
+                apply();
+
+                // 外部事件源的钩子：挂载时跑一次，它自己决定什么时候叫刷新
+                binding.listen?.(apply);
+
+                element.addEventListener(event_for(element, name), () => {
+                    binding.set(read_prop(element, name));
+
+                    // 源不是响应式变量，编译期没写死任何刷新调用，只能这里主动全量刷一次
+                    if (binding.active) this.invoke();
+                });
+            } else if (key === 'this' && typeof value === 'function') {
+                // `bind:this`：元素建好就把元素交出去（变量赋值 / 回调都由编译器生成）
+                (value as (element: Element) => void)(element);
+            } else if (key.startsWith('on') && typeof value === 'function') {
+                element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
+            } else if (typeof value === 'function') {
+                const render = value as Bound;
+                const apply = () => apply_prop(element, key, render());
+
+                this.prop_slots.push(apply);
+                apply();
+
+                // 外部源驱动的单向属性：`title={$read(store)}` —— 由 listen 决定什么时候重跑
+                render.listen?.(apply);
+            } else {
+                apply_prop(element, key, value);
+            }
+        }
+    }
+
+    private build_children(children: unknown[]): void {
+        const el = this.el;
+
+        children.forEach((child, index) => {
+            if (typeof child === 'function') {
+                // 属性更新器：占一个片段编号，但不产生 DOM
+                if ((child as Partial<PropsUpdater>).props === true) {
+                    this.slots[index] = {
+                        anchor: null,
+                        render: child as () => unknown,
+                        nodes: [],
+                        props: true
+                    };
+
+                    return;
+                }
+
+                // 嵌套元素（creEle 的返回值）直接挂上去，不算动态片段
+                const child_el = (child as Partial<Updater>).el;
+
+                if (child_el) {
+                    const before = el.childNodes.length;
+
+                    // 块（`{#for ...}` 之类）已经自己渲染过了：它在没挂载时就把节点攒在
+                    // `nodes` 里，所以挂载要走这些节点，而不是只有那个锚点
+                    const managed = (child as Partial<List>).nodes;
+
+                    if (managed && managed.length > 0) {
+                        for (const node of managed) el.appendChild(node);
+                    } else {
+                        el.appendChild(child_el);
+                    }
+
+                    this.nested.push(child as Updater);
+
+                    // 自管理的块（`{#for ...}`）：也登记成片段，精确刷新才叫得到它。
+                    // render_slot 认得它，只会调一下让它自己比对，不会去重建
+                    if (managed) {
+                        this.slots[index] = { anchor: null, render: child as () => unknown, nodes: [] };
+                    }
+
+                    // 组件根是 fragment，appendChild 之后它自己就空了 ——
+                    // 记下真正落进去的节点，HMR 换实例时才知道要替换哪一段
+                    const meta = (child as Partial<ComponentShell>).__grain;
+
+                    if (meta) meta.nodes = [...el.childNodes].slice(before);
+
+                    // 子组件挂上了（根组件由生成出来的 mount 负责）
+                    (child as Partial<Updater>).onmount?.();
+
+                    return;
+                }
+
+                const anchor = document.createComment('');
+
+                el.appendChild(anchor);
+
+                const render = child as Bound;
+                const slot: Slot = { anchor, render, nodes: [] };
+
+                this.slots[index] = slot;
+                render_slot(slot);
+
+                // 模板插值也可以是单向绑定：`{$read(store)}`
+                render.listen?.(() => render_slot(slot));
+            } else {
+                for (const node of to_nodes(child)) el.appendChild(node);
+            }
+        });
+    }
+}
+
+const UPDATER_HANDLER: ProxyHandler<UpdaterImpl> = {
+    apply: (target, _this, args) => target.invoke(...(args as number[])),
+    get: (target, key) => Reflect.get(target, key),
+    has: (target, key) => Reflect.has(target, key)
+};
+
+function create(tag: string | null, props: Props, children: unknown[]): Updater {
+    // 载体是个空函数（这样 `update$0(0)` 能直接调），原型指向 UpdaterImpl
+    const self = function () {} as unknown as UpdaterImpl;
+
+    Object.setPrototypeOf(self, UpdaterImpl.prototype);
+
+    self.init(tag, props, children);
+
+    return new Proxy(self, UPDATER_HANDLER) as unknown as Updater;
 }
 
 export function creEle(tag: string, props?: Props, children?: unknown[]): Updater {

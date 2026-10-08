@@ -1004,10 +1004,18 @@ class Generator {
             const reactive = [...this.reactive_writes(info.writes)];
             if (reactive.length === 0) continue;
 
+            // 容器方法（`items.push(x)` / `items[i] = v`）换成列表自己的精确调用，
+            // 并顶掉整块比对。这些插入紧跟原语句，所以先登记再取函数体
+            const mutations = this.mutation_calls(node);
+
+            this.mutation_edits = mutations.edits;
+
             const params = node.params.map((param) => this.slice(param.range)).join(', ');
             // 去掉外层花括号，交给 guard_changes 重新包一层
             const inner = this.body_source(node.body.range).slice(1, -1);
-            const updates = this.update_calls(new Set(reactive));
+            const updates = this.update_calls(new Set(reactive), mutations.skip);
+
+            this.mutation_edits = [];
 
             const body = this.guard_changes(
                 reactive,
