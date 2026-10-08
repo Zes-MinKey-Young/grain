@@ -2001,8 +2001,43 @@ class Generator {
         const edits: Edit[] = [];
         const skip = new Set<string>();
 
+        /** 记下这次改动：紧跟原语句插一句精确调用，并顶掉整块比对 */
+        const precise = (list: string, call: string, node: TSESTree.Node, parent?: TSESTree.Node): void => {
+            const statement = parent?.type === 'ExpressionStatement' ? parent : node;
+
+            edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}.${call};` });
+
+            const slot = this.for_slots.get(list);
+            if (slot) skip.add(`${slot.update}#${slot.index}`);
+        };
+
+        /** 容器变量 -> 它的列表；响应式容器自己会通知，别重复 */
+        const list_of = (name: string): string | undefined =>
+            this.reactive_containers.has(name) ? undefined : this.for_sources.get(name);
+
         simpleTraverse(node, {
             enter: (child, parent) => {
+                // `items[i] = v`：只换那一项，其余的 DOM 不动。
+                // 复合赋值（`items[i] += 1`）和改元素内部（`items[i].name = x`）都不认 ——
+                // 前者还要读旧值，后者动的不是这个容器本身，都退回整块比对
+                if (child.type === 'AssignmentExpression') {
+                    const left = child.left;
+
+                    if (child.operator !== '=') return;
+                    if (left.type !== 'MemberExpression' || !left.computed) return;
+                    if (left.object.type !== 'Identifier') return;
+
+                    const list = list_of(left.object.name);
+                    if (!list) return;
+
+                    const index = this.slice(left.property.range);
+                    const value = this.slice(child.right.range);
+
+                    precise(list, `set_at(${index}, ${value})`, child, parent);
+
+                    return;
+                }
+
                 if (child.type !== 'CallExpression') return;
 
                 const callee = child.callee;
@@ -2012,12 +2047,7 @@ class Generator {
                 if (!LIST_MUTATIONS.has(method)) return;
                 if (callee.object.type !== 'Identifier') return;
 
-                const name = callee.object.name;
-
-                // 响应式容器自己会通知 `for`，这里再生成一次就重复了
-                if (this.reactive_containers.has(name)) return;
-
-                const list = this.for_sources.get(name);
+                const list = list_of(callee.object.name);
                 if (!list) return;
 
                 const args = child.arguments
@@ -2026,12 +2056,7 @@ class Generator {
                     .join(', ');
 
                 // 紧跟在那句调用之后：此刻参数还是原值
-                const statement = parent?.type === 'ExpressionStatement' ? parent : child;
-
-                edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}.${method}(${args});` });
-
-                const slot = this.for_slots.get(list);
-                if (slot) skip.add(`${slot.update}#${slot.index}`);
+                precise(list, `${method}(${args})`, child, parent);
             }
         });
 

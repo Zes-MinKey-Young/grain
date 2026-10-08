@@ -38,9 +38,26 @@ if (!match) {
     const first_declare = truth.indexOf('declare function');
     const body = truth.slice(truth.lastIndexOf('/**', first_declare));
 
-    if (tidy(body) !== tidy(injected)) {
-        const left = tidy(body).split('\n');
-        const right = tidy(injected).split('\n');
+    /**
+     * 只比 rune 和内置宏（`$` 开头的那些）。
+     *
+     * 真源里还有 runtime 的 API（`reactive_array` 之类）—— 它们是通过 import 用的，
+     * 由 runtime-types.ts 提供模块声明，不进注入的那份（那份是全局的 rune + 模块声明）。
+     */
+    const runes_of = (text) =>
+        text
+            .split('\n')
+            // 注释里也会提到 `declare function $state`，那些不算
+            .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line) && /declare function \$\w+/.test(line))
+            .map((line) => line.trim())
+            .join('\n');
+
+    const left_runes = runes_of(tidy(body));
+    const right_runes = runes_of(tidy(injected));
+
+    if (left_runes !== right_runes) {
+        const left = left_runes.split('\n');
+        const right = right_runes.split('\n');
 
         for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
             if (left[i] === right[i]) continue;

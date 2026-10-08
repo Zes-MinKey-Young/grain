@@ -32,17 +32,27 @@ export function creBound(
     listen?: (update: (value?: unknown) => void) => void
 ): Bound;
 
-/** 一次容器改动：for 块拿它决定动哪几行 */
+/** 一次容器改动：元组，第一个元素是种类（见 CHANGE_* 常量） */
 export type ContainerChange =
-    | { type: 'push'; items: unknown[] }
-    | { type: 'pop' }
-    | { type: 'shift' }
-    | { type: 'unshift'; items: unknown[] }
-    | { type: 'splice'; at: number; removed: number; items: unknown[] }
-    | { type: 'set' }
-    | { type: 'delete' }
-    | { type: 'clear' }
-    | { type: 'unknown' };
+    | [0, unknown[]]
+    | [1]
+    | [2]
+    | [3, unknown[]]
+    | [4, number, number, unknown[]]
+    | [5]
+    | [6]
+    | [7]
+    | [8];
+
+export const CHANGE_PUSH = 0;
+export const CHANGE_POP = 1;
+export const CHANGE_SHIFT = 2;
+export const CHANGE_UNSHIFT = 3;
+export const CHANGE_SPLICE = 4;
+export const CHANGE_SET = 5;
+export const CHANGE_DELETE = 6;
+export const CHANGE_CLEAR = 7;
+export const CHANGE_UNKNOWN = 8;
 
 /**
  * 自己会通知改动的容器。用在"编译器看不全所有改动"的场景 —— 容器被传出去、

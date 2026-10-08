@@ -133,6 +133,8 @@ export interface List extends Updater {
     unshift(...added: unknown[]): void;
     /** `splice(at, remove, ...added)` */
     splice(at: number, remove: number, ...added: unknown[]): void;
+    /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
+    set_at(index: number, value: unknown): void;
     /** 响应式容器发来的一次改动：按它动，说不清就整块比对 */
     apply(change: ContainerChange): void;
 }
@@ -309,13 +311,34 @@ export function creList(options: ListOptions): List {
         rebind_from(from);
     };
 
+    list.set_at = (index: number, value: unknown): void => {
+        const at = Number(index);
+
+        if (!Number.isInteger(at) || at < 0 || at >= entries.length) return;
+
+        values[at] = value;
+
+        // 有 key 且这一项的身份变了：它不再对应这个位置，只能重新比对
+        if (options.key) {
+            const key = options.key(value, at);
+
+            if (entries[at].key !== key) {
+                sync(values);
+
+                return;
+            }
+        }
+
+        entries[at].update(value, at);
+    };
+
     list.apply = (change: ContainerChange): void => {
-        switch (change.type) {
-            case 'push':
-                list.push(...change.items);
+        switch (change[0]) {
+            case CHANGE_PUSH:
+                list.push(...change[1]);
                 break;
 
-            case 'pop': {
+            case CHANGE_POP: {
                 const last = entries.pop();
 
                 if (last) drop(last.nodes);
@@ -324,16 +347,16 @@ export function creList(options: ListOptions): List {
                 break;
             }
 
-            case 'shift':
+            case CHANGE_SHIFT:
                 list.shift();
                 break;
 
-            case 'unshift':
-                list.unshift(...change.items);
+            case CHANGE_UNSHIFT:
+                list.unshift(...change[1]);
                 break;
 
-            case 'splice':
-                list.splice(change.at, change.removed, ...change.items);
+            case CHANGE_SPLICE:
+                list.splice(change[1], change[2], ...change[3]);
                 break;
 
             default:
@@ -350,45 +373,56 @@ export function creList(options: ListOptions): List {
 }
 
 /**
- * 一次容器改动。
+ * 一次容器改动的种类。
  *
- * 响应式容器（`reactive_array` / `reactive_map` / `reactive_set`）改完自己发这个，
- * `for` 拿它决定动哪几行。`unknown` 是兜底 —— 说不清动了哪几行就整块比对。
+ * 用整数而不是字符串：改动是热路径（每次 push / splice 都要比一次），
+ * 整数比较比字符串快，也省掉字符串常量的分配。
+ */
+export const CHANGE_PUSH = 0;
+export const CHANGE_POP = 1;
+export const CHANGE_SHIFT = 2;
+export const CHANGE_UNSHIFT = 3;
+export const CHANGE_SPLICE = 4;
+export const CHANGE_SET = 5;
+export const CHANGE_DELETE = 6;
+export const CHANGE_CLEAR = 7;
+/** 说不清动了哪几行 —— 兜底，整块比对 */
+export const CHANGE_UNKNOWN = 8;
+
+/**
+ * 一次容器改动：元组，第一个元素是种类（见上面那些常量）。
+ *
+ * 用元组而不是对象，是因为它每次改动都要新建一个 —— 数组比对象轻。
  */
 export type ContainerChange =
-    | { type: 'push'; items: unknown[] }
-    | { type: 'pop' }
-    | { type: 'shift' }
-    | { type: 'unshift'; items: unknown[] }
-    | { type: 'splice'; at: number; removed: number; items: unknown[] }
-    | { type: 'set' }
-    | { type: 'delete' }
-    | { type: 'clear' }
-    | { type: 'unknown' };
+    | [typeof CHANGE_PUSH, unknown[]]
+    | [typeof CHANGE_POP]
+    | [typeof CHANGE_SHIFT]
+    | [typeof CHANGE_UNSHIFT, unknown[]]
+    | [typeof CHANGE_SPLICE, number, number, unknown[]]
+    | [typeof CHANGE_SET]
+    | [typeof CHANGE_DELETE]
+    | [typeof CHANGE_CLEAR]
+    | [typeof CHANGE_UNKNOWN];
 
 export interface ReactiveContainer {
     /** 订阅改动；返回退订函数 */
     subscribe(listener: (change: ContainerChange) => void): () => void;
 }
 
-const ARRAY_METHODS: Record<string, (change: ContainerChange, args: unknown[]) => ContainerChange> = {
-    push: (_change, args) => ({ type: 'push', items: args }),
-    pop: () => ({ type: 'pop' }),
-    shift: () => ({ type: 'shift' }),
-    unshift: (_change, args) => ({ type: 'unshift', items: args }),
-    splice: (_change, args) => ({
-        type: 'splice',
-        at: Number(args[0] ?? 0),
-        removed: Number(args[1] ?? 0),
-        items: args.slice(2)
-    })
+const ARRAY_METHODS: Record<string, (args: unknown[]) => ContainerChange> = {
+    push: (args) => [CHANGE_PUSH, args],
+    pop: () => [CHANGE_POP],
+    shift: () => [CHANGE_SHIFT],
+    unshift: (args) => [CHANGE_UNSHIFT, args],
+    splice: (args) => [CHANGE_SPLICE, Number(args[0] ?? 0), Number(args[1] ?? 0), args.slice(2)]
 };
 
 const MAP_METHODS: Record<string, () => ContainerChange> = {
-    set: () => ({ type: 'set' }),
-    add: () => ({ type: 'set' }),
-    delete: () => ({ type: 'delete' }),
-    clear: () => ({ type: 'clear' })
+    set: () => [CHANGE_SET],
+    add: () => [CHANGE_SET],
+    delete: () => [CHANGE_DELETE],
+    clear: () => [CHANGE_CLEAR]
 };
 
 /**
@@ -421,7 +455,7 @@ function wrap<T extends object>(
         get(current, key, receiver) {
             // 改了元素内部（`items[0].name = ...`）容器看不见 —— 手动喊一声，整块比对
             if (key === 'touch') {
-                return () => emit({ type: 'unknown' });
+                return () => emit([CHANGE_UNKNOWN]);
             }
 
             if (key === 'subscribe') {
@@ -454,7 +488,7 @@ function wrap<T extends object>(
             const ok = Reflect.set(current, key, value);
 
             // 索引赋值之类的：说不清影响哪些行，整块比对
-            emit({ type: 'unknown' });
+            emit([CHANGE_UNKNOWN]);
 
             return ok;
         }
@@ -466,9 +500,9 @@ export function reactive_array<T>(initial: T[] = []): T[] & ReactiveContainer {
     return wrap(initial, (key, args) => {
         const precise = ARRAY_METHODS[key];
 
-        if (precise) return precise({ type: 'unknown' }, args);
+        if (precise) return precise(args);
 
-        return ARRAY_UNTARGETED.has(key) ? { type: 'unknown' } : null;
+        return ARRAY_UNTARGETED.has(key) ? [CHANGE_UNKNOWN] : null;
     });
 }
 

@@ -157,3 +157,76 @@ declare module '*?grain-ast' {
     const root: unknown;
     export default root;
 }
+
+/**
+ * A container change: a tuple whose first element is the kind (one of the `CHANGE_*`
+ * constants below).
+ *
+ * Integers rather than strings because this is a hot path — every `push` / `splice`
+ * compares it. A tuple rather than an object because one is allocated per change.
+ */
+// 注意：这个文件是 ambient 的，顶层不能出现 export —— 一旦有 export，它就变成模块，
+// 上面那些 `declare function $state` 就不再是全局的了
+type ContainerChange =
+    | [0, unknown[]]
+    | [1]
+    | [2]
+    | [3, unknown[]]
+    | [4, number, number, unknown[]]
+    | [5]
+    | [6]
+    | [7]
+    | [8];
+
+declare const CHANGE_PUSH: 0;
+declare const CHANGE_POP: 1;
+declare const CHANGE_SHIFT: 2;
+declare const CHANGE_UNSHIFT: 3;
+declare const CHANGE_SPLICE: 4;
+declare const CHANGE_SET: 5;
+declare const CHANGE_DELETE: 6;
+declare const CHANGE_CLEAR: 7;
+declare const CHANGE_UNKNOWN: 8;
+
+/**
+ * A container that announces its own changes.
+ *
+ * Use it when the compiler cannot see every write — the container is handed to a callback,
+ * or mutated somewhere outside the component. When it can see them, a plain `$state`
+ * array is enough (the compiler emits the precise call itself).
+ */
+interface ReactiveContainer {
+    subscribe(listener: (change: ContainerChange) => void): () => void;
+}
+
+/**
+ * An array that announces its changes.
+ *
+ * @example
+ * ```ts
+ * const items = reactive_array([{ id: 1, name: 'a' }]);
+ * ```
+ */
+declare function reactive_array<T>(initial?: T[]): T[] & ReactiveContainer;
+
+/**
+ * A Map that announces its changes.
+ *
+ * @example
+ * ```ts
+ * const by_id = reactive_map([[1, 'a']]);
+ * ```
+ */
+declare function reactive_map<K, V>(
+    initial?: Iterable<readonly [K, V]>
+): Map<K, V> & ReactiveContainer;
+
+/**
+ * A Set that announces its changes.
+ *
+ * @example
+ * ```ts
+ * const tags = reactive_set(['one']);
+ * ```
+ */
+declare function reactive_set<T>(initial?: Iterable<T>): Set<T> & ReactiveContainer;
