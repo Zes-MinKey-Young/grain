@@ -139,64 +139,99 @@ export interface List extends Updater {
     apply(change: ContainerChange): void;
 }
 
-export function creList(options: ListOptions): List {
-    const anchor: Node = document.createComment('');
-
+/**
+ * 一个 `for` 块产出的那一段。
+ *
+ * 方法都在这个类的原型上，实例的字段只有状态（锚点、当前项、当前值）—— 之前是每建一个
+ * `for` 就造七个闭包，现在一个都不用。
+ */
+class ListImpl {
+    el!: Node;
     /** 当前存活的项，顺序跟列表一致 */
-    let entries: Array<ListEntry & { key?: unknown }> = [];
-    /** 空列表分支的节点（有它时列表非空，就撤掉） */
-    let empty: Node[] = [];
+    entries: Array<ListEntry & { key?: unknown }> = [];
+    /** 空列表分支的节点（列表非空时要撤掉） */
+    empty: Node[] = [];
+    /** 当前列表的值：容器方法改完，靠它把剩下的项重新绑一遍 */
+    values: unknown[] = [];
 
-    const place = (nodes: Node[], before: Node | null): void => {
-        for (const node of nodes) anchor.parentNode?.insertBefore(node, before ?? anchor);
-    };
+    private options!: ListOptions;
 
-    const drop = (nodes: Node[]): void => {
+    /**
+     * 初始化（不用 constructor，是因为载体是个函数——要能被 `update$0(0)` 直接调用，
+     * 而 class 的构造器没法用在函数身上）
+     */
+    init(options: ListOptions): void {
+        this.options = options;
+        this.el = document.createComment('');
+        this.entries = [];
+        this.empty = [];
+        this.values = [];
+    }
+
+    /** 作为 updater 被父级调用时：重新取一次列表再比对（没有 source 就什么都不做） */
+    invoke(): void {
+        if (this.options.source) this.sync(this.options.source());
+    }
+
+    /** 落在这段里的节点（含末尾的锚点），父级搬动 / 移除时用 */
+    get nodes(): Node[] {
+        return [...this.entries.flatMap((entry) => entry.nodes), ...this.empty, this.el];
+    }
+
+    private place(nodes: Node[], before: Node | null): void {
+        for (const node of nodes) this.el.parentNode?.insertBefore(node, before ?? this.el);
+    }
+
+    private drop(nodes: Node[]): void {
         for (const node of nodes) node.parentNode?.removeChild(node);
-    };
+    }
 
-    /** 建一项并插到 `before` 之前 */
-    const add = (item: unknown, index: number, before: Node | null): ListEntry & { key?: unknown } => {
-        const entry = options.render(item, index);
+    private add(item: unknown, index: number, before: Node | null): ListEntry & { key?: unknown } {
+        const entry = this.options.render(item, index) as ListEntry & { key?: unknown };
 
-        (entry as ListEntry & { key?: unknown }).key = options.key?.(item, index);
+        entry.key = this.options.key?.(item, index);
 
-        place(entry.nodes, before);
+        this.place(entry.nodes, before);
 
-        return entry as ListEntry & { key?: unknown };
-    };
+        return entry;
+    }
 
-    const set_empty = (on: boolean): void => {
-        if (on && empty.length === 0 && options.fallback) {
+    private set_empty(on: boolean): void {
+        if (on && this.empty.length === 0 && this.options.fallback) {
             // 过一遍 to_nodes：fallback 里可能有静态文本（字符串），那不是节点
-            empty = to_nodes(options.fallback());
+            this.empty = to_nodes(this.options.fallback());
 
-            place(empty, null);
-        } else if (!on && empty.length > 0) {
-            drop(empty);
+            this.place(this.empty, null);
+        } else if (!on && this.empty.length > 0) {
+            this.drop(this.empty);
 
-            empty = [];
+            this.empty = [];
         }
-    };
+    }
 
-    const sync = (items: Iterable<unknown>): void => {
+    /** 从 `at` 起把项重绑到 `values` 上 —— 值或位置变了的那些才需要 */
+    private rebind_from(at: number): void {
+        for (let i = at; i < this.entries.length; i += 1) this.entries[i].update(this.values[i], i);
+    }
+
+    sync(items: Iterable<unknown>): void {
         // 只在这里展开一次：`entries()` 这类迭代器是一次性的，展开两遍第二遍就是空的
         const next = Array.from(items);
 
-        values = next;
+        this.values = next;
 
-        set_empty(next.length === 0);
+        this.set_empty(next.length === 0);
 
-        if (options.key) {
+        if (this.options.key) {
             // keyed：按 key 匹配，能对上就复用（内容靠 update 换掉）
             const old_by_key = new Map<unknown, ListEntry & { key?: unknown }>();
 
-            for (const entry of entries) old_by_key.set(entry.key, entry);
+            for (const entry of this.entries) old_by_key.set(entry.key, entry);
 
             const kept: Array<ListEntry & { key?: unknown }> = [];
 
             for (let i = 0; i < next.length; i += 1) {
-                const key = options.key(next[i], i);
+                const key = this.options.key(next[i], i);
                 const found = old_by_key.get(key);
 
                 if (found) {
@@ -204,21 +239,21 @@ export function creList(options: ListOptions): List {
                     found.update(next[i], i);
                     kept.push(found);
                 } else {
-                    kept.push(add(next[i], i, null));
+                    kept.push(this.add(next[i], i, null));
                 }
             }
 
             // 没对上的旧项：删掉
-            for (const stale of old_by_key.values()) drop(stale.nodes);
+            for (const stale of old_by_key.values()) this.drop(stale.nodes);
 
-            entries = kept;
+            this.entries = kept;
 
             // 顺序没乱就不动 DOM；乱了才按新顺序依次挪到锚点前（移动，不重建）
             let ordered = true;
 
-            for (let i = 0; i < entries.length - 1; i += 1) {
-                const last = entries[i].nodes[entries[i].nodes.length - 1];
-                const next = entries[i + 1].nodes[0];
+            for (let i = 0; i < this.entries.length - 1; i += 1) {
+                const last = this.entries[i].nodes[this.entries[i].nodes.length - 1];
+                const next = this.entries[i + 1].nodes[0];
 
                 if (!last || last.nextSibling !== next) {
                     ordered = false;
@@ -226,150 +261,156 @@ export function creList(options: ListOptions): List {
                 }
             }
 
-            if (!ordered) for (const entry of entries) place(entry.nodes, null);
+            if (!ordered) for (const entry of this.entries) this.place(entry.nodes, null);
         } else {
             // 没有 key：按位置复用，多出来的追加 / 删掉
             for (let i = 0; i < next.length; i += 1) {
-                if (i < entries.length) entries[i].update(next[i], i);
-                else entries.push(add(next[i], i, null));
+                if (i < this.entries.length) this.entries[i].update(next[i], i);
+                else this.entries.push(this.add(next[i], i, null));
             }
 
-            while (entries.length > next.length) drop(entries.pop()!.nodes);
+            while (this.entries.length > next.length) this.drop(this.entries.pop()!.nodes);
         }
-    };
+    }
 
-    /** 当前列表的值：容器方法改完之后，靠它把剩下的项重新绑一遍 */
-    let values: unknown[] = [];
-
-    /** 从 `at` 起把项重绑到 `values` 上 —— 值或位置变了的那些才需要 */
-    const rebind_from = (at: number): void => {
-        for (let i = at; i < entries.length; i += 1) entries[i].update(values[i], i);
-    };
-
-    // 作为 updater 被父级调用时：重新取一次列表再比对（没有 source 就什么都不做）
-    const list = ((): void => {
-        if (options.source) sync(options.source());
-    }) as unknown as List;
-
-    list.el = anchor;
-
-    Object.defineProperty(list, 'nodes', {
-        configurable: true,
-        get: () => [...entries.flatMap((entry) => entry.nodes), ...empty, anchor]
-    });
-
-    list.sync = (items: Iterable<unknown>): void => {
-        sync(items);
-    };
-
-    list.push = (...added: unknown[]): void => {
-        set_empty(false);
+    push(...added: unknown[]): void {
+        this.set_empty(false);
 
         // 已有的项一点没动，所以只需要建新的
         for (const item of added) {
-            values.push(item);
+            this.values.push(item);
 
-            entries.push(add(item, entries.length, null));
+            this.entries.push(this.add(item, this.entries.length, null));
         }
-    };
+    }
 
-    list.shift = (): void => {
-        if (entries.length === 0) return;
+    shift(): void {
+        if (this.entries.length === 0) return;
 
-        drop(entries[0].nodes);
+        this.drop(this.entries[0].nodes);
 
-        entries = entries.slice(1);
-        values = values.slice(1);
+        this.entries = this.entries.slice(1);
+        this.values = this.values.slice(1);
 
         // 后面的项都往前挪了一位：内容跟着换
-        rebind_from(0);
-    };
+        this.rebind_from(0);
+    }
 
-    list.unshift = (...added: unknown[]): void => {
-        set_empty(false);
+    unshift(...added: unknown[]): void {
+        this.set_empty(false);
 
-        const created = added.map((item, at) => add(item, at, entries[0]?.nodes[0] ?? anchor));
-
-        entries = [...created, ...entries];
-        values = [...added, ...values];
-
-        rebind_from(added.length);
-    };
-
-    list.splice = (at: number, remove: number, ...added: unknown[]): void => {
-        const from = Math.max(0, at);
-
-        for (const entry of entries.slice(from, from + remove)) drop(entry.nodes);
-
-        const created = added.map((item, offset) =>
-            add(item, from + offset, entries[from + remove]?.nodes[0] ?? anchor)
+        const created = added.map((item, at) =>
+            this.add(item, at, this.entries[0]?.nodes[0] ?? this.el)
         );
 
-        entries = [...entries.slice(0, from), ...created, ...entries.slice(from + remove)];
-        values.splice(from, remove, ...added);
+        this.entries = [...created, ...this.entries];
+        this.values = [...added, ...this.values];
 
-        rebind_from(from);
-    };
+        this.rebind_from(added.length);
+    }
 
-    list.set_at = (index: number, value: unknown): void => {
+    splice(at: number, remove: number, ...added: unknown[]): void {
+        const from = Math.max(0, at);
+
+        for (const entry of this.entries.slice(from, from + remove)) this.drop(entry.nodes);
+
+        const created = added.map((item, offset) =>
+            this.add(item, from + offset, this.entries[from + remove]?.nodes[0] ?? this.el)
+        );
+
+        this.entries = [
+            ...this.entries.slice(0, from),
+            ...created,
+            ...this.entries.slice(from + remove)
+        ];
+        this.values.splice(from, remove, ...added);
+
+        this.rebind_from(from);
+    }
+
+    /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
+    set_at(index: number, value: unknown): void {
         const at = Number(index);
 
-        if (!Number.isInteger(at) || at < 0 || at >= entries.length) return;
+        if (!Number.isInteger(at) || at < 0 || at >= this.entries.length) return;
 
-        values[at] = value;
+        this.values[at] = value;
 
         // 有 key 且这一项的身份变了：它不再对应这个位置，只能重新比对
-        if (options.key) {
-            const key = options.key(value, at);
+        if (this.options.key) {
+            const key = this.options.key(value, at);
 
-            if (entries[at].key !== key) {
-                sync(values);
+            if (this.entries[at].key !== key) {
+                this.sync(this.values);
 
                 return;
             }
         }
 
-        entries[at].update(value, at);
-    };
+        this.entries[at].update(value, at);
+    }
 
-    list.apply = (change: ContainerChange): void => {
+    /** 响应式容器发来的一次改动：按它动，说不清就整块比对 */
+    apply(change: ContainerChange): void {
         switch (change[0]) {
             case CHANGE_PUSH:
-                list.push(...change[1]);
+                this.push(...change[1]);
                 break;
 
             case CHANGE_POP: {
-                const last = entries.pop();
+                const last = this.entries.pop();
 
-                if (last) drop(last.nodes);
+                if (last) this.drop(last.nodes);
 
-                values.pop();
+                this.values.pop();
                 break;
             }
 
             case CHANGE_SHIFT:
-                list.shift();
+                this.shift();
                 break;
 
             case CHANGE_UNSHIFT:
-                list.unshift(...change[1]);
+                this.unshift(...change[1]);
                 break;
 
             case CHANGE_SPLICE:
-                list.splice(change[1], change[2], ...change[3]);
+                this.splice(change[1], change[2], ...change[3]);
                 break;
 
             default:
                 // `set` / `delete` / `clear`，以及说不清的那些：重新取一次再比对
-                if (options.source) {
-                    values = Array.from(options.source());
+                if (this.options.source) {
+                    this.values = Array.from(this.options.source());
 
-                    sync(values);
+                    this.sync(this.values);
                 }
         }
-    };
+    }
+}
 
-    return list;
+/**
+ * 所有列表共用这一个 handler —— 所以实例上不用挂任何闭包。
+ *
+ * `get` 不传 receiver 是刻意的：传了 Proxy 的话，`size` 这类 getter 会报
+ * "called on incompatible receiver"。
+ */
+const LIST_HANDLER: ProxyHandler<ListImpl> = {
+    apply: (target) => target.invoke(),
+    get: (target, key) => Reflect.get(target, key),
+    has: (target, key) => Reflect.has(target, key)
+};
+
+export function creList(options: ListOptions): List {
+    // 载体是个空函数（这样它能被调用），原型指向 ListImpl —— 于是方法走原型，
+    // 实例上只有状态，一个闭包都不用建
+    const self = function () {} as unknown as ListImpl;
+
+    Object.setPrototypeOf(self, ListImpl.prototype);
+
+    self.init(options);
+
+    return new Proxy(self, LIST_HANDLER) as unknown as List;
 }
 
 /**
@@ -594,33 +635,41 @@ export function creBound(
     return bound;
 }
 
+/** 方法在原型上，不在每个 store 上新建三个闭包 */
+class WritableImpl<T> implements Writable<T> {
+    private listeners = new Set<(value: T) => void>();
+    private current: T;
+
+    constructor(initial: T) {
+        this.current = initial;
+    }
+
+    get(): T {
+        return this.current;
+    }
+
+    set(next: T): T {
+        if (next === this.current) return this.current;
+
+        this.current = next;
+
+        for (const listener of [...this.listeners]) listener(this.current);
+
+        return this.current;
+    }
+
+    subscribe(listener: (value: T) => void): () => void {
+        this.listeners.add(listener);
+        listener(this.current);
+
+        return () => {
+            this.listeners.delete(listener);
+        };
+    }
+}
+
 export function writable<T>(initial: T): Writable<T> {
-    const listeners = new Set<(value: T) => void>();
-
-    let current = initial;
-
-    return {
-        get: () => current,
-
-        set(next) {
-            if (next === current) return current;
-
-            current = next;
-
-            for (const listener of [...listeners]) listener(current);
-
-            return current;
-        },
-
-        subscribe(listener) {
-            listeners.add(listener);
-            listener(current);
-
-            return () => {
-                listeners.delete(listener);
-            };
-        }
-    };
+    return new WritableImpl(initial);
 }
 
 type Props = Record<string, unknown>;
