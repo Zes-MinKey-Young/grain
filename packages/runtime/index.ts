@@ -614,25 +614,52 @@ export interface Bound {
  * - 没给 `render`：值由 listener 推 —— `update(新值)` 存下来当当前值
  *   （跟 `bind:` 里"没有 getter 的绑定"一个道理）
  */
+/** 单向绑定的实现：方法在原型上，每个绑定只建一个空函数当载体 */
+class BoundImpl {
+    private current: unknown;
+    private render: (() => unknown) | null = null;
+    private source: ((update: (value?: unknown) => void) => void) | null = null;
+
+    init(render?: (() => unknown) | null, listen?: (update: (value?: unknown) => void) => void): void {
+        this.render = render ?? null;
+        this.source = listen ?? null;
+        this.current = undefined;
+    }
+
+    /** 取值：给了 render 就由它算，否则用 listener 推来的那个值 */
+    invoke(): unknown {
+        return this.render ? this.render() : this.current;
+    }
+
+    /** 外部源驱动的单向绑定：什么时候重跑由它决定 */
+    listen(update: () => void): void {
+        if (!this.source) return;
+
+        this.source((value) => {
+            if (value !== undefined) this.current = value;
+
+            update();
+        });
+    }
+}
+
+const BOUND_HANDLER: ProxyHandler<BoundImpl> = {
+    apply: (target) => target.invoke(),
+    get: (target, key) => Reflect.get(target, key),
+    has: (target, key) => Reflect.has(target, key)
+};
+
 export function creBound(
     render?: (() => unknown) | null,
     listen?: (update: (value?: unknown) => void) => void
 ): Bound {
-    let current: unknown;
+    const self = function () {} as unknown as BoundImpl;
 
-    const bound = (() => (render ? render() : current)) as Bound;
+    Object.setPrototypeOf(self, BoundImpl.prototype);
 
-    if (listen) {
-        bound.listen = (update) => {
-            listen((value) => {
-                if (value !== undefined) current = value;
+    self.init(render, listen);
 
-                update();
-            });
-        };
-    }
-
-    return bound;
+    return new Proxy(self, BOUND_HANDLER) as unknown as Bound;
 }
 
 /** 方法在原型上，不在每个 store 上新建三个闭包 */
@@ -941,47 +968,88 @@ export function creText(value: () => unknown): Updater {
  * 编译产物里 `create()` 最后一行是 `return component(update$0, create, props, children)`。
  * 外壳是稳定的，内层实例可以随时换 —— HMR 就靠这个做到"只换一个组件"。
  */
+/**
+ * 组件外壳：HMR 换实例时只换里面，父组件持有的引用不动。
+ *
+ * 方法在原型上，每个组件实例只建一个空函数当载体。
+ */
+class ShellImpl {
+    current!: Updater;
+    meta!: ComponentMeta;
+
+    init(
+        instance: Updater,
+        create: (props?: unknown, children?: unknown) => Updater,
+        props: unknown,
+        children: unknown
+    ): void {
+        this.current = instance;
+
+        const self = this;
+
+        // `current` 用访问器：HMR 换实例走的是它。
+        // 访问器里的 `this` 是这个 meta 对象，所以要靠 self 指回外壳
+        this.meta = {
+            create,
+            props,
+            children,
+            nodes: [],
+            get current() {
+                return self.current;
+            },
+            set current(next: Updater) {
+                self.current = next;
+            }
+        };
+    }
+
+    invoke(...indices: number[]): void {
+        this.current(...indices);
+    }
+
+    get el(): Node | undefined {
+        return this.current.el;
+    }
+
+    get __grain(): ComponentMeta {
+        return this.meta;
+    }
+
+    set_props(next_props: Props, next_children?: unknown): void {
+        this.meta.props = next_props ?? {};
+        this.meta.children = next_children ?? null;
+
+        this.current.set_props?.(next_props, next_children as (() => unknown) | null);
+    }
+
+    onmount(): void {
+        this.current.onmount?.();
+    }
+}
+
+const SHELL_HANDLER: ProxyHandler<ShellImpl> = {
+    apply: (target, _this, args) => target.invoke(...(args as number[])),
+    get: (target, key) => Reflect.get(target, key),
+    has: (target, key) => Reflect.has(target, key)
+};
+
 export function component(
     instance: Updater,
     create: (props?: unknown, children?: unknown) => Updater,
     props: unknown,
     children: unknown
 ): Updater {
-    let current = instance;
+    const self = function () {} as unknown as ShellImpl;
 
-    const shell = ((...indices: number[]) => current(...indices)) as Updater;
+    Object.setPrototypeOf(self, ShellImpl.prototype);
 
-    const meta: ComponentMeta = {
-        create,
-        props,
-        children,
-        nodes: [],
-        get current() {
-            return current;
-        },
-        set current(next: Updater) {
-            current = next;
-        }
-    };
+    self.init(instance, create, props, children);
 
-    Object.defineProperty(shell, 'el', {
-        configurable: true,
-        get: () => current.el
-    });
+    const shell = new Proxy(self, SHELL_HANDLER) as unknown as ComponentShell;
 
-    shell.set_props = (next_props: Props, next_children?: unknown) => {
-        meta.props = next_props ?? {};
-        meta.children = next_children ?? null;
+    components.add(shell);
 
-        current.set_props?.(next_props, next_children as (() => unknown) | null);
-    };
-
-    shell.onmount = () => current.onmount?.();
-
-    (shell as ComponentShell).__grain = meta;
-    components.add(shell as ComponentShell);
-
-    return shell;
+    return shell as unknown as Updater;
 }
 
 /**
