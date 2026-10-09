@@ -69,6 +69,35 @@ it("only re-renders the row that changed", async () => {
     expect(target.querySelectorAll("div")[1]).toBe(second);
 });
 
+it("swaps rows in place", async () => {
+    // `[a[0], a[1]] = [a[1], a[0]]` 是**同时**写入两个位置 —— 拆成两个 setAt 的话第一个会
+    // 把第二个要读的值覆盖掉，顺序也就换不过来
+    const target = await mount(`<script>
+        let a = $state([1, 2]);
+
+        function flip() {
+            [a[0], a[1]] = [a[1], a[0]];
+        }
+    </script>
+    {#for it of a}
+        <div>{it}</div>
+    {/for}
+    <button onclick={flip}>flip</button>`);
+
+    const rows = () => [...target.querySelectorAll("div")].map((node) => node.textContent);
+
+    expect(rows()).toEqual(["1", "2"]);
+
+    const [first, second] = [...target.querySelectorAll("div")];
+
+    target.querySelector("button")!.click();
+
+    expect(rows()).toEqual(["2", "1"]);
+
+    // 没写 key 就是按位置复用：内容换了，节点还是原来那两个（没被重建）
+    expect([...target.querySelectorAll("div")]).toEqual(expect.arrayContaining([first, second]));
+});
+
 it("keeps existing rows when appending", async () => {
     const target = await mount(`<script>
         let a = $state([1]);

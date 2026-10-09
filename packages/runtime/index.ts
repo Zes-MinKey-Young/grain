@@ -149,6 +149,13 @@ export interface List extends Updater {
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
     setAt(index: number, value: unknown): void;
     /**
+     * 一次改多个位置 —— 解构赋值用（`[a[0], a[1]] = [a[1], a[0]]`）。
+     *
+     * 为什么必须是批量的：那种赋值是**同时**写入所有目标。拆成多个 `setAt` 的话，
+     * 第二个会读到第一个已经覆盖掉的值，而且中途会出现同一个值占着两个位置的状态。
+     */
+    setRows(pairs: Array<[number, unknown]>): void;
+    /**
      * `map.set(k, v)` / `set.add(v)`：键有了就只换那一项，没有就追加。
      *
      * 需要 `{#for ... with key = ...}` —— 没有键就说不清是哪一项。
@@ -271,20 +278,7 @@ class ListImpl {
 
             this.entries = kept;
 
-            // 顺序没乱就不动 DOM；乱了才按新顺序依次挪到锚点前（移动，不重建）
-            let ordered = true;
-
-            for (let i = 0; i < this.entries.length - 1; i += 1) {
-                const last = this.entries[i].nodes[this.entries[i].nodes.length - 1];
-                const next = this.entries[i + 1].nodes[0];
-
-                if (!last || last.nextSibling !== next) {
-                    ordered = false;
-                    break;
-                }
-            }
-
-            if (!ordered) for (const entry of this.entries) this.place(entry.nodes, null);
+            this.reorderIfNeeded();
         } else {
             // 没有 key：按位置复用，多出来的追加 / 删掉
             for (let i = 0; i < next.length; i += 1) {
@@ -352,6 +346,56 @@ class ListImpl {
         this.values.splice(from, remove, ...added);
 
         this.rebindFrom(from);
+    }
+
+    /**
+     * 顺序不对就按当前 entries 的顺序重排 —— 移动节点，不重建。
+     *
+     * 交换、splice 之后 DOM 的先后可能跟 entries 不一致，这时候才动；顺序没乱就一下
+     * 都不碰。
+     */
+    private reorderIfNeeded(): void {
+        for (let i = 0; i < this.entries.length - 1; i += 1) {
+            const last = this.entries[i].nodes[this.entries[i].nodes.length - 1];
+            const next = this.entries[i + 1].nodes[0];
+
+            if (!last || last.nextSibling !== next) {
+                for (const entry of this.entries) this.place(entry.nodes, null);
+
+                return;
+            }
+        }
+    }
+
+    /**
+     * 一次改多个位置（解构赋值）。
+     *
+     * 值先全部写进 `values` 再动 DOM —— 顺序执行的话，后面那个会读到前面覆盖掉的值。
+     */
+    setRows(pairs: Array<[number, unknown]>): void {
+        if (pairs.length === 0) return;
+
+        for (const [at, value] of pairs) {
+            if (Number.isInteger(at) && at >= 0 && at < this.values.length) this.values[at] = value;
+        }
+
+        // 有 key 时，只要有一项的身份变了，就地更新就不成立 —— 交给整体比对
+        if (this.options.key) {
+            for (const [at, value] of pairs) {
+                const entry = this.entries[at];
+
+                if (!entry || entry.key !== this.options.key(value, at)) {
+                    this.sync(this.values);
+
+                    return;
+                }
+            }
+        }
+
+        for (const [at, value] of pairs) this.entries[at]?.update(value, at);
+
+        // 交换之后 DOM 的先后要跟着换
+        this.reorderIfNeeded();
     }
 
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */

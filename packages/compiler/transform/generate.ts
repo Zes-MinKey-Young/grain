@@ -2197,25 +2197,61 @@ class Generator {
                         });
                     }
 
-                    // `[a[0], a[1]] = [x, y]` —— 解构的每一项各自定位
+                    // `[a[0], a[1]] = [x, y]` —— 一次调用改多个位置
                     const right = child.right;
 
                     if (left.type === 'ArrayPattern' && right.type === 'ArrayExpression') {
-                        left.elements.forEach((element, at) => {
-                            if (!element || element.type !== 'MemberExpression') return;
-                            if (!element.computed || element.object.type !== 'Identifier') return;
+                        // 只认每一项都是 `X[i]` 的简单形状，且两边一样长。rest、嵌套、
+                        // 默认值一概不分析 —— 那种交给整体比对（写了 key 就是 keyed 比对）
+                        const simple =
+                            left.elements.length > 0 &&
+                            left.elements.length === right.elements.length &&
+                            left.elements.every(
+                                (element) =>
+                                    element &&
+                                    element.type === 'MemberExpression' &&
+                                    element.computed &&
+                                    element.object.type === 'Identifier'
+                            );
 
-                            const value = right.elements[at];
+                        if (simple) {
+                            /** 同一个容器的放一组 */
+                            const rows = new Map<string, Array<{ index: string; value: string }>>();
 
-                            if (!value) return;
+                            left.elements.forEach((element, at) => {
+                                const target = element as TSESTree.MemberExpression;
+                                const value = right.elements[at];
 
-                            targets.push({
-                                name: element.object.name,
-                                index: this.slice(element.property.range),
-                                value: this.slice(value.range),
-                                at: value.range
+                                if (!value) return;
+
+                                const name = (target.object as TSESTree.Identifier).name;
+                                const group = rows.get(name) ?? [];
+
+                                group.push({
+                                    index: this.slice(target.property.range),
+                                    value: reuse(this.slice(value.range), value.range, parent)
+                                });
+
+                                rows.set(name, group);
                             });
-                        });
+
+                            for (const [name, group] of rows) {
+                                for (const list of listsOf(name)) {
+                                    // 只有一项就用 setAt，多项才需要批量
+                                    const call =
+                                        group.length === 1
+                                            ? `setAt(${group[0].index}, ${group[0].value})`
+                                            : `setRows([${group.map((row) => `[${row.index}, ${row.value}]`).join(', ')}])`;
+
+                                    precise(list, call, child, parent);
+                                }
+                            }
+
+                            return;
+                        }
+
+                        // 形状太复杂：不做精确调用，后面的刷新会走整体比对
+                        return;
                     }
 
                     for (const target of targets) {
