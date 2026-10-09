@@ -2,7 +2,8 @@
   "name": "grain",
   "private": true,
   "scripts": {
-    "example": "node scripts/example.mjs",
+    "test": "bun test",
+  "example": "node scripts/example.mjs",
     "create-grain": "node packages/create-grain/index.mjs",
     "packages:build": "pnpm --filter @graints/runtime build && pnpm --filter @graints/vite-plugin build",
     "vscode:build": "pnpm --filter grain-vscode build",
@@ -17,8 +18,10 @@
     "typescript": "6.0.3"
   },
   "devDependencies": {
+    "@types/bun": "^1.4.2",
     "@types/css-tree": "^3.2.0",
     "@types/node": "^26.6.4",
+    "happy-dom": "^20.14.5",
     "vite": "^8.3.2"
   }
 }

@@ -12,5 +12,7 @@
         "skipLibCheck": true,
         "types": ["node"]
     },
-    "include": ["index.ts", "../compiler/**/*.ts"]
+    "include": ["index.ts", "../compiler/**/*.ts"],
+    // 测试不该进产物 —— 否则 dist 里会有一份同名测试被 bun 扫到（路径不对，一定失败）
+    "exclude": ["../compiler/tests/**"]
 }

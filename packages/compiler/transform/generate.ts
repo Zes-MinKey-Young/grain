@@ -1379,7 +1379,9 @@ class Generator {
 
         for (const [update, indices] of grouped) {
             indices.sort((a, b) => a - b);
-            calls.push(`${update}(${indices.join(', ')});`);
+            // `?.()`：刷新函数是 `var` 声明的（下面会提升），所以元素还没建好时
+            // 调用它也只是什么都不做，不会抛 —— 比如 `<script>` 顶层的代码
+            calls.push(`${update}?.(${indices.join(', ')});`);
         }
 
         // `$node` 的源变量变了：重算那个节点，再由它刷自己的片段
@@ -1395,7 +1397,9 @@ class Generator {
     private fragment(children: TemplateNode[], name: string): string {
         const items = this.children(children, name);
 
-        this.statements.push(`const ${name} = creFragment([${items.join(', ')}]);`);
+        // `var`：刷新函数要在 `<script>` 之前就能被引用到（值为 undefined，
+        // 配合调用处的 `?.()` 就是安全的），否则顶层代码会踩到 TDZ
+        this.statements.push(`var ${name} = creFragment([${items.join(', ')}]);`);
 
         return name;
     }
@@ -1831,7 +1835,7 @@ class Generator {
         }
 
         this.statements.push(
-            `const ${name} = creEle(${JSON.stringify(node.name)}, {${props.join(', ')}}, [${items.join(', ')}]);`
+            `var ${name} = creEle(${JSON.stringify(node.name)}, {${props.join(', ')}}, [${items.join(', ')}]);`
         );
 
         return name;
@@ -2087,7 +2091,7 @@ class Generator {
             // 只给订阅判断用（有没有 subscribe）。source 仍写 `${right}`：
             // 每次重新求值，`entries()` 这种一次性迭代器才不会被耗尽
             `const ${source_name} = ${right};`,
-            `const ${list} = creList({ render: ${render}, key: ${key}, entry: ${entry}, indexed: ${node.content.right.type === 'Identifier' ? 'false' : 'true'}, fallback: ${fallback}, source: () => ${right} });`,
+            `var ${list} = creList({ render: ${render}, key: ${key}, entry: ${entry}, indexed: ${node.content.right.type === 'Identifier' ? 'false' : 'true'}, fallback: ${fallback}, source: () => ${right} });`,
             `${list}.sync(${right});`,
             // 响应式容器：订阅它的改动。编译期不一定知道谁是响应式（可能是 import 进来的），
             // 所以运行时看有没有 subscribe——连"编译期看不见的改动"也能精确更新
@@ -2136,7 +2140,7 @@ class Generator {
         const precise = (list: string, call: string, node: TSESTree.Node, parent?: TSESTree.Node): void => {
             const statement = parent?.type === 'ExpressionStatement' ? parent : node;
 
-            edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}.${call};` });
+            edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}?.${call};` });
 
             const slot = this.for_slots.get(list);
             if (slot) skip.add(`${slot.update}#${slot.index}`);
@@ -2150,26 +2154,76 @@ class Generator {
         const lists_of = (name: string): string[] =>
             this.reactive_containers.has(name) ? [] : (this.for_sources.get(name) ?? []);
 
+        /**
+         * 值表达式在产物里会用到两次（原调用一次、精确调用一次）—— 不是简单表达式就先
+         * 赋给一个局部变量，否则它会被求值两遍（`a.push({ ... })` 每次都是新对象）。
+         *
+         * 做法：声明插到整句之前，原位置换成那个变量。
+         */
+        const reuse = (text: string, at: [number, number], parent?: TSESTree.Node): string => {
+            // 标识符 / 数字 / 字符串 直接用，不必提取
+            if (/^[$A-Za-z_][\w$]*$/.test(text) || /^-?[\d.]+$/.test(text) || /^['"`]/.test(text)) {
+                return text;
+            }
+
+            const name = `__value$${this.counter++}`;
+            const statement = parent?.type === 'ExpressionStatement' ? parent.range[0] : at[0];
+
+            edits.push({ start: statement, end: statement, text: `const ${name} = ${text}; ` });
+            edits.push({ start: at[0], end: at[1], text: name });
+
+            return name;
+        };
+
         simpleTraverse(node, {
             enter: (child, parent) => {
                 // `items[i] = v`：只换那一项，其余的 DOM 不动。
                 // 复合赋值（`items[i] += 1`）和改元素内部（`items[i].name = x`）都不认 ——
                 // 前者还要读旧值，后者动的不是这个容器本身，都退回整块比对
                 if (child.type === 'AssignmentExpression') {
+                    if (child.operator !== '=') return;
+
+                    /** 每一处「改了哪个容器的哪一格」 */
+                    const targets: Array<{ name: string; index: string; value: string; at: [number, number] }> = [];
                     const left = child.left;
 
-                    if (child.operator !== '=') return;
-                    if (left.type !== 'MemberExpression' || !left.computed) return;
-                    if (left.object.type !== 'Identifier') return;
+                    // `a[i] = v`
+                    if (left.type === 'MemberExpression' && left.computed && left.object.type === 'Identifier') {
+                        targets.push({
+                            name: left.object.name,
+                            index: this.slice(left.property.range),
+                            value: this.slice(child.right.range),
+                            at: child.right.range
+                        });
+                    }
 
-                    const lists = lists_of(left.object.name);
-                    if (lists.length === 0) return;
+                    // `[a[0], a[1]] = [x, y]` —— 解构的每一项各自定位
+                    const right = child.right;
 
-                    const index = this.slice(left.property.range);
-                    const value = this.slice(child.right.range);
+                    if (left.type === 'ArrayPattern' && right.type === 'ArrayExpression') {
+                        left.elements.forEach((element, at) => {
+                            if (!element || element.type !== 'MemberExpression') return;
+                            if (!element.computed || element.object.type !== 'Identifier') return;
 
-                    for (const list of lists) {
-                        precise(list, `set_at(${index}, ${value})`, child, parent);
+                            const value = right.elements[at];
+
+                            if (!value) return;
+
+                            targets.push({
+                                name: element.object.name,
+                                index: this.slice(element.property.range),
+                                value: this.slice(value.range),
+                                at: value.range
+                            });
+                        });
+                    }
+
+                    for (const target of targets) {
+                        for (const list of lists_of(target.name)) {
+                            const value = reuse(target.value, target.at, parent);
+
+                            precise(list, `set_at(${target.index}, ${value})`, child, parent);
+                        }
                     }
 
                     return;
@@ -2188,7 +2242,7 @@ class Generator {
 
                 const args = child.arguments
                     .filter((arg) => arg.type !== 'SpreadElement')
-                    .map((arg) => this.slice(arg.range))
+                    .map((arg) => reuse(this.slice(arg.range), arg.range, parent))
                     .join(', ');
 
                 for (const list of lists) {

@@ -1,0 +1,4 @@
+[test]
+# 只在 packages 下找测试 —— 根目录还有一份 vendored 的 svelte（用来对照实现），
+# 它的测试不属于这个仓库
+root = "packages"
