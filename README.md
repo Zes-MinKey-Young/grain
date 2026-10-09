@@ -535,10 +535,38 @@ function add() {
 }
 ```
 
-This works when `of` is followed by the container variable itself (or its `entries()`), and the
-method is one of `push` / `pop` / `shift` / `unshift` / `splice`. Anything else — `sort`,
-`reverse`, `list.filter(...)` — has no "affected rows" to speak of, so it falls back to a
+This works when `of` is followed by the container variable itself, and the method is one of
+`push` / `pop` / `shift` / `unshift` / `splice` (or `items[i] = v`, which becomes
+`set_at(i, v)`). Anything else — `sort`, `reverse`, `list.filter(...)` — has no "affected
+rows" to speak of, so it falls back to a comparison.
+
+**Map and Set** are located by key instead of by position, so they need `with key`:
+
+```grain
+{#for [name, score] of scores with key = name}
+    <p>{name}: {score}</p>
+{/for}
+```
+
+```js
+scores.set('ada', 10);   // -> list.set_key('ada', 10)      only that row
+scores.delete('ada');    // -> list.remove_key('ada')
+scores.clear();          // -> list.clear()
+picked.add('blue');      // -> list.set_key('blue', 'blue')  a Set's value is its own key
+```
+
+Without `with key` there is no telling which row a method refers to, so those fall back to a
 comparison.
+
+**`entries()`** is a special case: each item carries its index, so `push` / `pop` leave the
+earlier items alone and stay precise, while `shift` / `unshift` / `splice` move every index and
+fall back to a comparison:
+
+```grain
+{#for [i, x] of items.entries() with key = i}
+    <p>{i}: {x}</p>
+{/for}
+```
 
 ### When the compiler cannot see the write
 

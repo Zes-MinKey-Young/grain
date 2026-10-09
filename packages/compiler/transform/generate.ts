@@ -281,6 +281,14 @@ function binary_operator(operator: string): string {
  */
 const LIST_MUTATIONS = new Set(['push', 'pop', 'shift', 'unshift', 'splice']);
 
+/**
+ * Map / Set 上那些"按一个键就能定位到某一项"的方法。
+ *
+ * 数组的方法是按位置（`set_at(i, v)`），这两个是按键（`set_key(k, v)`）—— 所以只有写了
+ * `with key = ...` 的 for 才认，否则说不清是哪一项，退回整块比对。
+ */
+const KEYED_MUTATIONS = new Set(['set', 'add', 'delete', 'clear']);
+
 /** 这些工厂造出来的是"自己会通知改动"的容器 */
 const REACTIVE_FACTORIES = new Set(['reactive_array', 'reactive_map', 'reactive_set']);
 
@@ -323,7 +331,22 @@ function reactive_containers_in(root: Root): Set<string> {
  * 别的（`list.filter(...)`、`a.concat(b)`）一概不认。
  */
 function source_variable_of(right: TSESTree.Expression): string | null {
-    return right.type === 'Identifier' ? right.name : null;
+    if (right.type === 'Identifier') return right.name;
+
+    // `items.entries()` 也认：项是 `[下标, 值]`，而**追加 / 删末尾不动前面那些项的下标**
+    // —— 所以 `push` / `pop` 依然能精确（`shift` / `unshift` / `splice` 会让所有下标
+    // 变，那种走整块比对，见 mutation_calls 里的 for_shifted）
+    if (
+        right.type === 'CallExpression' &&
+        right.callee.type === 'MemberExpression' &&
+        right.callee.property.type === 'Identifier' &&
+        right.callee.property.name === 'entries' &&
+        right.callee.object.type === 'Identifier'
+    ) {
+        return right.callee.object.name;
+    }
+
+    return null;
 }
 
 function is_function_like(node: TSESTree.Node): node is FunctionLike {
@@ -550,9 +573,17 @@ class Generator {
      * 只有"of 后面直接跟着这个变量"（或它的 `entries()`）才登记 —— 改的就是这个
      * 容器，才能换成精确的 `push` / `splice` 调用。
      */
-    private for_sources = new Map<string, string>();
+    private for_sources = new Map<string, string[]>();
     /** 每个 for 在父级里的片段坐标：精确调用顶掉它之后，就别再让它 sync 一遍 */
     private for_slots = new Map<string, { update: string; index: number }>();
+    /** 哪些列表写了 `with key = ...`：只有它们能按键定位（Map / Set 的方法要靠这个） */
+    private for_keyed = new Set<string>();
+    /**
+     * 哪些列表的项**带下标**（`{#for [i, x] of items.entries()}`）。
+     *
+     * 这种只有 `push` / `pop` 能精确 —— 别的会让所有项的下标都变。
+     */
+    private for_shifted = new Set<string>();
     /** `reactive_array(...)` 之类声明的变量：它们自己会通知改动 */
     private readonly reactive_containers: Set<string>;
     /** `$props()` 解构出来的变量，生成 `set_props` 要用 */
@@ -2030,6 +2061,15 @@ class Generator {
         // `with key = ...`：键是拿循环变量算的，所以参数就是那个绑定模式
         const key = node.key ? `(${pattern}) => (${node.key.raw})` : 'null';
 
+        // `{#for [k, v] of map}`：项是 [键, 值] 拼出来的。`map.set(k, v)` 只给键和值，
+        // 更新那一项之前得先拼回项的形状（`set.add(v)` 和普通数组用不着）
+        const pair = left.type === 'ArrayPattern' ? left.elements : null;
+        const names = pair
+            ? pair.map((element) => (element ? this.slice(element.range) : 'undefined'))
+            : [];
+        const entry =
+            node.key && names.length === 2 ? `(${names.join(', ')}) => [${names.join(', ')}]` : 'null';
+
         this.needs_list = true;
 
         this.statements.push(
@@ -2047,7 +2087,7 @@ class Generator {
             // 只给订阅判断用（有没有 subscribe）。source 仍写 `${right}`：
             // 每次重新求值，`entries()` 这种一次性迭代器才不会被耗尽
             `const ${source_name} = ${right};`,
-            `const ${list} = creList({ render: ${render}, key: ${key}, fallback: ${fallback}, source: () => ${right} });`,
+            `const ${list} = creList({ render: ${render}, key: ${key}, entry: ${entry}, indexed: ${node.content.right.type === 'Identifier' ? 'false' : 'true'}, fallback: ${fallback}, source: () => ${right} });`,
             `${list}.sync(${right});`,
             // 响应式容器：订阅它的改动。编译期不一定知道谁是响应式（可能是 import 进来的），
             // 所以运行时看有没有 subscribe——连"编译期看不见的改动"也能精确更新
@@ -2060,7 +2100,17 @@ class Generator {
         // 精确调用（`list.push(...)`）只给 `$state` 的容器：响应式容器有自己的订阅，
         // 两边都做就重复了。而 `$state` 变量不会是响应式容器，所以这条分得开
         if (source && this.analysis?.states.has(source)) {
-            this.for_sources.set(source, list);
+            // 同一个容器可能喂给好几个 for（`items` 和 `items.entries()`），
+            // 改动要同时更新它们，所以这里是一对多
+            const known = this.for_sources.get(source);
+
+            if (known) known.push(list);
+            else this.for_sources.set(source, [list]);
+
+            if (node.key) this.for_keyed.add(list);
+
+            // 项带下标的（`entries()`）跟普通数组不一样，见 for_shifted
+            if (node.content.right.type !== 'Identifier') this.for_shifted.add(list);
 
             if (owner) this.for_slots.set(list, { update: owner, index });
         }
@@ -2092,9 +2142,13 @@ class Generator {
             if (slot) skip.add(`${slot.update}#${slot.index}`);
         };
 
-        /** 容器变量 -> 它的列表；响应式容器自己会通知，别重复 */
-        const list_of = (name: string): string | undefined =>
-            this.reactive_containers.has(name) ? undefined : this.for_sources.get(name);
+        /**
+         * 容器变量 -> 以它为源的**所有**列表。
+         *
+         * 响应式容器自己会通知 `for`，这里返回空数组，别重复。
+         */
+        const lists_of = (name: string): string[] =>
+            this.reactive_containers.has(name) ? [] : (this.for_sources.get(name) ?? []);
 
         simpleTraverse(node, {
             enter: (child, parent) => {
@@ -2108,13 +2162,15 @@ class Generator {
                     if (left.type !== 'MemberExpression' || !left.computed) return;
                     if (left.object.type !== 'Identifier') return;
 
-                    const list = list_of(left.object.name);
-                    if (!list) return;
+                    const lists = lists_of(left.object.name);
+                    if (lists.length === 0) return;
 
                     const index = this.slice(left.property.range);
                     const value = this.slice(child.right.range);
 
-                    precise(list, `set_at(${index}, ${value})`, child, parent);
+                    for (const list of lists) {
+                        precise(list, `set_at(${index}, ${value})`, child, parent);
+                    }
 
                     return;
                 }
@@ -2125,19 +2181,40 @@ class Generator {
                 if (callee.type !== 'MemberExpression' || callee.property.type !== 'Identifier') return;
 
                 const method = callee.property.name;
-                if (!LIST_MUTATIONS.has(method)) return;
                 if (callee.object.type !== 'Identifier') return;
 
-                const list = list_of(callee.object.name);
-                if (!list) return;
+                const lists = lists_of(callee.object.name);
+                if (lists.length === 0) return;
 
                 const args = child.arguments
                     .filter((arg) => arg.type !== 'SpreadElement')
                     .map((arg) => this.slice(arg.range))
                     .join(', ');
 
-                // 紧跟在那句调用之后：此刻参数还是原值
-                precise(list, `${method}(${args})`, child, parent);
+                for (const list of lists) {
+                    // Map / Set：按一个键就能定位到某一项
+                    if (KEYED_MUTATIONS.has(method)) {
+                        // 没有 `with key = ...` 就说不清是哪一项，退回整块比对
+                        if (!this.for_keyed.has(list)) continue;
+
+                        if (method === 'clear') precise(list, 'clear()', child, parent);
+                        else if (method === 'delete') precise(list, `remove_key(${args})`, child, parent);
+                        // `map.set(k, v)` 是键 + 值；`set.add(v)` 里值本身就是键
+                        else if (method === 'add') precise(list, `set_key(${args}, ${args})`, child, parent);
+                        else precise(list, `set_key(${args})`, child, parent);
+
+                        continue;
+                    }
+
+                    if (!LIST_MUTATIONS.has(method)) continue;
+
+                    // `{#for [i, x] of items.entries()}`：项是 [下标, 值]。追加 / 删末尾不动
+                    // 前面那些项的下标，所以这两个仍然精确；别的会让所有下标变，退回整块比对
+                    if (this.for_shifted.has(list) && method !== 'push' && method !== 'pop') continue;
+
+                    // 紧跟在那句调用之后：此刻参数还是原值
+                    precise(list, `${method}(${args})`, child, parent);
+                }
             }
         });
 

@@ -102,6 +102,19 @@ export interface ListOptions {
     render(item: unknown, index: number): ListEntry;
     /** `with key = ...` 给出来的键；没有就按位置复用 */
     key?: (item: unknown, index: number) => unknown;
+    /**
+     * 项本身怎么从「键 + 值」拼出来。
+     *
+     * `{#for [k, v] of map}` 的项是 `[k, v]`，而 `map.set(k, v)` 只给了键和值 ——
+     * 要更新那一项，得先把它拼回项的形状。`{#for k of set}` 那种不需要（值就是项）。
+     */
+    entry?: (key: unknown, value: unknown) => unknown;
+    /**
+     * 项**带下标**（`{#for [i, x] of items.entries()}`）。
+     *
+     * 这种列表追加时只拿到值，项得用 `entry` 拼出来（`[下标, 值]`），下标就是当前长度。
+     */
+    indexed?: boolean;
     /** 列表为空时渲染的分支 */
     fallback?: () => Node[];
     /**
@@ -135,6 +148,16 @@ export interface List extends Updater {
     splice(at: number, remove: number, ...added: unknown[]): void;
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
     set_at(index: number, value: unknown): void;
+    /**
+     * `map.set(k, v)` / `set.add(v)`：键有了就只换那一项，没有就追加。
+     *
+     * 需要 `{#for ... with key = ...}` —— 没有键就说不清是哪一项。
+     */
+    set_key(key: unknown, value: unknown): void;
+    /** `map.delete(k)` / `set.delete(v)`：删掉那一项，后面的内容跟着换 */
+    remove_key(key: unknown): void;
+    /** `map.clear()` / `set.clear()`：清空（空列表分支会重新出现） */
+    clear(): void;
     /** 响应式容器发来的一次改动：按它动，说不清就整块比对 */
     apply(change: ContainerChange): void;
 }
@@ -278,9 +301,12 @@ class ListImpl {
 
         // 已有的项一点没动，所以只需要建新的
         for (const item of added) {
-            this.values.push(item);
+            // 项带下标时（`entries()`）只拿到值，项要拼出来，下标就是当前长度
+            const entry = this.options.indexed ? this.item_for(this.values.length, item) : item;
 
-            this.entries.push(this.add(item, this.entries.length, null));
+            this.values.push(entry);
+
+            this.entries.push(this.add(entry, this.entries.length, null));
         }
     }
 
@@ -348,6 +374,58 @@ class ListImpl {
         }
 
         this.entries[at].update(value, at);
+    }
+
+    /**
+     * 项本身：`{#for [k, v] of map}` 要把键和值拼成 `[k, v]`，别的形状就是值本身。
+     */
+    private item_for(key: unknown, value: unknown): unknown {
+        return this.options.entry ? this.options.entry(key, value) : value;
+    }
+
+    /** `map.set(k, v)` / `set.add(v)`：键有了就只换那一项，没有就追加 */
+    set_key(key: unknown, value: unknown): void {
+        // 没有键就说不清是哪一项。编译器不会给这种 for 生成调用，这里只是兜底
+        if (!this.options.key) return;
+
+        const at = this.entries.findIndex((entry) => entry.key === key);
+        const item = this.item_for(key, value);
+
+        // 新键：跟 push 一样是追加
+        if (at < 0) {
+            this.push(item);
+
+            return;
+        }
+
+        this.values[at] = item;
+
+        this.entries[at].update(item, at);
+    }
+
+    /** `map.delete(k)` / `set.delete(v)`：删掉那一项，后面的内容跟着换 */
+    remove_key(key: unknown): void {
+        const at = this.entries.findIndex((entry) => entry.key === key);
+
+        if (at < 0) return;
+
+        this.drop(this.entries[at].nodes);
+
+        this.entries = [...this.entries.slice(0, at), ...this.entries.slice(at + 1)];
+        this.values.splice(at, 1);
+
+        this.rebind_from(at);
+        this.set_empty(this.entries.length === 0);
+    }
+
+    /** `map.clear()` / `set.clear()`：清空（空列表分支会重新出现） */
+    clear(): void {
+        for (const entry of this.entries) this.drop(entry.nodes);
+
+        this.entries = [];
+        this.values = [];
+
+        this.set_empty(true);
     }
 
     /** 响应式容器发来的一次改动：按它动，说不清就整块比对 */

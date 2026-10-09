@@ -486,7 +486,32 @@ function add() {
 }
 ```
 
-生效条件是 `of` 后面直接跟着那个容器变量，而且方法是 `push` / `pop` / `shift` / `unshift` / `splice` 之一。其余（`sort`、`reverse`、`list.filter(...)`）没有"受影响的行"可言，会退回整块比对。
+生效条件是 `of` 后面直接跟着那个容器变量，而且方法是 `push` / `pop` / `shift` / `unshift` / `splice` 之一（`items[i] = v` 会变成 `set_at(i, v)`）。其余（`sort`、`reverse`、`list.filter(...)`）没有"受影响的行"可言，会退回整块比对。
+
+**Map 和 Set** 是按键定位而不是按位置，所以要写 `with key`：
+
+```grain
+{#for [name, score] of scores with key = name}
+    <p>{name}: {score}</p>
+{/for}
+```
+
+```js
+scores.set('ada', 10);   // -> list.set_key('ada', 10)      只动那一项
+scores.delete('ada');    // -> list.remove_key('ada')
+scores.clear();          // -> list.clear()
+picked.add('blue');      // -> list.set_key('blue', 'blue')  Set 的值就是它自己的键
+```
+
+不写 `with key` 就说不清某个方法指的是哪一行，这类退回整块比对。
+
+**`entries()`** 是个特例：每一项都带着自己的下标，所以 `push` / `pop` 不动前面那些项，仍然精确；而 `shift` / `unshift` / `splice` 会让所有下标都变，退回整块比对：
+
+```grain
+{#for [i, x] of items.entries() with key = i}
+    <p>{i}: {x}</p>
+{/for}
+```
 
 ### 编译器看不见那次写入时
 

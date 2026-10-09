@@ -29,6 +29,31 @@
     function flip_in_place() {
         [todos[0], todos[1]] = [todos[1], todos[0]];
     }
+
+    // A `$state` Map / Set: `set` / `delete` / `add` / `clear` locate the one row by its
+    // key, so only that row is touched (needs `with key = ...`)
+    let scores = $state(new Map([['ada', 1]]));
+    let picked = $state(new Set(['red']));
+
+    function score(name, value) {
+        scores.set(name, value);
+    }
+
+    function unscore(name) {
+        scores.delete(name);
+    }
+
+    function pick(color) {
+        picked.add(color);
+    }
+
+    function unpick(color) {
+        picked.delete(color);
+    }
+
+    function reset_scores() {
+        scores.clear();
+    }
 </script>
 
 <h2>1 · keyed for over a $state array</h2>
@@ -80,6 +105,33 @@
 {#for [i, todo] of todos.entries() with key = i}
     <p class="row">[{i}] {todo.text} <code>Math.random() =</code> {Math.random()}</p>
 {/for}
+
+<h2>5 · Map and Set</h2>
+<p class="hint">
+    matched by key — <code>set</code> / <code>delete</code> / <code>add</code> / <code>clear</code>
+    touch just the row they name (the first two values are unchanged, so their
+    <code>Math.random()</code> stays put)
+</p>
+
+{#for [name, value] of scores with key = name}
+    <p class="row">{name} = {value} <code>Math.random() =</code> {Math.random()}</p>
+{/for}
+
+<p class="buttons">
+    <button onclick={() => score('ada', 10)}>set ada=10</button>
+    <button onclick={() => score('bob', 20)}>set bob=20</button>
+    <button onclick={() => unscore('ada')}>delete ada</button>
+    <button onclick={reset_scores}>clear</button>
+</p>
+
+{#for color of picked with key = color}
+    <p class="row">#{color} <code>Math.random() =</code> {Math.random()}</p>
+{/for}
+
+<p class="buttons">
+    <button onclick={() => pick('blue')}>add blue</button>
+    <button onclick={() => unpick('red')}>delete red</button>
+</p>
 
 <style>
     h2 {
