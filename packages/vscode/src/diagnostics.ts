@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import type { Analysis } from './analysis.js';
 
 /** 把解析错误和 CSS 诊断打到问题面板 */
-export function update_diagnostics(
+export function updateDiagnostics(
     document: vscode.TextDocument,
     collection: vscode.DiagnosticCollection,
     analysis: Analysis
@@ -20,11 +20,11 @@ export function update_diagnostics(
     }
 
     // TS 语义诊断（类型错误、未定义变量）。语法已经错了就不重复报
-    const semantic_enabled = vscode.workspace
+    const semanticEnabled = vscode.workspace
         .getConfiguration('grain')
         .get<boolean>('semanticDiagnostics', true);
 
-    if (semantic_enabled && !analysis.error) {
+    if (semanticEnabled && !analysis.error) {
         for (const problem of analysis.semantic()) {
             const start = document.positionAt(problem.start);
             const end = document.positionAt(problem.end);

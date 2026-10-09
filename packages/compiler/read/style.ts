@@ -1,4 +1,4 @@
-import { type StyleSheet as StyleSheetNode, parse as parse_css } from 'css-tree';
+import { type StyleSheet as StyleSheetNode, parse as parseCss } from 'css-tree';
 import type { CssDiagnostic, RawStyle, Stylesheet } from '../types.js';
 import type { Locator } from '../utils.js';
 
@@ -9,11 +9,11 @@ import type { Locator } from '../utils.js';
  * css-tree 是容错解析器，语法问题不抛错，而是记录到 `diagnostics` 里，
  * 由后续阶段决定是报警还是报错。
  */
-export function parse_style(block: RawStyle, locate: Locator): Stylesheet {
+export function parseStyle(block: RawStyle, locate: Locator): Stylesheet {
     const diagnostics: CssDiagnostic[] = [];
     const { line, column } = locate(block.contentStart);
 
-    const content = parse_css(block.raw, {
+    const content = parseCss(block.raw, {
         positions: true,
         offset: block.contentStart,
         line,

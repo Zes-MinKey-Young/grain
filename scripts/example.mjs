@@ -12,7 +12,7 @@ import { build, createServer, preview } from 'vite';
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const examples = join(repository, 'examples');
-const config_file = join(examples, 'vite.config.mts');
+const configFile = join(examples, 'vite.config.mts');
 
 const available = readdirSync(examples, { withFileTypes: true })
     .filter((entry) => entry.isDirectory())
@@ -54,7 +54,7 @@ if (command === 'serve' && selected.length > 1) {
 
 const options = (name) => ({
     root: join(examples, name),
-    configFile: config_file,
+    configFile: configFile,
     logLevel: 'info'
 });
 

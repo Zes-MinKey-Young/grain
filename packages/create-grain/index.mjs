@@ -12,13 +12,13 @@
  *   packages/runtime 和 packages/vite-plugin，改编译器即时生效
  * - 其他情况：依赖写成 registry 上的版本号
  */
-import { spawn } from 'node:child_process';
+import { spawn } from 'node:childProcess';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
-const template_root = join(here, 'templates');
+const templateRoot = join(here, 'templates');
 
 /** registry 模式下写的版本号（包发布后这里就是给新项目用的版本） */
 const REGISTRY_VERSION = '^0.1.2';
@@ -48,7 +48,7 @@ Examples
 /** 模板里的占位符 -> 实际值 */
 const PLACEHOLDER = /\{\{(\w+)\}\}/g;
 
-function parse_args(argv) {
+function parseArgs(argv) {
     const options = {
         name: '',
         template: 'basic',
@@ -64,7 +64,7 @@ function parse_args(argv) {
 
     for (let index = 0; index < argv.length; index += 1) {
         const arg = argv[index];
-        const value_of = () => argv[index + 1];
+        const valueOf = () => argv[index + 1];
 
         if (arg === '-h' || arg === '--help') {
             options.help = true;
@@ -75,13 +75,13 @@ function parse_args(argv) {
         } else if (arg === '--no-link') {
             options.link = false;
         } else if (arg === '--link') {
-            const next = value_of();
+            const next = valueOf();
             options.link = next && !next.startsWith('-') ? ((index += 1), next) : '';
         } else if (arg === '-t' || arg === '--template') {
-            options.template = value_of() ?? '';
+            options.template = valueOf() ?? '';
             index += 1;
         } else if (arg === '--pm') {
-            options.pm = value_of() ?? '';
+            options.pm = valueOf() ?? '';
             index += 1;
         } else if (arg.startsWith('--template=')) {
             options.template = arg.slice('--template='.length);
@@ -98,7 +98,7 @@ function parse_args(argv) {
 }
 
 /** 目录名 -> 合法的 npm 包名（目录本身不动） */
-function to_package_name(name) {
+function toPackageName(name) {
     const base = name.split(/[\\/]/).filter(Boolean).pop() ?? 'grain-app';
 
     const safe = base
@@ -111,8 +111,8 @@ function to_package_name(name) {
     return safe === '' ? 'grain-app' : safe;
 }
 
-const available_templates = () =>
-    readdirSync(template_root, { withFileTypes: true })
+const availableTemplates = () =>
+    readdirSync(templateRoot, { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => entry.name)
         .sort();
@@ -121,7 +121,7 @@ const available_templates = () =>
  * 找一个 grain 仓库（里面有 packages/runtime 和 packages/vite-plugin 的）。
  * 不传路径时，从自己往上两级找 —— 也就是 `packages/create-grain` 所在的那个仓库。
  */
-function locate_repository(explicit) {
+function locateRepository(explicit) {
     const candidates = [explicit ? resolve(explicit) : null, resolve(here, '..', '..')].filter(
         (path) => path !== null
     );
@@ -138,7 +138,7 @@ function locate_repository(explicit) {
 }
 
 /** `file:` 依赖的相对路径（同一盘符才用相对，跨盘符只能给绝对） */
-function file_reference(from, to) {
+function fileReference(from, to) {
     const path = relative(from, to).split('\\').join('/');
 
     return path.startsWith('.') ? `file:${path}` : `file:${to.split('\\').join('/')}`;
@@ -147,12 +147,12 @@ function file_reference(from, to) {
 /**
  * vite.config 里怎么引到插件。
  *
- * 链到本地仓库时必须走**源码路径**：Vite 打包 config 时会把 node_modules 里的依赖
+ * 链到本地仓库时必须走**源码路径**：Vite 打包 config 时会把 nodeModules 里的依赖
  * 留在外部，之后 Node 去加载它就会撞上 "Stripping types is unsupported for files
- * under node_modules"（`@grain/vite-plugin` 的入口是 index.ts）。
+ * under nodeModules"（`@grain/vite-plugin` 的入口是 index.ts）。
  * 从源码路径引，它就跟着 config 一起被打进去了。
  */
-function plugin_import(target, repository) {
+function pluginImport(target, repository) {
     if (!repository) return '@graints/vite-plugin';
 
     const source = join(repository, 'packages', 'vite-plugin', 'index.js');
@@ -168,14 +168,14 @@ function plugin_import(target, repository) {
 const dotted = (name) => (name.startsWith('_') ? `.${name.slice(1)}` : name);
 
 /** 拷模板：目录递归，文本里的占位符替换掉 */
-function copy_template(from, to, fill) {
+function copyTemplate(from, to, fill) {
     for (const entry of readdirSync(from, { withFileTypes: true })) {
         const source = join(from, entry.name);
         const target = join(to, dotted(entry.name));
 
         if (entry.isDirectory()) {
             mkdirSync(target, { recursive: true });
-            copy_template(source, target, fill);
+            copyTemplate(source, target, fill);
             continue;
         }
 
@@ -183,8 +183,8 @@ function copy_template(from, to, fill) {
     }
 }
 
-function detect_pm() {
-    const agent = process.env.npm_config_user_agent ?? '';
+function detectPm() {
+    const agent = process.env.npmConfigUserAgent ?? '';
 
     if (agent.startsWith('pnpm')) return 'pnpm';
     if (agent.startsWith('yarn')) return 'yarn';
@@ -229,14 +229,14 @@ async function install(pm, cwd) {
 }
 
 async function main() {
-    const options = parse_args(process.argv.slice(2));
+    const options = parseArgs(process.argv.slice(2));
 
     if (options.help) {
         console.log(HELP.trim());
         return 0;
     }
 
-    const templates = available_templates();
+    const templates = availableTemplates();
 
     if (!templates.includes(options.template)) {
         console.error(`没有这个模板：${options.template}`);
@@ -262,21 +262,21 @@ async function main() {
         return 1;
     }
 
-    const repository = options.link === false ? null : locate_repository(options.link || null);
+    const repository = options.link === false ? null : locateRepository(options.link || null);
 
     const deps = repository
         ? {
-              grain: file_reference(target, join(repository, 'packages', 'runtime')),
-              plugin: file_reference(target, join(repository, 'packages', 'vite-plugin'))
+              grain: fileReference(target, join(repository, 'packages', 'runtime')),
+              plugin: fileReference(target, join(repository, 'packages', 'vite-plugin'))
           }
         : { grain: REGISTRY_VERSION, plugin: REGISTRY_VERSION };
 
     const values = {
-        name: to_package_name(options.name),
-        title: to_package_name(options.name),
-        dep_grain: deps.grain,
-        dep_plugin: deps.plugin,
-        plugin_import: plugin_import(target, repository)
+        name: toPackageName(options.name),
+        title: toPackageName(options.name),
+        depGrain: deps.grain,
+        depPlugin: deps.plugin,
+        pluginImport: pluginImport(target, repository)
     };
 
     const fill = (text) =>
@@ -285,9 +285,9 @@ async function main() {
         );
 
     mkdirSync(target, { recursive: true });
-    copy_template(join(template_root, options.template), target, fill);
+    copyTemplate(join(templateRoot, options.template), target, fill);
 
-    const pm = options.pm || detect_pm();
+    const pm = options.pm || detectPm();
     const display = relative(process.cwd(), target) || '.';
 
     console.log(`\n✔ 已生成 ${display}（模板 ${options.template}）`);

@@ -23,7 +23,7 @@ export interface PathConfig {
 const TSCONFIG = 'tsconfig.json';
 
 /** 从 `from` 往上找最近的 tsconfig.json */
-export function nearest_tsconfig(from: string): string | null {
+export function nearestTsconfig(from: string): string | null {
     let dir = from;
 
     for (;;) {
@@ -38,7 +38,7 @@ export function nearest_tsconfig(from: string): string | null {
     }
 }
 
-export function read_paths(tsconfig: string): PathConfig | null {
+export function readPaths(tsconfig: string): PathConfig | null {
     const host: ts.ParseConfigFileHost = {
         useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
         readDirectory: (root, extensions, excludes, includes, depth) =>
@@ -67,10 +67,10 @@ export function read_paths(tsconfig: string): PathConfig | null {
 /** `@/Foo` -> `src/Foo` 这类替换；`*` 只可能有一个，且在末尾 */
 function substitute(pattern: string, target: string, specifier: string): string | null {
     const star = pattern.indexOf('*');
-    const target_star = target.indexOf('*');
+    const targetStar = target.indexOf('*');
 
     if (star < 0) return specifier === pattern ? target : null;
-    if (target_star < 0) return null;
+    if (targetStar < 0) return null;
 
     const prefix = pattern.slice(0, star);
     const suffix = pattern.slice(star + 1);
@@ -79,7 +79,7 @@ function substitute(pattern: string, target: string, specifier: string): string 
 
     const middle = specifier.slice(prefix.length, specifier.length - suffix.length);
 
-    return target.slice(0, target_star) + middle + target.slice(target_star + 1);
+    return target.slice(0, targetStar) + middle + target.slice(targetStar + 1);
 }
 
 /** 候选文件：原样、加扩展名、`/index.<ext>` */
@@ -97,10 +97,10 @@ function candidates(path: string): string[] {
  * 按 tsconfig 的 `paths` 把一个 import 说明符解析成真实文件。
  *
  * @param specifier `import` 里写的那个字符串
- * @param config `read_paths()` 的结果
+ * @param config `readPaths()` 的结果
  * @returns 绝对路径；没匹配上（或者映射过去文件不存在）返回 null
  */
-export function resolve_alias(specifier: string, config: PathConfig | null): string | null {
+export function resolveAlias(specifier: string, config: PathConfig | null): string | null {
     if (!config) return null;
 
     for (const alias of config.aliases) {

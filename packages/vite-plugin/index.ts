@@ -5,10 +5,10 @@ import type { Plugin } from 'vite';
 
 import {
     compile,
-    nearest_tsconfig,
+    nearestTsconfig,
     parse,
-    read_paths,
-    resolve_alias,
+    readPaths,
+    resolveAlias,
     type CompileOptions,
     type CompileResult,
     type PathConfig,
@@ -25,7 +25,7 @@ const STYLE_QUERY = 'grain-style.css';
 const AST_QUERY = 'grain-ast';
 
 /** AST 里有 loc / range 之外的引用关系，序列化时截断一下避免炸掉 */
-function to_json(root: Root): string {
+function toJson(root: Root): string {
     const seen = new WeakSet<object>();
 
     return JSON.stringify(
@@ -45,18 +45,18 @@ function to_json(root: Root): string {
 /**
  * 组件级 HMR。
  *
- * 优先换掉这个组件自己的实例（`hot_replace`）—— 只重建它那一段 DOM，
+ * 优先换掉这个组件自己的实例（`hotReplace`）—— 只重建它那一段 DOM，
  * 父组件、兄弟节点和父组件的状态都留着。
  *
  * 换不掉（它自己就是根组件、或者当前没有活着的实例）才退回"清空挂载点重新挂"；
  * 连挂载点都没有就 `invalidate()` 交给 Vite 往上冒泡。
  */
-const hmr_snippet = (runtime: string) => `
-import { hot_replace as __grain_hot_replace } from ${JSON.stringify(runtime)};
+const hmrSnippet = (runtime: string) => `
+import { hotReplace as __grain_hotReplace } from ${JSON.stringify(runtime)};
 
 if (import.meta.hot) {
   import.meta.hot.accept((mod) => {
-    if (mod && mod.create && __grain_hot_replace(create, mod.create) > 0) return;
+    if (mod && mod.create && __grain_hotReplace(create, mod.create) > 0) return;
 
     const target = mount.target;
     if (target && mod && mod.default) {
@@ -79,34 +79,34 @@ export interface GrainPluginOptions {
 
 export default function grain(options: GrainPluginOptions = {}): Plugin {
     const extensions = options.extensions ?? ['.grain'];
-    const compiler_options = options.compiler ?? {};
-    const runtime = compiler_options.runtimeModule ?? '@graints/runtime';
+    const compilerOptions = options.compiler ?? {};
+    const runtime = compilerOptions.runtimeModule ?? '@graints/runtime';
 
     // transform（JS）和 load（CSS）会各编译一次同一个文件，按内容缓存掉
     const cache = new Map<string, CompileResult>();
-    let is_dev = false;
+    let isDev = false;
     /** tsconfig 的 `paths`；Vite 自己那套认不了 `.grain`，这里补上 */
     let paths: PathConfig | null = null;
 
-    const is_grain = (file: string) => extensions.some((extension) => file.endsWith(extension));
+    const isGrain = (file: string) => extensions.some((extension) => file.endsWith(extension));
 
     /**
      * dev 下 Vite 会往 id 上加 `?import`、`&import` 之类，虚拟模块 query 不一定在第一段
      * （实际见过 `App.grain?import&grain-ast`），所以按段拆开判断
      */
-    const split_id = (id: string): { file: string; queries: string[] } => {
-        const [file, raw_query] = id.split('?');
+    const splitId = (id: string): { file: string; queries: string[] } => {
+        const [file, rawQuery] = id.split('?');
 
-        return { file, queries: raw_query ? raw_query.split('&') : [] };
+        return { file, queries: rawQuery ? rawQuery.split('&') : [] };
     };
 
-    const compile_file = (file: string, code: string): CompileResult => {
+    const compileFile = (file: string, code: string): CompileResult => {
         const key = `${file}\n${code}`;
         const cached = cache.get(key);
         if (cached) return cached;
 
         // dev 下编译器会往刷新函数埋循环检测点
-        const result = compile(code, { ...compiler_options, filename: file, dev: is_dev });
+        const result = compile(code, { ...compilerOptions, filename: file, dev: isDev });
         cache.set(key, result);
 
         return result;
@@ -128,56 +128,56 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         },
 
         configResolved(config) {
-            is_dev = config.command === 'serve';
+            isDev = config.command === 'serve';
 
-            const tsconfig = nearest_tsconfig(config.root);
+            const tsconfig = nearestTsconfig(config.root);
 
-            paths = tsconfig ? read_paths(tsconfig) : null;
+            paths = tsconfig ? readPaths(tsconfig) : null;
         },
 
         // 虚拟模块
         load(id) {
-            const { file, queries } = split_id(id);
-            if (!is_grain(file)) return null;
+            const { file, queries } = splitId(id);
+            if (!isGrain(file)) return null;
 
             if (queries.includes(STYLE_QUERY)) {
                 // `<file>?grain-style.css` -> 组件样式（交给 Vite 当普通 CSS 处理）
-                return compile_file(file, readFileSync(file, 'utf8')).css;
+                return compileFile(file, readFileSync(file, 'utf8')).css;
             }
 
             if (queries.includes(AST_QUERY)) {
                 // `<file>?grain-ast` -> 解析结果
-                return `export default ${to_json(parse(readFileSync(file, 'utf8'), { filename: file }))};`;
+                return `export default ${toJson(parse(readFileSync(file, 'utf8'), { filename: file }))};`;
             }
 
             return null;
         },
 
         resolveId(id, importer) {
-            const { file, queries } = split_id(id);
+            const { file, queries } = splitId(id);
 
             // 虚拟模块不需要 Vite 去文件系统里找
-            if (queries.includes(AST_QUERY) && is_grain(file)) {
+            if (queries.includes(AST_QUERY) && isGrain(file)) {
                 return importer && id.startsWith('.')
                     ? `${resolve(dirname(importer), file)}?${AST_QUERY}`
                     : id;
             }
 
             // tsconfig 的 `paths`：`@/Foo.grain` 这种，Vite 的内置支持到不了未知扩展名
-            return resolve_alias(id, paths);
+            return resolveAlias(id, paths);
         },
 
         // `<file>.grain` -> JS 模块。
         // dev 下 Vite 会给非 JS 后缀的 import 加上 `?import` 之类的 query，所以只排掉自己的虚拟模块
         transform(code, id) {
-            const { file, queries } = split_id(id);
-            if (queries.includes(STYLE_QUERY) || queries.includes(AST_QUERY) || !is_grain(file)) return null;
+            const { file, queries } = splitId(id);
+            if (queries.includes(STYLE_QUERY) || queries.includes(AST_QUERY) || !isGrain(file)) return null;
 
-            const { js, css } = compile_file(file, code);
-            const css_import = css ? `\nimport ${JSON.stringify(`${file}?${STYLE_QUERY}`)};` : '';
+            const { js, css } = compileFile(file, code);
+            const cssImport = css ? `\nimport ${JSON.stringify(`${file}?${STYLE_QUERY}`)};` : '';
 
             return {
-                code: js + css_import + (is_dev ? hmr_snippet(runtime) : ''),
+                code: js + cssImport + (isDev ? hmrSnippet(runtime) : ''),
                 map: null
             };
         }

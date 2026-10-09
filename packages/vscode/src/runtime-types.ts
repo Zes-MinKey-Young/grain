@@ -63,13 +63,13 @@ export interface ReactiveContainer {
 }
 
 /** 会通知改动的数组 */
-export function reactive_array<T>(initial?: T[]): T[] & ReactiveContainer;
+export function reactiveArray<T>(initial?: T[]): T[] & ReactiveContainer;
 
 /** 会通知改动的 Map */
-export function reactive_map<K, V>(initial?: Map<K, V>): Map<K, V> & ReactiveContainer;
+export function reactiveMap<K, V>(initial?: Map<K, V>): Map<K, V> & ReactiveContainer;
 
 /** 会通知改动的 Set */
-export function reactive_set<T>(initial?: Set<T>): Set<T> & ReactiveContainer;
+export function reactiveSet<T>(initial?: Set<T>): Set<T> & ReactiveContainer;
 
 /**
  * 响应式循环的检测点。dev 下由编译器埋进每个刷新函数；
@@ -79,12 +79,12 @@ export function guard(name: string): void;
 `;
 
 /** 语言服务里认这个模块名 */
-export function is_runtime_file(file: string): boolean {
+export function isRuntimeFile(file: string): boolean {
     return /@graints[\\/]runtime([\\/]|$)/.test(file);
 }
 
 /** 模块解析会先要 package.json */
-export function runtime_package_json(): string {
+export function runtimePackageJson(): string {
     return JSON.stringify({
         name: '@graints/runtime',
         version: '0.0.0',

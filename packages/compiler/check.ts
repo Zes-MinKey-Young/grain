@@ -10,13 +10,13 @@ import type { AttributeValue, BindingValue, Expression, Root, TemplateNode } fro
 
 type FunctionLike = TSESTree.ArrowFunctionExpression | TSESTree.FunctionExpression;
 
-function is_function_like(node: TSESTree.Node): node is FunctionLike {
+function isFunctionLike(node: TSESTree.Node): node is FunctionLike {
     return node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression';
 }
 
-/** 引用一个现成的函数也算谓词：`listen(bus, "tick", is_tick)` */
-function is_callable(node: TSESTree.Node): boolean {
-    return is_function_like(node) || node.type === 'Identifier' || node.type === 'MemberExpression';
+/** 引用一个现成的函数也算谓词：`listen(bus, "tick", isTick)` */
+function isCallable(node: TSESTree.Node): boolean {
+    return isFunctionLike(node) || node.type === 'Identifier' || node.type === 'MemberExpression';
 }
 
 function fail(item: Expression, message: string): never {
@@ -29,12 +29,12 @@ function fail(item: Expression, message: string): never {
  * 想绑一个变量直接用简略形式（`bind:value={count}`），那个才是"值"的写法。
  * 这里要么写 `() => ...`（无参数），要么给一个现成的函数。
  */
-function check_get(get: Expression): void {
+function checkGet(get: Expression): void {
     const node = get.content;
 
-    if (!is_function_like(node)) {
-        // 不是函数字面量，那就得是个能当 getter 使的东西（`get: read_count`）
-        if (is_callable(node)) return;
+    if (!isFunctionLike(node)) {
+        // 不是函数字面量，那就得是个能当 getter 使的东西（`get: readCount`）
+        if (isCallable(node)) return;
 
         fail(get, '`get` must be a function with no parameters — write `get: () => ...`');
     }
@@ -47,12 +47,12 @@ function check_get(get: Expression): void {
 /**
  * `set`：`(value) => ...`（正好一个参数，就是新值）。
  *
- * 不是函数时当成一个可调用的 setter（`set: do_set`），产物里展开成 `do_set($value)`。
+ * 不是函数时当成一个可调用的 setter（`set: doSet`），产物里展开成 `doSet($value)`。
  */
-function check_set(set: Expression): void {
+function checkSet(set: Expression): void {
     const node = set.content;
 
-    if (!is_function_like(node)) return;
+    if (!isFunctionLike(node)) return;
 
     if (node.params.length === 1) return;
 
@@ -69,10 +69,10 @@ function check_set(set: Expression): void {
  * - `listen(事件总线, "事件名")` —— 展开成挂事件监听；**谓词可省**，
  *   省了就是恒真（事件来了就 update）；要过滤就加第三个参数
  */
-function check_listen(listen: Expression): void {
+function checkListen(listen: Expression): void {
     const node = listen.content;
 
-    if (is_function_like(node)) {
+    if (isFunctionLike(node)) {
         if (node.params.length !== 1) {
             fail(
                 listen,
@@ -111,7 +111,7 @@ function check_listen(listen: Expression): void {
 
     const guard = args[2];
 
-    if (guard && !is_callable(guard)) {
+    if (guard && !isCallable(guard)) {
         fail(
         listen,
         'The third argument of `listen` is a predicate and must be a function: `listen(bus, "tick", (ev) => ...)`'
@@ -127,7 +127,7 @@ function check_listen(listen: Expression): void {
  * - 压根没写 `listen` —— 这个绑定没有任何值来源
  * - `listen(bus, "tick")` 简写 —— 展开后是 `update()`，拿不到新值
  */
-function check_listen_supplies_value(binding: BindingValue): void {
+function checkListenSuppliesValue(binding: BindingValue): void {
     const listen = binding.listen;
 
     if (!listen) {
@@ -140,7 +140,7 @@ function check_listen_supplies_value(binding: BindingValue): void {
 
     const node = listen.content;
 
-    if (!is_function_like(node)) {
+    if (!isFunctionLike(node)) {
         fail(
             listen,
             'Without `get`, `listen` must be written by hand — `listen(eventBus, "eventName")` expands to `update()` and cannot supply the new value. Write `listen: (update) => ...` and call `update(newValue)`'
@@ -181,12 +181,12 @@ function check_listen_supplies_value(binding: BindingValue): void {
     }
 }
 
-function check_binding(binding: BindingValue): void {
-    if (binding.get) check_get(binding.get);
-    if (binding.set) check_set(binding.set);
-    if (binding.listen) check_listen(binding.listen);
+function checkBinding(binding: BindingValue): void {
+    if (binding.get) checkGet(binding.get);
+    if (binding.set) checkSet(binding.set);
+    if (binding.listen) checkListen(binding.listen);
 
-    if (!binding.get && !binding.expression) check_listen_supplies_value(binding);
+    if (!binding.get && !binding.expression) checkListenSuppliesValue(binding);
 }
 
 /**
@@ -196,7 +196,7 @@ function check_binding(binding: BindingValue): void {
  * 到底能不能用交给编辑器里的 TS 验（可调用性 / 参数类型 / 能不能赋值），
  * 这里只挡一眼就看得出是错的写法——字面量。
  */
-function check_this(item: Expression): void {
+function checkThis(item: Expression): void {
     const node = item.content;
 
     if (node.type !== 'Literal' && node.type !== 'TemplateLiteral') return;
@@ -207,24 +207,24 @@ function check_this(item: Expression): void {
     );
 }
 
-function is_binding(value: string | Expression | BindingValue): value is BindingValue {
+function isBinding(value: string | Expression | BindingValue): value is BindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
 }
 
-function check_value(key: string, value: AttributeValue | true): void {
+function checkValue(key: string, value: AttributeValue | true): void {
     if (value === true || typeof value === 'string') return;
 
     if (Array.isArray(value)) return;
 
-    if (is_binding(value)) {
+    if (isBinding(value)) {
         // `bind:this` 不是读写对，单独按"变量 or 回调"查
         if (key === 'bind:this') {
-            if (value.expression) check_this(value.expression);
+            if (value.expression) checkThis(value.expression);
 
             return;
         }
 
-        check_binding(value);
+        checkBinding(value);
     }
 }
 
@@ -233,19 +233,19 @@ function check_value(key: string, value: AttributeValue | true): void {
  *
  * 放在解析之后而不是解析之中，是因为要看 TS 解析出来的 AST（参数个数之类）。
  */
-export function check_bindings(root: Root): void {
+export function checkBindings(root: Root): void {
     const visit = (nodes: TemplateNode[]): void => {
         for (const node of nodes) {
             // 模板插值里的绑定值（`{ get: ..., listen: ... }`）——没有 type 字段的那个
             if (!('type' in node)) {
-                check_binding(node);
+                checkBinding(node);
 
                 continue;
             }
 
             switch (node.type) {
                 case 'element':
-                    for (const [key, value] of Object.entries(node.attributes)) check_value(key, value);
+                    for (const [key, value] of Object.entries(node.attributes)) checkValue(key, value);
                     visit(node.children);
                     break;
 

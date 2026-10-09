@@ -50,7 +50,7 @@ type Frame =
  */
 type StopFn = (source: string, index: number, frame: CodeFrame, depth: number) => number;
 
-function is_whitespace(char: string | undefined): boolean {
+function isWhitespace(char: string | undefined): boolean {
     return (
         char === ' ' ||
         char === '\t' ||
@@ -62,7 +62,7 @@ function is_whitespace(char: string | undefined): boolean {
     );
 }
 
-function is_identifier_part(char: string | null | undefined): boolean {
+function isIdentifierPart(char: string | null | undefined): boolean {
     if (char == null) return false;
 
     return (
@@ -75,19 +75,19 @@ function is_identifier_part(char: string | null | undefined): boolean {
 }
 
 /** 跳过行注释（JS 里 `//` 与 Annex B 的 `<!--` 都到行尾为止） */
-function skip_line(source: string, index: number): number {
+function skipLine(source: string, index: number): number {
     const newline = source.indexOf('\n', index);
     return newline === -1 ? source.length : newline + 1;
 }
 
-function skip_block_comment(source: string, index: number): number {
+function skipBlockComment(source: string, index: number): number {
     const end = source.indexOf('*/', index + 2);
     return end === -1 ? source.length : end + 2;
 }
 
 /** 跳过正则字面量；没找到结尾就退化成"一个除号"，避免吞掉后面的内容 */
-function skip_regex(source: string, index: number): number {
-    let in_class = false;
+function skipRegex(source: string, index: number): number {
+    let inClass = false;
     let i = index + 1;
 
     while (i < source.length) {
@@ -101,13 +101,13 @@ function skip_regex(source: string, index: number): number {
         // 正则不能跨行，遇换行说明这个 `/` 其实不是正则起点
         if (char === '\n' || char === '\r') return index + 1;
 
-        if (in_class) {
-            if (char === ']') in_class = false;
+        if (inClass) {
+            if (char === ']') inClass = false;
         } else if (char === '[') {
-            in_class = true;
+            inClass = true;
         } else if (char === '/') {
             i += 1;
-            while (i < source.length && is_identifier_part(source[i])) i += 1;
+            while (i < source.length && isIdentifierPart(source[i])) i += 1;
             return i;
         }
 
@@ -122,19 +122,19 @@ function skip_regex(source: string, index: number): number {
  * 标识符、数字、`)`、`]`、`}` 之后是除号，其余（运算符、`,`、`(`、`[`、`{` 等）之后是正则。
  * `'value'` 是"刚读完一个字面量/字符串/模板"的哨兵。
  */
-function is_regex_start(previous: string | null): boolean {
+function isRegexStart(previous: string | null): boolean {
     if (previous === null) return true;
     if (previous === 'value') return false;
-    if (is_identifier_part(previous)) return false;
+    if (isIdentifierPart(previous)) return false;
     return previous !== ')' && previous !== ']' && previous !== '}';
 }
 
 /** 匹配 `</name >`，返回 `>` 之后的位置，不匹配返回 -1 */
-function match_closing_tag(source: string, index: number, name: string): number {
+function matchClosingTag(source: string, index: number, name: string): number {
     if (!source.startsWith('</' + name, index)) return -1;
 
     let i = index + name.length + 2;
-    while (i < source.length && is_whitespace(source[i])) i += 1;
+    while (i < source.length && isWhitespace(source[i])) i += 1;
 
     return source[i] === '>' ? i + 1 : -1;
 }
@@ -158,7 +158,7 @@ function unclosed(message: string, start: number, end: number, locate?: Locator)
  * 遇到字符串、模板字符串（含嵌套的 `${ ... }`）、注释、正则都会整段跳过，
  * 所以这些里面的结束标记不会被误判。
  */
-function scan_code(
+function scanCode(
     source: string,
     start: number,
     stop: StopFn,
@@ -224,18 +224,18 @@ function scan_code(
         // ---- 代码上下文 ----
 
         if (char === '/' && source[i + 1] === '/') {
-            i = skip_line(source, i);
+            i = skipLine(source, i);
             continue;
         }
 
         if (char === '/' && source[i + 1] === '*') {
-            i = skip_block_comment(source, i);
+            i = skipBlockComment(source, i);
             continue;
         }
 
         // Annex B：`<!--` 在脚本里是行注释
         if (char === '<' && source.startsWith('!--', i + 1)) {
-            i = skip_line(source, i);
+            i = skipLine(source, i);
             continue;
         }
 
@@ -253,15 +253,15 @@ function scan_code(
             continue;
         }
 
-        if (char === '/' && is_regex_start(previous)) {
-            i = skip_regex(source, i);
+        if (char === '/' && isRegexStart(previous)) {
+            i = skipRegex(source, i);
             previous = 'value';
             continue;
         }
 
         // `a++ / 2` 是除法，`++a /re/` 是正则
         if ((char === '+' && source[i + 1] === '+') || (char === '-' && source[i + 1] === '-')) {
-            previous = previous === 'value' || is_identifier_part(previous) ? 'value' : char;
+            previous = previous === 'value' || isIdentifierPart(previous) ? 'value' : char;
             i += 2;
             continue;
         }
@@ -284,7 +284,7 @@ function scan_code(
         if (char === '(') frame.parens += 1;
         else if (char === ')') frame.parens -= 1;
 
-        if (!is_whitespace(char)) previous = char;
+        if (!isWhitespace(char)) previous = char;
         i += 1;
     }
 
@@ -296,8 +296,8 @@ function scan_code(
  *
  * @param start 内容的起始偏移（开始标签 `>` 之后）
  */
-export function scan_script(source: string, start: number, locate?: Locator): ScanResult {
-    return scan_code(source, start, (source, index) => match_closing_tag(source, index, 'script'), {
+export function scanScript(source: string, start: number, locate?: Locator): ScanResult {
+    return scanCode(source, start, (source, index) => matchClosingTag(source, index, 'script'), {
         locate,
         message: '`</script>`'
     });
@@ -308,8 +308,8 @@ export function scan_script(source: string, start: number, locate?: Locator): Sc
  *
  * @param start 表达式内容的起始偏移（`{` 之后）
  */
-export function scan_expression(source: string, start: number, locate?: Locator): ScanResult {
-    return scan_code(
+export function scanExpression(source: string, start: number, locate?: Locator): ScanResult {
+    return scanCode(
         source,
         start,
         // 只在最外层、且没有未闭合的 `{` 时才认这个 `}`（模板字符串的 `${ ... }` 深度 > 1）
@@ -329,8 +329,8 @@ export function scan_expression(source: string, start: number, locate?: Locator)
  *
  * @param start 这一项的起始偏移
  */
-export function scan_binding_item(source: string, start: number, locate?: Locator): ScanResult {
-    return scan_code(
+export function scanBindingItem(source: string, start: number, locate?: Locator): ScanResult {
+    return scanCode(
         source,
         start,
         (source, index, frame, depth) => {
@@ -345,7 +345,7 @@ export function scan_binding_item(source: string, start: number, locate?: Locato
 }
 
 /** CSS 字符串；CSS 字符串不能跨行，遇到换行就当作没闭合 */
-function skip_css_string(source: string, index: number, quote: string): number {
+function skipCssString(source: string, index: number, quote: string): number {
     let i = index + 1;
 
     while (i < source.length) {
@@ -371,23 +371,23 @@ function skip_css_string(source: string, index: number, quote: string): number {
  * CSS 里同样可能出现 `content: "</style>"` 或注释里的结束标记，
  * 所以这里也做一层最基础的注释 / 字符串识别。
  */
-export function scan_style(source: string, start: number, locate?: Locator): ScanResult {
+export function scanStyle(source: string, start: number, locate?: Locator): ScanResult {
     let i = start;
 
     while (i < source.length) {
         const char = source[i];
 
         if (char === '/' && source[i + 1] === '*') {
-            i = skip_block_comment(source, i);
+            i = skipBlockComment(source, i);
             continue;
         }
 
         if (char === '"' || char === "'") {
-            i = skip_css_string(source, i, char);
+            i = skipCssString(source, i, char);
             continue;
         }
 
-        const closing = char === '<' ? match_closing_tag(source, i, 'style') : -1;
+        const closing = char === '<' ? matchClosingTag(source, i, 'style') : -1;
         if (closing !== -1) return { contentEnd: i, end: closing };
 
         i += 1;

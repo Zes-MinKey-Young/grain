@@ -10,7 +10,7 @@ const REGEX_KEYFRAMES = /^(-(webkit|moz|o)-)?keyframes$/;
  * 取自文件名 + 源码内容，内容不变则 id 不变（SSR / 客户端一致），
  * 也不依赖 `crypto`，浏览器里一样能算。
  */
-export function create_scope_id(source: string, filename?: string): string {
+export function createScopeId(source: string, filename?: string): string {
     let hash = 5381;
     const input = `${filename ?? ''}\n${source}`;
 
@@ -22,7 +22,7 @@ export function create_scope_id(source: string, filename?: string): string {
 }
 
 /** `<style global>` 整块都不做 scope */
-export function is_global(stylesheet: Stylesheet): boolean {
+export function isGlobal(stylesheet: Stylesheet): boolean {
     return stylesheet.attributes['global'] === true;
 }
 
@@ -31,18 +31,18 @@ export function is_global(stylesheet: Stylesheet): boolean {
  * - 每个选择器的最后一段加上 `.grain-hash`
  * - `@keyframes` 的名字带上 hash，引用处（`animation` / `animation-name`）同步改
  */
-export function scope_stylesheet(stylesheet: Stylesheet, scope_id: string): string {
-    const hash = scope_id.replace(/^grain-/, '');
-    const keyframes = collect_keyframes(stylesheet.content.children, hash);
+export function scopeStylesheet(stylesheet: Stylesheet, scopeId: string): string {
+    const hash = scopeId.replace(/^grain-/, '');
+    const keyframes = collectKeyframes(stylesheet.content.children, hash);
 
-    walk(stylesheet.content.children, (node, inside_keyframes) => {
+    walk(stylesheet.content.children, (node, insideKeyframes) => {
         if (node.type === 'Declaration') {
             if (node.property === 'animation' || node.property === 'animation-name') {
-                rename_animation(node.value, keyframes);
+                renameAnimation(node.value, keyframes);
             }
-        } else if (node.type === 'Rule' && !inside_keyframes && node.prelude.type === 'SelectorList') {
+        } else if (node.type === 'Rule' && !insideKeyframes && node.prelude.type === 'SelectorList') {
             for (const selector of node.prelude.children.toArray()) {
-                if (selector.type === 'Selector') add_scope(selector, scope_id);
+                if (selector.type === 'Selector') addScope(selector, scopeId);
             }
         }
     });
@@ -54,22 +54,22 @@ export function scope_stylesheet(stylesheet: Stylesheet, scope_id: string): stri
 /** `@keyframes` 里的 `from` / `to` / `50%` 不是元素选择器，不能加 scope */
 function walk(
     list: List<CssNode>,
-    visit: (node: CssNode, inside_keyframes: boolean) => void,
-    inside_keyframes = false
+    visit: (node: CssNode, insideKeyframes: boolean) => void,
+    insideKeyframes = false
 ): void {
     for (const node of list.toArray()) {
-        visit(node, inside_keyframes);
+        visit(node, insideKeyframes);
 
         if (node.type === 'Rule') {
-            walk(node.block.children, visit, inside_keyframes);
+            walk(node.block.children, visit, insideKeyframes);
         } else if (node.type === 'Atrule' && node.block) {
-            walk(node.block.children, visit, inside_keyframes || REGEX_KEYFRAMES.test(node.name));
+            walk(node.block.children, visit, insideKeyframes || REGEX_KEYFRAMES.test(node.name));
         }
     }
 }
 
 /** `@keyframes name` -> `@keyframes name-hash`，记下新旧名字 */
-function collect_keyframes(list: List<CssNode>, hash: string): Map<string, string> {
+function collectKeyframes(list: List<CssNode>, hash: string): Map<string, string> {
     const renamed = new Map<string, string>();
 
     walk(list, (node) => {
@@ -89,7 +89,7 @@ function collect_keyframes(list: List<CssNode>, hash: string): Map<string, strin
     return renamed;
 }
 
-function rename_animation(value: CssNode, renamed: Map<string, string>): void {
+function renameAnimation(value: CssNode, renamed: Map<string, string>): void {
     if (value.type !== 'Value') return;
 
     for (const child of value.children.toArray()) {
@@ -106,7 +106,7 @@ function rename_animation(value: CssNode, renamed: Map<string, string>): void {
  * `.a > .b:hover` -> `.a > .b.grain-hash:hover`
  * `*` 直接换成 scope 类，避免产生 `*.grain-hash`
  */
-function add_scope(selector: { type: 'Selector'; children: List<CssNode> }, scope_id: string): void {
+function addScope(selector: { type: 'Selector'; children: List<CssNode> }, scopeId: string): void {
     const items = selector.children.toArray();
     if (items.length === 0) return;
 
@@ -131,13 +131,13 @@ function add_scope(selector: { type: 'Selector'; children: List<CssNode> }, scop
 
     if (index < start) index = start;
 
-    const class_selector = { type: 'ClassSelector', name: scope_id } as CssNode;
+    const classSelector = { type: 'ClassSelector', name: scopeId } as CssNode;
     const previous = items[index - 1];
 
     if (previous && previous.type === 'TypeSelector' && (previous as TypeSelector).name === '*') {
-        items.splice(index - 1, 1, class_selector);
+        items.splice(index - 1, 1, classSelector);
     } else {
-        items.splice(index, 0, class_selector);
+        items.splice(index, 0, classSelector);
     }
 
     selector.children.fromArray(items);

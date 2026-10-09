@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite';
 
-import grain from '{{plugin_import}}';
+import grain from '{{pluginImport}}';
 
 export default defineConfig({
     plugins: [grain()]

@@ -1,3 +1,4 @@
+/// <reference types="node" />
 // 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
 // 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
 import { simpleTraverse } from '@typescript-eslint/typescript-estree';
@@ -13,7 +14,7 @@ import ts from 'typescript';
 const { transpileModule, ModuleKind, ScriptTarget } = ts;
 
 import { ParseError } from './errors.js';
-import { parse_snippet } from './read/expression.js';
+import { parseSnippet } from './read/expression.js';
 import type {
     AttributeValue,
     BindingValue,
@@ -33,7 +34,7 @@ import type {
  * 把展开出来的文本重新读一遍。
  *
  * 由 parser 注入：读绑定值 / 属性值需要一个 Parser 实例，而 parser 又要调
- * `expand_macros` —— 这边直接 import 它就成了循环依赖，源码下能跑，
+ * `expandMacros` —— 这边直接 import 它就成了循环依赖，源码下能跑，
  * 但打成一个 bundle（扩展就是这么发布的）时初始化顺序会塌。
  */
 export interface MacroReparse {
@@ -46,7 +47,7 @@ export interface MacroReparse {
     value: (text: string, filename?: string) => RawAttributeValue;
 }
 
-/** 绑定值里的键，顺序跟 `read_binding_value` 认的一致 */
+/** 绑定值里的键，顺序跟 `readBindingValue` 认的一致 */
 const BINDING_KEYS = ['expression', 'get', 'set', 'listen'] as const;
 
 /**
@@ -95,7 +96,7 @@ const BUILT_IN_MACROS: Record<string, (...args: unknown[]) => string> = {
 };
 
 /** 宏名（或导入进来的本地名）必须是 `$` 开头，且不能是内置 rune */
-function check_macro_name(name: string, start: number, end: number): void {
+function checkMacroName(name: string, start: number, end: number): void {
     if (!name.startsWith('$')) {
         throw new ParseError(
             `A macro must be named with a \`$\` prefix, like the runes — \`${name}\` is not`,
@@ -116,7 +117,7 @@ function check_macro_name(name: string, start: number, end: number): void {
 // ---------------------------------------------------------------- 模块加载
 
 /** `./macros` -> 实际文件（补扩展名） */
-function resolve_module(from: string, specifier: string): string {
+function resolveModule(from: string, specifier: string): string {
     const target = resolve(dirname(from), specifier);
 
     if (existsSync(target) && statSync(target).isFile()) return target;
@@ -132,9 +133,9 @@ function resolve_module(from: string, specifier: string): string {
  * 编译期跑一个外部模块。
  *
  * 转 CommonJS 之后用 `new Function` 跑，拿到它的 exports——宏脚本只能 import
- * 相对路径，所以这条链是封闭的：不会碰到 node_modules，也不会有原生模块。
+ * 相对路径，所以这条链是封闭的：不会碰到 nodeModules，也不会有原生模块。
  */
-function run_module(path: string, cache: Map<string, unknown>): unknown {
+function runModule(path: string, cache: Map<string, unknown>): unknown {
     const cached = cache.get(path);
     if (cached !== undefined) return cached;
 
@@ -151,7 +152,7 @@ function run_module(path: string, cache: Map<string, unknown>): unknown {
             throw new Error(`\`${specifier}\` is not a relative path — macros can only import relative files`);
         }
 
-        return run_module(resolve_module(path, specifier), cache);
+        return runModule(resolveModule(path, specifier), cache);
     };
 
     try {
@@ -222,11 +223,11 @@ export class MacroScope {
      * 交给对应位置的语法去解析，不是自己分词。
      */
     call(name: string, args: unknown[], start: number, end: number): string {
-        const built_in = BUILT_IN_MACROS[name];
+        const builtIn = BUILT_IN_MACROS[name];
 
-        if (built_in) {
+        if (builtIn) {
             try {
-                return built_in(...args);
+                return builtIn(...args);
             } catch (error) {
                 throw new ParseError(
                     `The macro \`${name}\`: ${error instanceof Error ? error.message : String(error)}`,
@@ -265,14 +266,14 @@ export class MacroScope {
 
     /** 收集顶层定义的宏，顺手把 import 转成"取用代码" */
     private collect(block: Script): void {
-        // AST 的 range 已经是整份源码的绝对偏移（parse_script 用 masked 前缀换来的）
+        // AST 的 range 已经是整份源码的绝对偏移（parseScript 用 masked 前缀换来的）
         const at = (node: { range: [number, number] }): [number, number] => [node.range[0], node.range[1]];
 
         for (const node of block.content.body) {
             if (node.type === 'FunctionDeclaration') {
                 if (!node.id) continue;
 
-                check_macro_name(node.id.name, ...at(node));
+                checkMacroName(node.id.name, ...at(node));
                 this.names.push(node.id.name);
 
                 continue;
@@ -286,7 +287,7 @@ export class MacroScope {
 
                     if (item.id.type !== 'Identifier' || !callable) continue;
 
-                    check_macro_name(item.id.name, ...at(node));
+                    checkMacroName(item.id.name, ...at(node));
                     this.names.push(item.id.name);
                 }
 
@@ -294,7 +295,7 @@ export class MacroScope {
             }
 
             if (node.type === 'ImportDeclaration') {
-                this.read_import(node, at(node));
+                this.readImport(node, at(node));
 
                 continue;
             }
@@ -311,15 +312,15 @@ export class MacroScope {
     /**
      * 一条 import。
      *
-     * 只允许相对路径（node_modules 里的东西编译期没法保证能跑），
+     * 只允许相对路径（nodeModules 里的东西编译期没法保证能跑），
      * 而且**本地名必须带 `$`**——跟 runes 一致，一眼能看出是编译期的东西。
      */
-    private read_import(node: TSESTree.ImportDeclaration, [start, end]: [number, number]): void {
+    private readImport(node: TSESTree.ImportDeclaration, [start, end]: [number, number]): void {
         const source = node.source.value;
 
         if (typeof source !== 'string' || !source.startsWith('.')) {
             throw new ParseError(
-                `Macros can only import relative paths — \`${String(source)}\` is not one (it runs at compile time, so packages from node_modules are not available)`,
+                `Macros can only import relative paths — \`${String(source)}\` is not one (it runs at compile time, so packages from nodeModules are not available)`,
                 start,
                 end
             );
@@ -336,7 +337,7 @@ export class MacroScope {
 
             const local = specifier.local.name;
 
-            check_macro_name(local, start, end);
+            checkMacroName(local, start, end);
 
             const imported =
                 specifier.type === 'ImportDefaultSpecifier'
@@ -385,7 +386,7 @@ export class MacroScope {
                 throw new Error(`\`${specifier}\` is not a relative path — macros can only import relative files`);
             }
 
-            return run_module(resolve_module(this.filename as string, specifier), cache);
+            return runModule(resolveModule(this.filename as string, specifier), cache);
         };
 
         try {
@@ -418,7 +419,7 @@ function describe(value: unknown): string {
  * 字面量（`'tick'` / `3` / `true`）求成真正的值，求不出来的（运行时才有值的表达式）
  * 给它的**源码文本**——宏拿到的是字符串，想怎么用都行。
  */
-function argument_value(node: TSESTree.Node, source: string): unknown {
+function argumentValue(node: TSESTree.Node, source: string): unknown {
     if (node.type === 'Literal') return node.value;
 
     if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
@@ -426,7 +427,7 @@ function argument_value(node: TSESTree.Node, source: string): unknown {
     }
 
     if (node.type === 'UnaryExpression' && (node.operator === '-' || node.operator === '+')) {
-        const inner = Number(argument_value(node.argument, source));
+        const inner = Number(argumentValue(node.argument, source));
 
         return node.operator === '-' ? -inner : inner;
     }
@@ -447,7 +448,7 @@ interface Placement {
  * 解析失败时错误要落回**宏调用上**：片段的位置在源码末尾的追加区里，
  * 直接用会勾到文件末尾去，看着像别处的错。
  */
-function expression_from_raw(
+function expressionFromRaw(
     item: RawExpression,
     at: { start: number; end: number },
     placement: Placement,
@@ -461,9 +462,9 @@ function expression_from_raw(
 
     try {
         // 前缀空白：解析出来的 range 从 contentStart 起算，正好落在追加区
-        content = parse_snippet({ ...item, ...range }, ' '.repeat(range.contentStart), label);
+        content = parseSnippet({ ...item, ...range }, ' '.repeat(range.contentStart), label);
     } catch (error) {
-        // 只重新定位：parse_snippet 的消息里已经说了是哪个宏的哪一项
+        // 只重新定位：parseSnippet 的消息里已经说了是哪个宏的哪一项
         throw new ParseError(error instanceof Error ? error.message : String(error), at.start, at.end);
     }
 
@@ -481,9 +482,9 @@ function expression_from_raw(
  * 把宏返回的源码重新解析成一个绑定值。
  *
  * 那段源码就是 `bind:` 那套语法（`get: ..., set: ...`），所以直接交给
- * `read_binding_value` 读；读出来的各项再用 TS 解析一遍。
+ * `readBindingValue` 读；读出来的各项再用 TS 解析一遍。
  */
-function binding_from_text(
+function bindingFromText(
     text: string,
     name: string,
     at: { start: number; end: number },
@@ -517,7 +518,7 @@ function binding_from_text(
         const item = raw[key] as RawExpression | null;
         if (!item) continue;
 
-        binding[key] = expression_from_raw(item, at, placement, `The \`${key}\` from the macro \`${name}\``);
+        binding[key] = expressionFromRaw(item, at, placement, `The \`${key}\` from the macro \`${name}\``);
     }
 
     return binding;
@@ -537,7 +538,7 @@ function binding_from_text(
  * 它们只往元素上推，不往回写。
  */
 /** 把重新读出来的值解析成最终形式（表达式 / 绑定值都要过一遍 TS） */
-function realize_value(
+function realizeValue(
     raw: RawAttributeValue,
     name: string,
     at: { start: number; end: number },
@@ -558,7 +559,7 @@ function realize_value(
                 );
             }
 
-            return expression_from_raw(chunk, at, placement, `A chunk from the macro \`${name}\``);
+            return expressionFromRaw(chunk, at, placement, `A chunk from the macro \`${name}\``);
         });
     }
 
@@ -580,16 +581,16 @@ function realize_value(
             const item = source[key] as RawExpression | null;
             if (!item) continue;
 
-            binding[key] = expression_from_raw(item, at, placement, `The \`${key}\` from the macro \`${name}\``);
+            binding[key] = expressionFromRaw(item, at, placement, `The \`${key}\` from the macro \`${name}\``);
         }
 
         return binding;
     }
 
-    return expression_from_raw(raw as RawExpression, at, placement, `The result of the macro \`${name}\``);
+    return expressionFromRaw(raw as RawExpression, at, placement, `The result of the macro \`${name}\``);
 }
 
-function value_from_text(
+function valueFromText(
     text: string,
     name: string,
     at: { start: number; end: number },
@@ -609,15 +610,15 @@ function value_from_text(
         );
     }
 
-    return realize_value(raw, name, at, placement);
+    return realizeValue(raw, name, at, placement);
 }
 
 /** 绑定值没有 `type` 字段，表达式有 */
-function is_binding(value: AttributeValue | true): value is BindingValue {
+function isBinding(value: AttributeValue | true): value is BindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
 }
 
-function macro_call(node: TSESTree.Node | null, scope: MacroScope): TSESTree.CallExpression | null {
+function macroCall(node: TSESTree.Node | null, scope: MacroScope): TSESTree.CallExpression | null {
     if (!node || node.type !== 'CallExpression') return null;
 
     const callee = node.callee;
@@ -627,7 +628,7 @@ function macro_call(node: TSESTree.Node | null, scope: MacroScope): TSESTree.Cal
     return node;
 }
 
-function call_arguments(call: TSESTree.CallExpression, source: string, start: number, end: number): unknown[] {
+function callArguments(call: TSESTree.CallExpression, source: string, start: number, end: number): unknown[] {
     const args: unknown[] = [];
 
     for (const argument of call.arguments) {
@@ -635,7 +636,7 @@ function call_arguments(call: TSESTree.CallExpression, source: string, start: nu
             throw new ParseError('Macros do not take spread arguments', start, end);
         }
 
-        args.push(argument_value(argument, source));
+        args.push(argumentValue(argument, source));
     }
 
     return args;
@@ -647,7 +648,7 @@ function call_arguments(call: TSESTree.CallExpression, source: string, start: nu
  * 宏在这儿展开成**表达式**：`const bump = $handler(count)` 里的调用会被换成
  * 宏返回的 token 拼出来的那段代码。所以遍历 AST，找到宏调用就整个替换掉。
  */
-function expand_script(
+function expandScript(
     block: Script,
     scope: MacroScope,
     source: string,
@@ -658,7 +659,7 @@ function expand_script(
     const expand = (call: TSESTree.CallExpression): TSESTree.Expression => {
         const name = (call.callee as TSESTree.Identifier).name;
         const [start, end] = call.range;
-        const args = call_arguments(call, source, start, end);
+        const args = callArguments(call, source, start, end);
         const text = scope.call(name, args, start, end);
 
         const item: RawExpression = {
@@ -674,7 +675,7 @@ function expand_script(
         replacements.push({ start, end, text: item.raw });
         macros.push({ name, start, end, text: item.raw, where: 'script' });
 
-        return expression_from_raw(item, { start, end }, placement, `the result of the macro \`${name}\``).content;
+        return expressionFromRaw(item, { start, end }, placement, `the result of the macro \`${name}\``).content;
     };
 
     const visit = (node: unknown): unknown => {
@@ -689,7 +690,7 @@ function expand_script(
         const current = node as Record<string, unknown>;
 
         if (typeof current.type === 'string') {
-            const call = macro_call(node as TSESTree.Node, scope);
+            const call = macroCall(node as TSESTree.Node, scope);
 
             if (call) return expand(call);
         }
@@ -719,7 +720,7 @@ function expand_script(
  * 模板里的 `{ ... }`（文本插值）不在此列：宏名出现在那里是错误——它只在编译期
  * 存在，与其等运行到那儿 ReferenceError，不如编译期就报出来。
  */
-export function expand_macros(
+export function expandMacros(
     root: Root,
     source: string,
     filename: string | undefined,
@@ -760,7 +761,7 @@ export function expand_macros(
         });
     }
 
-    function visit_value(node: Element, key: string, value: AttributeValue | true): void {
+    function visitValue(node: Element, key: string, value: AttributeValue | true): void {
         if (value === true || typeof value === 'string') return;
 
         // 混合值（文本 + 表达式）：宏调用可以展开成表达式；展开成绑定值就不行了
@@ -772,7 +773,7 @@ export function expand_macros(
                 if (typeof chunk === 'string' || !('type' in chunk)) continue;
 
                 const expression = chunk as Expression;
-                const call = macro_call(expression.content, scope);
+                const call = macroCall(expression.content, scope);
 
                 if (!call) {
                     reject(expression.content, expression.start, expression.end);
@@ -781,9 +782,9 @@ export function expand_macros(
                 }
 
                 const name = (call.callee as TSESTree.Identifier).name;
-                const args = call_arguments(call, source, expression.start, expression.end);
+                const args = callArguments(call, source, expression.start, expression.end);
                 const text = scope.call(name, args, expression.start, expression.end);
-                const expanded = value_from_text(
+                const expanded = valueFromText(
                     text,
                     name,
                     { start: expression.start, end: expression.end },
@@ -813,12 +814,12 @@ export function expand_macros(
         const expression = value as Expression;
         const at = { start: expression.start, end: expression.end };
 
-        if (is_binding(value)) {
+        if (isBinding(value)) {
             const binding = value as BindingValue;
             const target = binding.expression;
 
             // 绑定值里只有"整个值就是一个宏调用"这一种用法
-            const call = target ? macro_call(target.content, scope) : null;
+            const call = target ? macroCall(target.content, scope) : null;
 
             if (!target || !call) {
                 if (target?.content) reject(target.content, at.start, at.end);
@@ -827,17 +828,17 @@ export function expand_macros(
             }
 
             const name = (call.callee as TSESTree.Identifier).name;
-            const args = call_arguments(call, source, at.start, at.end);
+            const args = callArguments(call, source, at.start, at.end);
             const text = scope.call(name, args, at.start, at.end);
 
             macros.push({ name, start: at.start, end: at.end, text, where: 'bind' });
 
-            node.attributes[key] = binding_from_text(text, name, at, placement, reparse, filename);
+            node.attributes[key] = bindingFromText(text, name, at, placement, reparse, filename);
 
             return;
         }
 
-        const call = macro_call(expression.content, scope);
+        const call = macroCall(expression.content, scope);
 
         if (!call) {
             reject(expression.content, at.start, at.end);
@@ -846,12 +847,12 @@ export function expand_macros(
         }
 
         const name = (call.callee as TSESTree.Identifier).name;
-        const args = call_arguments(call, source, at.start, at.end);
+        const args = callArguments(call, source, at.start, at.end);
         const text = scope.call(name, args, at.start, at.end);
 
         macros.push({ name, start: at.start, end: at.end, text, where: 'attribute' });
 
-        node.attributes[key] = value_from_text(text, name, at, placement, reparse, filename);
+        node.attributes[key] = valueFromText(text, name, at, placement, reparse, filename);
     }
 
     function visit(nodes: TemplateNode[]): void {
@@ -863,13 +864,13 @@ export function expand_macros(
 
             switch (node.type) {
                 case 'element':
-                    for (const [key, value] of Object.entries(node.attributes)) visit_value(node, key, value);
+                    for (const [key, value] of Object.entries(node.attributes)) visitValue(node, key, value);
                     visit(node.children);
                     break;
 
                 case 'expression': {
                     // 模板插值：整个插值是一个宏调用时可以展开（`{$read(store)}`）
-                    const call = macro_call(node.content, scope);
+                    const call = macroCall(node.content, scope);
 
                     if (!call) {
                         reject(node.content, node.start, node.end);
@@ -879,12 +880,12 @@ export function expand_macros(
 
                     const name = (call.callee as TSESTree.Identifier).name;
                     const at = { start: node.start, end: node.end };
-                    const args = call_arguments(call, source, at.start, at.end);
+                    const args = callArguments(call, source, at.start, at.end);
                     const text = scope.call(name, args, at.start, at.end);
 
                     macros.push({ name, start: at.start, end: at.end, text, where: 'attribute' });
 
-                    const expanded = value_from_text(text, name, at, placement, reparse, filename);
+                    const expanded = valueFromText(text, name, at, placement, reparse, filename);
 
                     if (typeof expanded === 'string') {
                         throw new ParseError(
@@ -920,7 +921,7 @@ export function expand_macros(
     const replacements: MacroReplacement[] = [];
 
     for (const block of [root.script, root.module, root.onmount]) {
-        if (block) expand_script(block, scope, source, placement, replacements, macros);
+        if (block) expandScript(block, scope, source, placement, replacements, macros);
     }
 
     visit(root.template.children);

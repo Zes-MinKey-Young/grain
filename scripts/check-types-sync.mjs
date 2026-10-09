@@ -13,11 +13,11 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const truth_path = path.join(root, 'packages/runtime/globals.d.ts');
-const injected_path = path.join(root, 'packages/vscode/src/typescript.ts');
+const truthPath = path.join(root, 'packages/runtime/globals.d.ts');
+const injectedPath = path.join(root, 'packages/vscode/src/typescript.ts');
 
-const truth = fs.readFileSync(truth_path, 'utf8');
-const injected_source = fs.readFileSync(injected_path, 'utf8');
+const truth = fs.readFileSync(truthPath, 'utf8');
+const injectedSource = fs.readFileSync(injectedPath, 'utf8');
 
 /** 六个该有的声明 */
 const names = ['$state', '$props', '$bindable', '$node', '$store', '$read'];
@@ -26,7 +26,7 @@ const problems = [];
 
 // ---- 1. 取出扩展注入的那份（模板字符串），把转义的反引号换回来 ----
 
-const match = /const GRAIN_TYPE_SOURCE = `([\s\S]*?)`;\n/.exec(injected_source);
+const match = /const GRAIN_TYPE_SOURCE = `([\s\S]*?)`;\n/.exec(injectedSource);
 
 if (!match) {
     problems.push('在 packages/vscode/src/typescript.ts 里没找到 GRAIN_TYPE_SOURCE');
@@ -35,16 +35,16 @@ if (!match) {
     const tidy = (text) => text.replace(/\r\n/g, '\n').trim();
 
     // 真源开头有一段"给读者看的说明"，注入那份不需要 —— 只比声明部分
-    const first_declare = truth.indexOf('declare function');
-    const body = truth.slice(truth.lastIndexOf('/**', first_declare));
+    const firstDeclare = truth.indexOf('declare function');
+    const body = truth.slice(truth.lastIndexOf('/**', firstDeclare));
 
     /**
      * 只比 rune 和内置宏（`$` 开头的那些）。
      *
-     * 真源里还有 runtime 的 API（`reactive_array` 之类）—— 它们是通过 import 用的，
+     * 真源里还有 runtime 的 API（`reactiveArray` 之类）—— 它们是通过 import 用的，
      * 由 runtime-types.ts 提供模块声明，不进注入的那份（那份是全局的 rune + 模块声明）。
      */
-    const runes_of = (text) =>
+    const runesOf = (text) =>
         text
             .split('\n')
             // 注释里也会提到 `declare function $state`，那些不算
@@ -52,12 +52,12 @@ if (!match) {
             .map((line) => line.trim())
             .join('\n');
 
-    const left_runes = runes_of(tidy(body));
-    const right_runes = runes_of(tidy(injected));
+    const leftRunes = runesOf(tidy(body));
+    const rightRunes = runesOf(tidy(injected));
 
-    if (left_runes !== right_runes) {
-        const left = left_runes.split('\n');
-        const right = right_runes.split('\n');
+    if (leftRunes !== rightRunes) {
+        const left = leftRunes.split('\n');
+        const right = rightRunes.split('\n');
 
         for (let i = 0; i < Math.max(left.length, right.length); i += 1) {
             if (left[i] === right[i]) continue;

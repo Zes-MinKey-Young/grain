@@ -1,24 +1,24 @@
-export { Parser, parse, parse_root, type ParseOptions } from './parser.js';
+export { Parser, parse, parseRoot, type ParseOptions } from './parser.js';
 export { ParseError } from './errors.js';
-export { scan_script, scan_expression, scan_style, type ScanResult } from './scan.js';
-export { check_bindings } from './check.js';
-export { nearest_tsconfig, read_paths, resolve_alias } from './tsconfig.js';
+export { scanScript, scanExpression, scanStyle, type ScanResult } from './scan.js';
+export { checkBindings } from './check.js';
+export { nearestTsconfig, readPaths, resolveAlias } from './tsconfig.js';
 export type { PathAlias, PathConfig } from './tsconfig.js';
-export { split_for_header } from './template.js';
-export { parse_expression, parse_expressions, parse_for_of } from './read/expression.js';
-export { parse_script } from './read/script.js';
-export { MacroScope, expand_macros, type MacroReparse } from './macro.js';
-export { parse_style } from './read/style.js';
+export { splitForHeader } from './template.js';
+export { parseExpression, parseExpressions, parseForOf } from './read/expression.js';
+export { parseScript } from './read/script.js';
+export { MacroScope, expandMacros, type MacroReparse } from './macro.js';
+export { parseStyle } from './read/style.js';
 export {
     compile,
-    compile_root,
+    compileRoot,
     generate,
-    create_scope_id,
-    is_global,
-    scope_stylesheet,
-    analyze_script,
-    collect_reads,
-    collect_writes,
+    createScopeId,
+    isGlobal,
+    scopeStylesheet,
+    analyzeScript,
+    collectReads,
+    collectWrites,
     type CompileOptions,
     type CompileResult,
     type ScriptAnalysis,

@@ -13,13 +13,13 @@
 /**
  * `creEle` / `creFragment` 的返回值：既是更新调度器，也带着根节点。
  *
- * 子组件额外挂一个 `set_props` —— 父组件靠它推新 props，
+ * 子组件额外挂一个 `setProps` —— 父组件靠它推新 props，
  * 不用重新 `create()`（重建会把子组件自己的 state 丢掉）。
  */
 export interface Updater {
     (...indices: number[]): void;
     el: Node;
-    set_props?: (props: Props, children?: (() => unknown) | null) => void;
+    setProps?: (props: Props, children?: (() => unknown) | null) => void;
     /** `<script onmount>`：元素挂上之后跑。根组件由生成出来的 mount 调，子组件由这里调 */
     onmount?: () => void;
 }
@@ -147,15 +147,15 @@ export interface List extends Updater {
     /** `splice(at, remove, ...added)` */
     splice(at: number, remove: number, ...added: unknown[]): void;
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
-    set_at(index: number, value: unknown): void;
+    setAt(index: number, value: unknown): void;
     /**
      * `map.set(k, v)` / `set.add(v)`：键有了就只换那一项，没有就追加。
      *
      * 需要 `{#for ... with key = ...}` —— 没有键就说不清是哪一项。
      */
-    set_key(key: unknown, value: unknown): void;
+    setKey(key: unknown, value: unknown): void;
     /** `map.delete(k)` / `set.delete(v)`：删掉那一项，后面的内容跟着换 */
-    remove_key(key: unknown): void;
+    removeKey(key: unknown): void;
     /** `map.clear()` / `set.clear()`：清空（空列表分支会重新出现） */
     clear(): void;
     /** 响应式容器发来的一次改动：按它动，说不清就整块比对 */
@@ -219,10 +219,10 @@ class ListImpl {
         return entry;
     }
 
-    private set_empty(on: boolean): void {
+    private setEmpty(on: boolean): void {
         if (on && this.empty.length === 0 && this.options.fallback) {
-            // 过一遍 to_nodes：fallback 里可能有静态文本（字符串），那不是节点
-            this.empty = to_nodes(this.options.fallback());
+            // 过一遍 toNodes：fallback 里可能有静态文本（字符串），那不是节点
+            this.empty = toNodes(this.options.fallback());
 
             this.place(this.empty, null);
         } else if (!on && this.empty.length > 0) {
@@ -233,7 +233,7 @@ class ListImpl {
     }
 
     /** 从 `at` 起把项重绑到 `values` 上 —— 值或位置变了的那些才需要 */
-    private rebind_from(at: number): void {
+    private rebindFrom(at: number): void {
         for (let i = at; i < this.entries.length; i += 1) this.entries[i].update(this.values[i], i);
     }
 
@@ -243,22 +243,22 @@ class ListImpl {
 
         this.values = next;
 
-        this.set_empty(next.length === 0);
+        this.setEmpty(next.length === 0);
 
         if (this.options.key) {
             // keyed：按 key 匹配，能对上就复用（内容靠 update 换掉）
-            const old_by_key = new Map<unknown, ListEntry & { key?: unknown }>();
+            const oldByKey = new Map<unknown, ListEntry & { key?: unknown }>();
 
-            for (const entry of this.entries) old_by_key.set(entry.key, entry);
+            for (const entry of this.entries) oldByKey.set(entry.key, entry);
 
             const kept: Array<ListEntry & { key?: unknown }> = [];
 
             for (let i = 0; i < next.length; i += 1) {
                 const key = this.options.key(next[i], i);
-                const found = old_by_key.get(key);
+                const found = oldByKey.get(key);
 
                 if (found) {
-                    old_by_key.delete(key);
+                    oldByKey.delete(key);
                     found.update(next[i], i);
                     kept.push(found);
                 } else {
@@ -267,7 +267,7 @@ class ListImpl {
             }
 
             // 没对上的旧项：删掉
-            for (const stale of old_by_key.values()) this.drop(stale.nodes);
+            for (const stale of oldByKey.values()) this.drop(stale.nodes);
 
             this.entries = kept;
 
@@ -297,12 +297,12 @@ class ListImpl {
     }
 
     push(...added: unknown[]): void {
-        this.set_empty(false);
+        this.setEmpty(false);
 
         // 已有的项一点没动，所以只需要建新的
         for (const item of added) {
             // 项带下标时（`entries()`）只拿到值，项要拼出来，下标就是当前长度
-            const entry = this.options.indexed ? this.item_for(this.values.length, item) : item;
+            const entry = this.options.indexed ? this.itemFor(this.values.length, item) : item;
 
             this.values.push(entry);
 
@@ -319,11 +319,11 @@ class ListImpl {
         this.values = this.values.slice(1);
 
         // 后面的项都往前挪了一位：内容跟着换
-        this.rebind_from(0);
+        this.rebindFrom(0);
     }
 
     unshift(...added: unknown[]): void {
-        this.set_empty(false);
+        this.setEmpty(false);
 
         const created = added.map((item, at) =>
             this.add(item, at, this.entries[0]?.nodes[0] ?? this.el)
@@ -332,7 +332,7 @@ class ListImpl {
         this.entries = [...created, ...this.entries];
         this.values = [...added, ...this.values];
 
-        this.rebind_from(added.length);
+        this.rebindFrom(added.length);
     }
 
     splice(at: number, remove: number, ...added: unknown[]): void {
@@ -351,11 +351,11 @@ class ListImpl {
         ];
         this.values.splice(from, remove, ...added);
 
-        this.rebind_from(from);
+        this.rebindFrom(from);
     }
 
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
-    set_at(index: number, value: unknown): void {
+    setAt(index: number, value: unknown): void {
         const at = Number(index);
 
         if (!Number.isInteger(at) || at < 0 || at >= this.entries.length) return;
@@ -379,17 +379,17 @@ class ListImpl {
     /**
      * 项本身：`{#for [k, v] of map}` 要把键和值拼成 `[k, v]`，别的形状就是值本身。
      */
-    private item_for(key: unknown, value: unknown): unknown {
+    private itemFor(key: unknown, value: unknown): unknown {
         return this.options.entry ? this.options.entry(key, value) : value;
     }
 
     /** `map.set(k, v)` / `set.add(v)`：键有了就只换那一项，没有就追加 */
-    set_key(key: unknown, value: unknown): void {
+    setKey(key: unknown, value: unknown): void {
         // 没有键就说不清是哪一项。编译器不会给这种 for 生成调用，这里只是兜底
         if (!this.options.key) return;
 
         const at = this.entries.findIndex((entry) => entry.key === key);
-        const item = this.item_for(key, value);
+        const item = this.itemFor(key, value);
 
         // 新键：跟 push 一样是追加
         if (at < 0) {
@@ -404,7 +404,7 @@ class ListImpl {
     }
 
     /** `map.delete(k)` / `set.delete(v)`：删掉那一项，后面的内容跟着换 */
-    remove_key(key: unknown): void {
+    removeKey(key: unknown): void {
         const at = this.entries.findIndex((entry) => entry.key === key);
 
         if (at < 0) return;
@@ -414,8 +414,8 @@ class ListImpl {
         this.entries = [...this.entries.slice(0, at), ...this.entries.slice(at + 1)];
         this.values.splice(at, 1);
 
-        this.rebind_from(at);
-        this.set_empty(this.entries.length === 0);
+        this.rebindFrom(at);
+        this.setEmpty(this.entries.length === 0);
     }
 
     /** `map.clear()` / `set.clear()`：清空（空列表分支会重新出现） */
@@ -425,7 +425,7 @@ class ListImpl {
         this.entries = [];
         this.values = [];
 
-        this.set_empty(true);
+        this.setEmpty(true);
     }
 
     /** 响应式容器发来的一次改动：按它动，说不清就整块比对 */
@@ -615,7 +615,7 @@ function wrap<T extends object>(
 }
 
 /** 会通知改动的数组 */
-export function reactive_array<T>(initial: T[] = []): T[] & ReactiveContainer {
+export function reactiveArray<T>(initial: T[] = []): T[] & ReactiveContainer {
     return wrap(initial, (key, args) => {
         const precise = ARRAY_METHODS[key];
 
@@ -626,14 +626,14 @@ export function reactive_array<T>(initial: T[] = []): T[] & ReactiveContainer {
 }
 
 /** 会通知改动的 Map（给 entries 数组也行） */
-export function reactive_map<K, V>(
+export function reactiveMap<K, V>(
     initial: Iterable<readonly [K, V]> = []
 ): Map<K, V> & ReactiveContainer {
     return wrap(new Map(initial), (key) => MAP_METHODS[key]?.() ?? null);
 }
 
 /** 会通知改动的 Set（给数组也行） */
-export function reactive_set<T>(initial: Iterable<T> = []): Set<T> & ReactiveContainer {
+export function reactiveSet<T>(initial: Iterable<T> = []): Set<T> & ReactiveContainer {
     return wrap(new Set(initial), (key) => MAP_METHODS[key]?.() ?? null);
 }
 
@@ -649,14 +649,14 @@ export function reactive_set<T>(initial: Iterable<T> = []): Set<T> & ReactiveCon
 const GUARD_WINDOW_MS = 10;
 const GUARD_LIMIT = 100;
 
-const guard_hits = new Map<string, { start: number; count: number }>();
+const guardHits = new Map<string, { start: number; count: number }>();
 
 export function guard(name: string): void {
     const now = Date.now();
-    const at = guard_hits.get(name);
+    const at = guardHits.get(name);
 
     if (!at || now - at.start > GUARD_WINDOW_MS) {
-        guard_hits.set(name, { start: now, count: 1 });
+        guardHits.set(name, { start: now, count: 1 });
 
         return;
     }
@@ -666,7 +666,7 @@ export function guard(name: string): void {
     if (at.count < GUARD_LIMIT) return;
 
     // 抛之前清掉：下一轮从零开始，不然第一次触发之后就永远卡着
-    guard_hits.clear();
+    guardHits.clear();
 
     throw new Error(
         `\`${name}\` ran ${GUARD_LIMIT} times within ${GUARD_WINDOW_MS}ms — ` +
@@ -781,7 +781,7 @@ type Props = Record<string, unknown>;
 
 const FRAGMENT_NODE = 11;
 
-/** 活着的组件外壳，`hot_replace` 遍历它找要重建的实例 */
+/** 活着的组件外壳，`hotReplace` 遍历它找要重建的实例 */
 const components = new Set<ComponentShell>();
 
 interface Slot {
@@ -806,7 +806,7 @@ export interface PropsUpdater {
  * DocumentFragment 要展开成它的子节点——挂进 DOM 之后 fragment 本身不在文档里，
  * 记录 fragment 的话重渲染时删不掉旧节点。
  */
-function to_nodes(value: unknown): Node[] {
+function toNodes(value: unknown): Node[] {
     if (value === null || value === undefined || value === false || value === true) return [];
 
     if (value instanceof Node) {
@@ -815,31 +815,31 @@ function to_nodes(value: unknown): Node[] {
             : [value];
     }
 
-    if (Array.isArray(value)) return value.flatMap(to_nodes);
+    if (Array.isArray(value)) return value.flatMap(toNodes);
 
     if (typeof value === 'function') {
         const updater = value as Partial<Updater>;
         // 递归：Updater 的 el 可能是 fragment，要展开
-        if (updater.el) return to_nodes(updater.el);
-        return to_nodes((value as () => unknown)());
+        if (updater.el) return toNodes(updater.el);
+        return toNodes((value as () => unknown)());
     }
 
     return [document.createTextNode(String(value))];
 }
 
 /** 控件回写用哪个事件：checked 和 select 用 change，其余用 input */
-function event_for(el: Element, name: string): string {
+function eventFor(el: Element, name: string): string {
     if (name === 'checked') return 'change';
     if (name === 'value' && el.tagName === 'SELECT') return 'change';
 
     return 'input';
 }
 
-function read_prop(el: Element, name: string): unknown {
+function readProp(el: Element, name: string): unknown {
     return name in el ? (el as unknown as Record<string, unknown>)[name] : el.getAttribute(name);
 }
 
-function apply_prop(el: Element, key: string, value: unknown): void {
+function applyProp(el: Element, key: string, value: unknown): void {
     if (value === null || value === undefined || value === false) {
         el.removeAttribute(key);
     } else if (key === 'class' || !(key in el)) {
@@ -849,7 +849,7 @@ function apply_prop(el: Element, key: string, value: unknown): void {
     }
 }
 
-function render_slot(slot: Slot): void {
+function renderSlot(slot: Slot): void {
     // 属性更新器：只跑一次，不动 DOM
     if (slot.props) {
         slot.render();
@@ -863,7 +863,7 @@ function render_slot(slot: Slot): void {
         return;
     }
 
-    const nodes = to_nodes(slot.render());
+    const nodes = toNodes(slot.render());
 
     for (const node of slot.nodes) node.parentNode?.removeChild(node);
     slot.nodes = nodes;
@@ -888,18 +888,18 @@ class UpdaterImpl {
     /** children 里的动态片段，按 children 下标编号 */
     slots: Array<Slot | null> = [];
     /** 属性里的动态片段，接着往下编号 */
-    prop_slots: Array<() => void> = [];
+    propSlots: Array<() => void> = [];
     /** 嵌套的子元素，用于无参全量刷新时的递归 */
     nested: Updater[] = [];
 
     init(tag: string | null, props: Props, children: unknown[]): void {
         this.el = tag === null ? document.createDocumentFragment() : document.createElement(tag);
         this.slots = new Array(children.length).fill(null);
-        this.prop_slots = [];
+        this.propSlots = [];
         this.nested = [];
 
-        this.build_props(props);
-        this.build_children(children);
+        this.buildProps(props);
+        this.buildChildren(children);
     }
 
     /**
@@ -908,8 +908,8 @@ class UpdaterImpl {
      */
     invoke(...indices: number[]): void {
         if (indices.length === 0) {
-            for (const slot of this.slots) if (slot) render_slot(slot);
-            for (const run of this.prop_slots) run();
+            for (const slot of this.slots) if (slot) renderSlot(slot);
+            for (const run of this.propSlots) run();
             for (const child of this.nested) child();
 
             return;
@@ -919,34 +919,34 @@ class UpdaterImpl {
             if (index < this.slots.length) {
                 const slot = this.slots[index];
 
-                if (slot) render_slot(slot);
+                if (slot) renderSlot(slot);
             } else {
-                this.prop_slots[index - this.slots.length]?.();
+                this.propSlots[index - this.slots.length]?.();
             }
         }
     }
 
-    private build_props(props: Props): void {
+    private buildProps(props: Props): void {
         const element = this.el as Element;
 
         for (const [key, value] of Object.entries(props)) {
             if (key.startsWith('bind:')) {
                 const name = key.slice('bind:'.length);
-                // 过一遍 to_binding：`bind:value={ set, listen }` 这种没有 getter 的绑定
+                // 过一遍 toBinding：`bind:value={ set, listen }` 这种没有 getter 的绑定
                 // 要由它补上一个"值由 listener 提供"的 getter
-                const binding = to_binding(value);
+                const binding = toBinding(value);
 
                 // 注册成属性片段，`invoke()` 全量刷新时会重新跑 getter
-                const apply = () => apply_prop(element, name, binding.get());
+                const apply = () => applyProp(element, name, binding.get());
 
-                this.prop_slots.push(apply);
+                this.propSlots.push(apply);
                 apply();
 
                 // 外部事件源的钩子：挂载时跑一次，它自己决定什么时候叫刷新
                 binding.listen?.(apply);
 
-                element.addEventListener(event_for(element, name), () => {
-                    binding.set(read_prop(element, name));
+                element.addEventListener(eventFor(element, name), () => {
+                    binding.set(readProp(element, name));
 
                     // 源不是响应式变量，编译期没写死任何刷新调用，只能这里主动全量刷一次
                     if (binding.active) this.invoke();
@@ -958,20 +958,20 @@ class UpdaterImpl {
                 element.addEventListener(key.slice(2).toLowerCase(), value as EventListener);
             } else if (typeof value === 'function') {
                 const render = value as Bound;
-                const apply = () => apply_prop(element, key, render());
+                const apply = () => applyProp(element, key, render());
 
-                this.prop_slots.push(apply);
+                this.propSlots.push(apply);
                 apply();
 
                 // 外部源驱动的单向属性：`title={$read(store)}` —— 由 listen 决定什么时候重跑
                 render.listen?.(apply);
             } else {
-                apply_prop(element, key, value);
+                applyProp(element, key, value);
             }
         }
     }
 
-    private build_children(children: unknown[]): void {
+    private buildChildren(children: unknown[]): void {
         const el = this.el;
 
         children.forEach((child, index) => {
@@ -989,9 +989,9 @@ class UpdaterImpl {
                 }
 
                 // 嵌套元素（creEle 的返回值）直接挂上去，不算动态片段
-                const child_el = (child as Partial<Updater>).el;
+                const childEl = (child as Partial<Updater>).el;
 
-                if (child_el) {
+                if (childEl) {
                     const before = el.childNodes.length;
 
                     // 块（`{#for ...}` 之类）已经自己渲染过了：它在没挂载时就把节点攒在
@@ -1001,13 +1001,13 @@ class UpdaterImpl {
                     if (managed && managed.length > 0) {
                         for (const node of managed) el.appendChild(node);
                     } else {
-                        el.appendChild(child_el);
+                        el.appendChild(childEl);
                     }
 
                     this.nested.push(child as Updater);
 
                     // 自管理的块（`{#for ...}`）：也登记成片段，精确刷新才叫得到它。
-                    // render_slot 认得它，只会调一下让它自己比对，不会去重建
+                    // renderSlot 认得它，只会调一下让它自己比对，不会去重建
                     if (managed) {
                         this.slots[index] = { anchor: null, render: child as () => unknown, nodes: [] };
                     }
@@ -1032,12 +1032,12 @@ class UpdaterImpl {
                 const slot: Slot = { anchor, render, nodes: [] };
 
                 this.slots[index] = slot;
-                render_slot(slot);
+                renderSlot(slot);
 
                 // 模板插值也可以是单向绑定：`{$read(store)}`
-                render.listen?.(() => render_slot(slot));
+                render.listen?.(() => renderSlot(slot));
             } else {
-                for (const node of to_nodes(child)) el.appendChild(node);
+                for (const node of toNodes(child)) el.appendChild(node);
             }
         });
     }
@@ -1144,11 +1144,11 @@ class ShellImpl {
         return this.meta;
     }
 
-    set_props(next_props: Props, next_children?: unknown): void {
-        this.meta.props = next_props ?? {};
-        this.meta.children = next_children ?? null;
+    setProps(nextProps: Props, nextChildren?: unknown): void {
+        this.meta.props = nextProps ?? {};
+        this.meta.children = nextChildren ?? null;
 
-        this.current.set_props?.(next_props, next_children as (() => unknown) | null);
+        this.current.setProps?.(nextProps, nextChildren as (() => unknown) | null);
     }
 
     onmount(): void {
@@ -1189,15 +1189,15 @@ export function component(
  * @returns 换掉的实例数；0 表示这个组件现在没有活着的实例（比如它自己就是根组件），
  *          调用方该退回重新挂载。
  */
-export function hot_replace(
-    old_create: (props?: unknown, children?: unknown) => Updater,
-    next_create: (props?: unknown, children?: unknown) => Updater
+export function hotReplace(
+    oldCreate: (props?: unknown, children?: unknown) => Updater,
+    nextCreate: (props?: unknown, children?: unknown) => Updater
 ): number {
     let replaced = 0;
 
     for (const shell of [...components]) {
         const meta = shell.__grain;
-        if (meta.create !== old_create) continue;
+        if (meta.create !== oldCreate) continue;
 
         const parent = meta.nodes[0]?.parentNode;
 
@@ -1207,7 +1207,7 @@ export function hot_replace(
             continue;
         }
 
-        const fresh = next_create(meta.props, meta.children);
+        const fresh = nextCreate(meta.props, meta.children);
 
         // 临时插一个标记，新节点才能落在原来的位置
         const marker = document.createComment('');
@@ -1223,7 +1223,7 @@ export function hot_replace(
         meta.nodes = nodes;
         meta.current = fresh;
         // 记下新的 create，下一次 HMR 才匹配得上
-        meta.create = next_create;
+        meta.create = nextCreate;
 
         // 重建出来的实例 DOM 已经就位，onmount 现在就能跑
         fresh.onmount?.();
@@ -1234,7 +1234,7 @@ export function hot_replace(
     return replaced;
 }
 
-function is_binding(value: unknown): value is Binding {
+function isBinding(value: unknown): value is Binding {
     if (typeof value !== 'object' || value === null) return false;
 
     const candidate = value as Partial<Binding>;
@@ -1254,8 +1254,8 @@ function is_binding(value: unknown): value is Binding {
  * 父那边如果**没有 getter 但有 listener**（`bind:value={ set, listen }`），
  * 值由 listener 提供：它调 `update(新值)`，这里把新值存下来当 getter 的结果。
  */
-export function to_binding<T>(value: unknown, fallback?: T): Binding<T> {
-    if (is_binding(value)) {
+export function toBinding<T>(value: unknown, fallback?: T): Binding<T> {
+    if (isBinding(value)) {
         // 用 Partial 看它：没有 getter 的绑定（值由 listener 提供）也是合法的
         const binding = value as Partial<Binding<T>>;
 

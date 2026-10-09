@@ -33,13 +33,13 @@ it("should update the template locally", () => {
 
     // (2) both writes turned into the precise "replace that one row" call,
     // not into a refresh of the whole block
-    expect(result.js.match(/set_at\(0, 1\)/g)).toHaveLength(2);
+    expect(result.js.match(/setAt\(0, 1\)/g)).toHaveLength(2);
 
     // nothing refreshes the whole fragment — that would defeat the point
     expect(result.js).not.toMatch(/update\$\d+\?\.\(/);
 
     // (3) optional call + hoisted declaration, so calling it early is a no-op
-    expect(result.js).toMatch(/__list\$\d+\?\.set_at\(0, 1\)/);
+    expect(result.js).toMatch(/__list\$\d+\?\.setAt\(0, 1\)/);
     expect(result.js).toMatch(/var __list\$\d+ = creList\(/);
     expect(result.js).toMatch(/var update\$\d+ = creFragment\(/);
 })

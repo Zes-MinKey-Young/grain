@@ -16,7 +16,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "tsc -p ."
+        "build": "bun build ../compiler/index.ts --outfile dist/compiler/index.js --target node --format esm --external typescript --external @typescript-eslint/typescript-estree --external css-tree && tsc -p . --emitDeclarationOnly"
     },
     "publishConfig": {
         "access": "public",

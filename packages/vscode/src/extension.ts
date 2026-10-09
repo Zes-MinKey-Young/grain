@@ -1,13 +1,13 @@
 import * as vscode from 'vscode';
 
 import type { Analysis } from './analysis.js';
-import { update_diagnostics } from './diagnostics.js';
-import { register_providers, SELECTOR } from './providers.js';
+import { updateDiagnostics } from './diagnostics.js';
+import { registerProviders, SELECTOR } from './providers.js';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-import { log, set_debug } from './log.js';
-import { forget_tsconfig, set_virtual_provider, use_tsconfig } from './typescript.js';
+import { log, setDebug } from './log.js';
+import { forgetTsconfig, setVirtualProvider, useTsconfig } from './typescript.js';
 
 /** 缓存的分析连带它当时的文档版本：版本对不上就说明文档又改过了，这份不能再用 */
 const analyses = new Map<string, { analysis: Analysis; version: number }>();
@@ -18,14 +18,14 @@ const analyses = new Map<string, { analysis: Analysis; version: number }>();
  * 补全 / hover 来问的时候文档往往已经比上次分析时新了几个字符，
  * 拿旧内容去问 TS 位置会对不上（`Math.` 会被当成别处，点号那一下直接白给）。
  */
-function cached_analysis(document: vscode.TextDocument): Analysis | undefined {
+function cachedAnalysis(document: vscode.TextDocument): Analysis | undefined {
     const entry = analyses.get(document.uri.toString());
 
     return entry?.version === document.version ? entry.analysis : undefined;
 }
 
 /** 右下角的 Grain 状态项，悬停能看到当前用的 tsconfig */
-let status_item: vscode.LanguageStatusItem | null = null;
+let statusItem: vscode.LanguageStatusItem | null = null;
 
 /**
  * 编译器（连带 typescript-estree → TypeScript）只能惰性加载：
@@ -33,13 +33,13 @@ let status_item: vscode.LanguageStatusItem | null = null;
  */
 type AnalysisModule = typeof import('./analysis.js');
 
-let analysis_module: AnalysisModule | null = null;
+let analysisModule: AnalysisModule | null = null;
 
-function get_analysis_module(): AnalysisModule {
-    return (analysis_module ??= require('./analysis.js') as AnalysisModule);
+function getAnalysisModule(): AnalysisModule {
+    return (analysisModule ??= require('./analysis.js') as AnalysisModule);
 }
 
-function is_grain(document: vscode.TextDocument): boolean {
+function isGrain(document: vscode.TextDocument): boolean {
     return document.languageId === 'grain';
 }
 
@@ -47,7 +47,7 @@ function is_grain(document: vscode.TextDocument): boolean {
  * 从当前文件所在目录往上找最近的 tsconfig.json（跟 TypeScript 自己的做法一样），
  * 到工作区根为止。找不到就用插件自带的一套（含 DOM）。
  */
-function nearest_tsconfig(document: vscode.TextDocument): string | null {
+function nearestTsconfig(document: vscode.TextDocument): string | null {
     const folder = vscode.workspace.getWorkspaceFolder(document.uri);
     if (!folder) return null;
 
@@ -71,7 +71,7 @@ function nearest_tsconfig(document: vscode.TextDocument): string | null {
  * 右下角那个 Grain 状态项。
  * 悬停能看到当前用的是哪个 tsconfig —— 找不到的话也写清楚从哪儿往上找过。
  */
-function describe_tsconfig(status: vscode.LanguageStatusItem, document: vscode.TextDocument, file: string | null): void {
+function describeTsconfig(status: vscode.LanguageStatusItem, document: vscode.TextDocument, file: string | null): void {
     if (file) {
         status.detail = `tsconfig: ${vscode.workspace.asRelativePath(file, false)}`;
         status.command = {
@@ -90,22 +90,22 @@ function describe_tsconfig(status: vscode.LanguageStatusItem, document: vscode.T
 }
 
 function refresh(document: vscode.TextDocument, collection: vscode.DiagnosticCollection): void {
-    if (!is_grain(document)) return;
+    if (!isGrain(document)) return;
 
     // 用离这个文件最近的 tsconfig，并在状态项里写出来
-    const tsconfig = nearest_tsconfig(document);
+    const tsconfig = nearestTsconfig(document);
 
-    use_tsconfig(tsconfig);
-    if (status_item) describe_tsconfig(status_item, document, tsconfig);
+    useTsconfig(tsconfig);
+    if (statusItem) describeTsconfig(statusItem, document, tsconfig);
 
     try {
-        const { analyze } = get_analysis_module();
+        const { analyze } = getAnalysisModule();
         const analysis = analyze(document.getText(), document.uri.fsPath);
 
         log('analyze', document.uri.fsPath, 'script', analysis.root?.script ? 'yes' : 'no');
 
         analyses.set(document.uri.toString(), { analysis, version: document.version });
-        update_diagnostics(document, collection, analysis);
+        updateDiagnostics(document, collection, analysis);
 
         // 语言服务要加载 lib.es2022.d.ts，放后台预热，启动阶段不碰它
         setTimeout(() => analysis.warmup(), 0);
@@ -145,12 +145,12 @@ class OutputProvider implements vscode.TextDocumentContentProvider {
 const outputs = new OutputProvider();
 
 /** `App.grain` -> `grain-output:/.../App.grain.js`，标签页上显示的就是这个文件名 */
-function output_uri(source: vscode.Uri, kind: 'js' | 'css'): vscode.Uri {
+function outputUri(source: vscode.Uri, kind: 'js' | 'css'): vscode.Uri {
     return vscode.Uri.from({ scheme: OUTPUT_SCHEME, path: `${source.path}.${kind}` });
 }
 
-async function show_compiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Promise<void> {
-    const { analyze } = get_analysis_module();
+async function showCompiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Promise<void> {
+    const { analyze } = getAnalysisModule();
     const result = analyze(editor.document.getText(), editor.document.uri.fsPath).compiled();
 
     if (!result) {
@@ -165,7 +165,7 @@ async function show_compiled(editor: vscode.TextEditor, kind: 'js' | 'css'): Pro
         return;
     }
 
-    const uri = output_uri(editor.document.uri, kind);
+    const uri = outputUri(editor.document.uri, kind);
     outputs.set(uri, content);
 
     const document = await vscode.workspace.openTextDocument(uri);
@@ -178,9 +178,9 @@ export function activate(context: vscode.ExtensionContext): void {
 
     // 语言服务要解析一个没打开过的 .grain（tsconfig 的 `paths` 经常指向这种文件）时，
     // 由这里临时编一份虚拟文件给它
-    set_virtual_provider((file) => {
+    setVirtualProvider((file) => {
         try {
-            return get_analysis_module().analyze(readFileSync(file, 'utf8'), file).virtual_text();
+            return getAnalysisModule().analyze(readFileSync(file, 'utf8'), file).virtualText();
         } catch (error) {
             log('virtual provider failed', file, String(error));
 
@@ -191,14 +191,14 @@ export function activate(context: vscode.ExtensionContext): void {
     const collection = vscode.languages.createDiagnosticCollection('grain');
     context.subscriptions.push(collection);
 
-    register_providers(
+    registerProviders(
         context,
-        cached_analysis,
+        cachedAnalysis,
         (document) => {
-            if (!is_grain(document)) return undefined;
+            if (!isGrain(document)) return undefined;
 
             // 缓存那份不是当前版本（文档改过了），就按眼前的文本重新分析
-            const analysis = get_analysis_module().analyze(document.getText(), document.uri.fsPath);
+            const analysis = getAnalysisModule().analyze(document.getText(), document.uri.fsPath);
 
             analyses.set(document.uri.toString(), { analysis, version: document.version });
 
@@ -206,17 +206,17 @@ export function activate(context: vscode.ExtensionContext): void {
         }
     );
 
-    status_item = vscode.languages.createLanguageStatusItem('grain.status', SELECTOR);
-    status_item.name = 'Grain';
-    status_item.text = 'Grain';
-    status_item.detail = 'tsconfig: no file analyzed yet';
+    statusItem = vscode.languages.createLanguageStatusItem('grain.status', SELECTOR);
+    statusItem.name = 'Grain';
+    statusItem.text = 'Grain';
+    statusItem.detail = 'tsconfig: no file analyzed yet';
 
-    context.subscriptions.push(status_item);
+    context.subscriptions.push(statusItem);
 
-    const sync_debug = () =>
-        set_debug(vscode.workspace.getConfiguration('grain').get<boolean>('debug', false));
+    const syncDebug = () =>
+        setDebug(vscode.workspace.getConfiguration('grain').get<boolean>('debug', false));
 
-    sync_debug();
+    syncDebug();
 
     // 有 AI 补全时我们的列表可能被压住。把这几个设置的**生效值**打出来
     // （用户设置 / 别的扩展的默认值都会盖过 package.json 里的 configurationDefaults）
@@ -232,16 +232,16 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(
         vscode.workspace.onDidChangeConfiguration((event) => {
-            if (event.affectsConfiguration('grain')) sync_debug();
+            if (event.affectsConfiguration('grain')) syncDebug();
         }),
         // tsconfig 改了：作废缓存，把所有 .grain 重新分析一遍
         vscode.workspace.onDidSaveTextDocument((document) => {
             if (!document.uri.fsPath.endsWith('tsconfig.json')) return;
 
-            forget_tsconfig();
+            forgetTsconfig();
 
             for (const other of vscode.workspace.textDocuments) {
-                if (is_grain(other)) schedule(other);
+                if (isGrain(other)) schedule(other);
             }
         })
     );
@@ -251,7 +251,7 @@ export function activate(context: vscode.ExtensionContext): void {
     const timers = new Map<string, NodeJS.Timeout>();
 
     const schedule = (document: vscode.TextDocument) => {
-        if (!is_grain(document)) return;
+        if (!isGrain(document)) return;
 
         const key = document.uri.toString();
         clearTimeout(timers.get(key));
@@ -271,8 +271,8 @@ export function activate(context: vscode.ExtensionContext): void {
         vscode.workspace.onDidSaveTextDocument((document) => {
             // 组件改了，别的文档缓存的它的 props 得作废。
             // 分析模块还没加载过的话，缓存本来就不存在
-            if (is_grain(document) && analysis_module) {
-                analysis_module.forget_component(document.uri.fsPath);
+            if (isGrain(document) && analysisModule) {
+                analysisModule.forgetComponent(document.uri.fsPath);
             }
 
             schedule(document);
@@ -294,25 +294,25 @@ export function activate(context: vscode.ExtensionContext): void {
         for (const document of vscode.workspace.textDocuments) schedule(document);
     }, 2000);
 
-    const compile_command = (kind: 'js' | 'css') =>
+    const compileCommand = (kind: 'js' | 'css') =>
         vscode.commands.registerCommand(
             `grain.compile${kind === 'js' ? 'Js' : 'Css'}`,
             async () => {
                 const editor = vscode.window.activeTextEditor;
 
-                if (!editor || !is_grain(editor.document)) {
+                if (!editor || !isGrain(editor.document)) {
                     vscode.window.showWarningMessage('The current file is not a .grain file');
                     return;
                 }
 
-                await show_compiled(editor, kind);
+                await showCompiled(editor, kind);
             }
         );
 
     context.subscriptions.push(
         vscode.workspace.registerTextDocumentContentProvider(OUTPUT_SCHEME, outputs),
-        compile_command('js'),
-        compile_command('css')
+        compileCommand('js'),
+        compileCommand('css')
     );
 }
 

@@ -37,7 +37,7 @@ export function log(...args: unknown[]): void {
 }
 
 /** `grain.debug`：额外打一份到 Extension Host 日志，并把通道显示出来 */
-export function set_debug(value: boolean): void {
+export function setDebug(value: boolean): void {
     verbose = value;
     if (value) output().show(true);
 }

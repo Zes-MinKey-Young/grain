@@ -1,6 +1,6 @@
 // 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
 // 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
-import { parse as parse_ts } from '@typescript-eslint/typescript-estree';
+import { parse as parseTs } from '@typescript-eslint/typescript-estree';
 
 import { ParseError } from '../errors.js';
 import type {
@@ -18,7 +18,7 @@ import type {
     TSProgram
 } from '../types.js';
 import { TS_OPTIONS } from './script.js';
-import { error_range } from '../utils.js';
+import { errorRange } from '../utils.js';
 
 /**
  * 把一个 `{ ... }` 表达式交给 typescript-estree 解析。
@@ -26,7 +26,7 @@ import { error_range } from '../utils.js';
  * 和 `<script>` 一样用 `masked` 前缀对齐位置，解析出来的是 ESTree 的
  * Expression 节点（Identifier / CallExpression / BinaryExpression ...）。
  */
-export function parse_expression(node: RawExpression, masked: string): TSExpression {
+export function parseExpression(node: RawExpression, masked: string): TSExpression {
     // 把源码里那个 `{` 换成 `(`、末尾补 `)`，内容就一定是"表达式"而不是语句或块。
     // 只改了花括号本身，所以表达式内部每个字符的偏移一点没变，位置仍然对齐整个 SFC。
     const code = masked.slice(0, node.contentStart - 1) + '(' + node.raw + ')';
@@ -34,10 +34,10 @@ export function parse_expression(node: RawExpression, masked: string): TSExpress
     let program: TSProgram;
 
     try {
-        program = parse_ts(code, TS_OPTIONS);
+        program = parseTs(code, TS_OPTIONS);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
+        const [start, end] = errorRange(error, [node.contentStart, node.contentEnd]);
 
         throw new ParseError(`Failed to parse expression \`{${node.raw}}\`: ${message}`, start, end);
     }
@@ -56,16 +56,16 @@ export function parse_expression(node: RawExpression, masked: string): TSExpress
 }
 
 /** 绑定值没有 `type` 字段，表达式有 */
-function is_binding(value: RawAttributeValue): value is RawBindingValue {
+function isBinding(value: RawAttributeValue): value is RawBindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
 }
 
 /** 绑定值里的各项（`get` / `set` / `listen` / 变量）分别用 TS 解析 */
-function parse_binding(binding: RawBindingValue, masked: string, label: string): void {
+function parseBinding(binding: RawBindingValue, masked: string, label: string): void {
     for (const key of ['expression', 'get', 'set', 'listen'] as const) {
         const item = binding[key];
 
-        if (item) (item as Expression).content = parse_snippet(item, masked, `the ${key} of ${label}`);
+        if (item) (item as Expression).content = parseSnippet(item, masked, `the ${key} of ${label}`);
     }
 }
 
@@ -75,7 +75,7 @@ function parse_binding(binding: RawBindingValue, masked: string, label: string):
  * 这些片段不裹在 `{ ... }` 里，所以能直接按源码解析，偏移一个字符都不动。
  * 只有对象字面量（以 `{` 开头）得包一层括号，否则会被当成块语句。
  */
-export function parse_snippet(node: RawExpression, masked: string, label: string): TSExpression {
+export function parseSnippet(node: RawExpression, masked: string, label: string): TSExpression {
     const raw = node.raw;
     const wrap = raw.trimStart().startsWith('{');
     const code = masked.slice(0, node.contentStart) + (wrap ? `(${raw})` : raw);
@@ -83,10 +83,10 @@ export function parse_snippet(node: RawExpression, masked: string, label: string
     let program: TSProgram;
 
     try {
-        program = parse_ts(code, TS_OPTIONS);
+        program = parseTs(code, TS_OPTIONS);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
+        const [start, end] = errorRange(error, [node.contentStart, node.contentEnd]);
 
         throw new ParseError(`Failed to parse ${label} \`${raw}\`: ${message}`, start, end);
     }
@@ -107,7 +107,7 @@ export function parse_snippet(node: RawExpression, masked: string, label: string
  * 那段空白上，`)` 写在 contentEnd 上，`;` 写在后面第一个空白处。
  * 这样循环变量和可迭代对象的偏移一个字符都不动，拿到的 `left` / `right` 直接对齐整个 SFC。
  */
-export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
+export function parseForOf(node: RawForBlock, masked: string): TSForOf {
     const prefix = 'for (';
     const from = node.contentStart - prefix.length;
 
@@ -130,10 +130,10 @@ export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
     let program: TSProgram;
 
     try {
-        program = parse_ts(code, TS_OPTIONS);
+        program = parseTs(code, TS_OPTIONS);
     } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const [start, end] = error_range(error, [node.contentStart, node.contentEnd]);
+        const [start, end] = errorRange(error, [node.contentStart, node.contentEnd]);
 
         throw new ParseError(`Failed to parse the loop head \`${node.raw}\`: ${message}`, start, end);
     }
@@ -156,70 +156,70 @@ export function parse_for_of(node: RawForBlock, masked: string): TSForOf {
  *
  * 原地填充 `content`，所以第一阶段和第二阶段共用同一棵树。
  */
-export function parse_expressions(template: Template<RawTemplateNode>, masked: string): void {
-    function visit_chunk(chunk: string | RawExpression): void {
+export function parseExpressions(template: Template<RawTemplateNode>, masked: string): void {
+    function visitChunk(chunk: string | RawExpression): void {
         if (typeof chunk === 'string') return;
-        (chunk as Expression).content = parse_expression(chunk, masked);
+        (chunk as Expression).content = parseExpression(chunk, masked);
     }
 
-    function visit_value(value: RawAttributeValue | true): void {
+    function visitValue(value: RawAttributeValue | true): void {
         if (value === true || typeof value === 'string') return;
 
         if (Array.isArray(value)) {
             for (const chunk of value) {
                 if (typeof chunk === 'string') continue;
-                if (is_binding(chunk)) parse_binding(chunk, masked, 'the value');
-                else visit_chunk(chunk);
+                if (isBinding(chunk)) parseBinding(chunk, masked, 'the value');
+                else visitChunk(chunk);
             }
 
             return;
         }
 
         // 绑定值：`{ get, set, listen, active }`，各项分别解析
-        if (is_binding(value)) {
-            parse_binding(value as RawBindingValue, masked, 'the value');
+        if (isBinding(value)) {
+            parseBinding(value as RawBindingValue, masked, 'the value');
 
             return;
         }
 
-        visit_chunk(value as RawExpression);
+        visitChunk(value as RawExpression);
     }
 
     function visit(nodes: RawTemplateNode[]): void {
         for (const node of nodes) {
             // 模板插值 / 属性值里的绑定值（`{ get: ..., listen: ... }`）——单向的
             if (!('type' in node)) {
-                parse_binding(node as RawBindingValue, masked, 'the value');
+                parseBinding(node as RawBindingValue, masked, 'the value');
 
                 continue;
             }
 
             switch (node.type) {
                 case 'expression':
-                    (node as Expression).content = parse_expression(node, masked);
+                    (node as Expression).content = parseExpression(node, masked);
                     break;
 
                 case 'element':
-                    for (const value of Object.values(node.attributes)) visit_value(value);
+                    for (const value of Object.values(node.attributes)) visitValue(value);
                     visit(node.children);
                     break;
 
                 case 'IfBlock':
-                    (node.test as Expression).content = parse_expression(node.test, masked);
+                    (node.test as Expression).content = parseExpression(node.test, masked);
                     visit(node.children);
                     for (const alternate of node.alternates) {
                         if (alternate.test) {
-                            (alternate.test as Expression).content = parse_expression(alternate.test, masked);
+                            (alternate.test as Expression).content = parseExpression(alternate.test, masked);
                         }
                         visit(alternate.children);
                     }
                     break;
 
                 case 'ForBlock':
-                    (node as ForBlock).content = parse_for_of(node, masked);
+                    (node as ForBlock).content = parseForOf(node, masked);
 
                     // `with key = ...` 的键也是表达式，单独解析
-                    if (node.key) (node.key as Expression).content = parse_snippet(node.key, masked, 'the key of a `for`');
+                    if (node.key) (node.key as Expression).content = parseSnippet(node.key, masked, 'the key of a `for`');
 
                     visit(node.children);
                     if (node.fallback) visit(node.fallback.children);

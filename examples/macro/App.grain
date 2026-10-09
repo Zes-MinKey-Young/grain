@@ -9,12 +9,12 @@
     }
 
     // Same thing, plus `active`: the getter runs again after every write
-    function $strict_field(name: string) {
+    function $strictField(name: string) {
         return ['get', ':', `() => ${name}`, ',', 'set', ':', `(v) => ${name} = v`, ',', 'active'];
     }
 
     // A macro can just name a variable, too — that expands to `{name}`
-    function $as_variable(name: string) {
+    function $asVariable(name: string) {
         return [name];
     }
 </script>
@@ -33,14 +33,14 @@
 </p>
 <p>name = {name}</p>
 
-<h2>$strict_field('nick') — same, plus active</h2>
+<h2>$strictField('nick') — same, plus active</h2>
 <p>
-    <input bind:value={$strict_field('nick')} />
+    <input bind:value={$strictField('nick')} />
 </p>
 
-<h2>$as_variable('name') — two inputs, one variable</h2>
+<h2>$asVariable('name') — two inputs, one variable</h2>
 <p>
-    <input bind:value={$as_variable('name')} />
+    <input bind:value={$asVariable('name')} />
 </p>
 
 <h2>$shout('nick') on an attribute, $flip('name') in the script</h2>

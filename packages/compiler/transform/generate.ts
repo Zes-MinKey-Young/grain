@@ -20,18 +20,18 @@ import ts from 'typescript';
 
 const { transpileModule, ModuleKind, ScriptTarget } = ts;
 
-import { parse_inline } from '../nodes.js';
+import { parseInline } from '../nodes.js';
 import { ParseError } from '../errors.js';
 
 import {
-    analyze_script,
-    collect_reads,
-    collect_writes,
+    analyzeScript,
+    collectReads,
+    collectWrites,
     intersects,
     type FunctionLike,
     type ScriptAnalysis
 } from './analyze.js';
-import { create_scope_id, is_global, scope_stylesheet } from './style.js';
+import { createScopeId, isGlobal, scopeStylesheet } from './style.js';
 
 export interface CompileOptions {
     /** 运行时模块路径，默认 `@graints/runtime` */
@@ -66,12 +66,12 @@ interface PendingWrapper {
     writes: Set<string>;
 }
 
-function add_all(target: Set<string>, source: Set<string>): void {
+function addAll(target: Set<string>, source: Set<string>): void {
     for (const value of source) target.add(value);
 }
 
 /** 收集一棵模板子树里出现过的所有 state 读取 */
-function template_reads(node: TemplateNode): Set<string> {
+function templateReads(node: TemplateNode): Set<string> {
     const names = new Set<string>();
 
     const visit = (current: TemplateNode): void => {
@@ -80,37 +80,37 @@ function template_reads(node: TemplateNode): Set<string> {
             const binding = current as BindingValue;
             const source = binding.get ?? binding.expression;
 
-            if (source) add_all(names, collect_reads(source.content));
-            if (binding.listen) add_all(names, collect_reads(binding.listen.content));
+            if (source) addAll(names, collectReads(source.content));
+            if (binding.listen) addAll(names, collectReads(binding.listen.content));
 
             return;
         }
 
         switch (current.type) {
             case 'expression':
-                add_all(names, collect_reads(current.content));
+                addAll(names, collectReads(current.content));
                 break;
 
             case 'element':
                 for (const value of Object.values(current.attributes)) {
-                    for (const chunk of chunks_of(value)) {
-                        if (typeof chunk !== 'string') add_all(names, collect_reads(chunk.content));
+                    for (const chunk of chunksOf(value)) {
+                        if (typeof chunk !== 'string') addAll(names, collectReads(chunk.content));
                     }
                 }
                 current.children.forEach(visit);
                 break;
 
             case 'IfBlock':
-                add_all(names, collect_reads(current.test.content));
+                addAll(names, collectReads(current.test.content));
                 for (const alternate of current.alternates) {
-                    if (alternate.test) add_all(names, collect_reads(alternate.test.content));
+                    if (alternate.test) addAll(names, collectReads(alternate.test.content));
                     alternate.children.forEach(visit);
                 }
                 current.children.forEach(visit);
                 break;
 
             case 'ForBlock':
-                add_all(names, collect_reads(current.content.right));
+                addAll(names, collectReads(current.content.right));
                 current.fallback?.children.forEach(visit);
                 current.children.forEach(visit);
                 break;
@@ -134,14 +134,14 @@ interface PropsInfo {
     names: Array<{ name: string; key: string }>;
 }
 
-function is_children(property: unknown): boolean {
+function isChildren(property: unknown): boolean {
     const node = property as { type?: string; key?: { type?: string; name?: string } };
 
     return node?.key?.type === 'Identifier' && node.key.name === 'children';
 }
 
 /** 找出 `$props()`：调用位置 + 解构模式 */
-function find_props(script: Script | null): PropsInfo | null {
+function findProps(script: Script | null): PropsInfo | null {
     if (!script) return null;
 
     for (const statement of script.content.body) {
@@ -156,7 +156,7 @@ function find_props(script: Script | null): PropsInfo | null {
             const info: PropsInfo = { call: init.range, id: null, keep: [], names: [] };
 
             if (declarator.id.type === 'ObjectPattern') {
-                const kept = declarator.id.properties.filter((property) => !is_children(property));
+                const kept = declarator.id.properties.filter((property) => !isChildren(property));
 
                 info.id = declarator.id.range;
                 info.keep = kept.map((property) => property.range);
@@ -198,7 +198,7 @@ interface BindableInfo {
     /** 这一项在解构里的区间（要从解构里剔掉） */
     property: [number, number];
     /** `let { ... } = $props()` 这条语句的结束位置，绑定声明插在它后面 */
-    statement_end: number;
+    statementEnd: number;
 }
 
 /** script 源码里的一处改写，区间是相对 script 内容开头的原始偏移 */
@@ -209,7 +209,7 @@ interface Edit {
 }
 
 /** 从后往前应用，前面的改写不会影响后面区间的计算 */
-function apply_edits(code: string, edits: Edit[], base: number): string {
+function applyEdits(code: string, edits: Edit[], base: number): string {
     let result = code;
 
     for (const edit of [...edits].sort((a, b) => b.start - a.start || b.end - a.end)) {
@@ -225,7 +225,7 @@ function apply_edits(code: string, edits: Edit[], base: number): string {
 }
 
 /** 找出 `$props()` 解构里用 `$bindable(...)` 声明的项 */
-function find_bindables(block: Script, source: string): BindableInfo[] {
+function findBindables(block: Script, source: string): BindableInfo[] {
     const found: BindableInfo[] = [];
 
     for (const statement of block.content.body) {
@@ -259,7 +259,7 @@ function find_bindables(block: Script, source: string): BindableInfo[] {
                     fallback: argument ? source.slice(argument.range[0], argument.range[1]) : 'undefined',
                     binding: `__binding$${name}`,
                     property: property.range,
-                    statement_end: statement.range[1]
+                    statementEnd: statement.range[1]
                 });
             }
         }
@@ -269,7 +269,7 @@ function find_bindables(block: Script, source: string): BindableInfo[] {
 }
 
 /** `+=` -> `+`、`??=` -> `??`：把赋值运算符还原成二元运算符 */
-function binary_operator(operator: string): string {
+function binaryOperator(operator: string): string {
     return operator.slice(0, -1);
 }
 
@@ -284,20 +284,20 @@ const LIST_MUTATIONS = new Set(['push', 'pop', 'shift', 'unshift', 'splice']);
 /**
  * Map / Set 上那些"按一个键就能定位到某一项"的方法。
  *
- * 数组的方法是按位置（`set_at(i, v)`），这两个是按键（`set_key(k, v)`）—— 所以只有写了
+ * 数组的方法是按位置（`setAt(i, v)`），这两个是按键（`setKey(k, v)`）—— 所以只有写了
  * `with key = ...` 的 for 才认，否则说不清是哪一项，退回整块比对。
  */
 const KEYED_MUTATIONS = new Set(['set', 'add', 'delete', 'clear']);
 
 /** 这些工厂造出来的是"自己会通知改动"的容器 */
-const REACTIVE_FACTORIES = new Set(['reactive_array', 'reactive_map', 'reactive_set']);
+const REACTIVE_FACTORIES = new Set(['reactiveArray', 'reactiveMap', 'reactiveSet']);
 
 /**
- * 找出用 `reactive_array(...)` 之类声明的变量。
+ * 找出用 `reactiveArray(...)` 之类声明的变量。
  *
  * 它们自己知道动了什么，所以 `for` 订阅它就行 —— 不用编译期去猜。
  */
-function reactive_containers_in(root: Root): Set<string> {
+function reactiveContainersIn(root: Root): Set<string> {
     const names = new Set<string>();
 
     for (const block of [root.script, root.module]) {
@@ -330,12 +330,12 @@ function reactive_containers_in(root: Root): Set<string> {
  * 后面所有项的索引都变，不是"追加一行"那么简单，所以它走整块比对。
  * 别的（`list.filter(...)`、`a.concat(b)`）一概不认。
  */
-function source_variable_of(right: TSESTree.Expression): string | null {
+function sourceVariableOf(right: TSESTree.Expression): string | null {
     if (right.type === 'Identifier') return right.name;
 
     // `items.entries()` 也认：项是 `[下标, 值]`，而**追加 / 删末尾不动前面那些项的下标**
     // —— 所以 `push` / `pop` 依然能精确（`shift` / `unshift` / `splice` 会让所有下标
-    // 变，那种走整块比对，见 mutation_calls 里的 for_shifted）
+    // 变，那种走整块比对，见 mutationCalls 里的 forShifted）
     if (
         right.type === 'CallExpression' &&
         right.callee.type === 'MemberExpression' &&
@@ -349,7 +349,7 @@ function source_variable_of(right: TSESTree.Expression): string | null {
     return null;
 }
 
-function is_function_like(node: TSESTree.Node): node is FunctionLike {
+function isFunctionLike(node: TSESTree.Node): node is FunctionLike {
     return (
         node.type === 'ArrowFunctionExpression' ||
         node.type === 'FunctionExpression' ||
@@ -358,9 +358,9 @@ function is_function_like(node: TSESTree.Node): node is FunctionLike {
 }
 
 /** `A && B && C` -> `['A', 'B', 'C']`（带括号的整体算一个条件） */
-function split_and(node: TSESTree.Node, source: string): string[] {
+function splitAnd(node: TSESTree.Node, source: string): string[] {
     if (node.type === 'LogicalExpression' && node.operator === '&&') {
-        return [...split_and(node.left, source), ...split_and(node.right, source)];
+        return [...splitAnd(node.left, source), ...splitAnd(node.right, source)];
     }
 
     return [source.slice(node.range[0], node.range[1])];
@@ -380,7 +380,7 @@ interface ListenBranch {
  * `A && B` 和 `A && C` 共用 A 那一层，于是 A 只求一次：
  * `if (A) { if (B) { … } if (C) { … } }`
  */
-function build_branch(slots: Array<{ chain: string[] }>): ListenBranch {
+function buildBranch(slots: Array<{ chain: string[] }>): ListenBranch {
     const root: ListenBranch = { leaves: [], branches: new Map() };
 
     slots.forEach((slot, index) => {
@@ -403,30 +403,30 @@ function build_branch(slots: Array<{ chain: string[] }>): ListenBranch {
     return root;
 }
 
-function emit_branch(node: ListenBranch, slots: string): string {
+function emitBranch(node: ListenBranch, slots: string): string {
     const parts: string[] = [];
 
     for (const leaf of node.leaves) parts.push(`${slots}[${leaf}]?.();`);
     for (const [condition, child] of node.branches) {
-        parts.push(`if (${condition}) { ${emit_branch(child, slots)} }`);
+        parts.push(`if (${condition}) { ${emitBranch(child, slots)} }`);
     }
 
     return parts.join(' ');
 }
 
 /** 绑定值没有 `type` 字段，表达式有 */
-function is_binding_value(value: string | Expression | BindingValue): value is BindingValue {
+function isBindingValue(value: string | Expression | BindingValue): value is BindingValue {
     return typeof value === 'object' && value !== null && !('type' in value);
 }
 
 /**
  * 属性值里的文本 / 表达式片段。
- * 绑定值不算在里面 —— 它走 `binding_attribute` 那条路。
+ * 绑定值不算在里面 —— 它走 `bindingAttribute` 那条路。
  */
-function chunks_of(value: AttributeValue | true): Array<string | Expression> {
+function chunksOf(value: AttributeValue | true): Array<string | Expression> {
     if (value === true || typeof value === 'string') return [];
-    if (Array.isArray(value)) return value.filter((chunk) => !is_binding_value(chunk));
-    if (is_binding_value(value)) return [];
+    if (Array.isArray(value)) return value.filter((chunk) => !isBindingValue(chunk));
+    if (isBindingValue(value)) return [];
 
     return [value];
 }
@@ -453,15 +453,15 @@ function transpile(code: string, filename: string): string {
 }
 
 /** 首字母大写（`<Foo />`）或带点（`<Foo.Bar />`）的标签是子组件 */
-function is_component_name(name: string): boolean {
+function isComponentName(name: string): boolean {
     return /^[A-Z]/.test(name) || name.includes('.');
 }
 
-function escape_template(text: string): string {
+function escapeTemplate(text: string): string {
     return text.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${');
 }
 
-function is_identifier(text: string): boolean {
+function isIdentifier(text: string): boolean {
     return /^[A-Za-z_$][\w$]*$/.test(text);
 }
 
@@ -485,7 +485,7 @@ function mentions(node: TSESTree.Node, names: Set<string>): boolean {
  * 但 `arr.push(v)` 改的是引用里面的内容，变量本身一直相等 ——
  * 有这种写法就别加比较，老老实实刷新，否则列表永远不会更新。
  */
-function writes_are_assignments(node: TSESTree.Node, names: Set<string>): boolean {
+function writesAreAssignments(node: TSESTree.Node, names: Set<string>): boolean {
     if (names.size === 0) return false;
 
     let plain = true;
@@ -526,7 +526,7 @@ class Generator {
      * `bind:` 的 setter。要等所有片段都收集完才知道刷新哪些，
      * 所以先记下"拿到 update 调用之后怎么渲染"。
      */
-    private pending_binds: Array<{
+    private pendingBinds: Array<{
         name: string;
         /** `names` 是这次写入涉及到的响应式变量，用来生成"值没变就不刷新"的判断 */
         render: (updates: string, names: string[]) => string;
@@ -538,62 +538,62 @@ class Generator {
      * 同组的只挂**一次**监听：每个绑定把自己的 update 存进槽位数组
      * （运行时挂载时填），再由组里那一个 handler 按谓词决定叫谁。
      */
-    private listen_groups: Array<{
+    private listenGroups: Array<{
         bus: string;
         event: string;
         slots: Array<{ chain: string[]; params: string[] }>;
     }> = [];
     private counter = 0;
-    private wrapper_counter = 0;
-    private prev_counter = 0;
-    private root_name = 'update$0';
+    private wrapperCounter = 0;
+    private prevCounter = 0;
+    private rootName = 'update$0';
     /** `$bindable` 声明的双向绑定 prop */
     private bindables: BindableInfo[] = [];
     /**
      * `$bindable` 变量的写入改写（SFC 绝对偏移）。
      * script 和事件包装都要用——包装是复制函数体，不改写的话子组件写不回父组件。
      */
-    private bindable_edits: Edit[] = [];
+    private bindableEdits: Edit[] = [];
     /**
      * 是否处在"每次重建都会重新创建"的上下文里（for 块、组件插槽）。
      * 这里面的片段不用注册——重建后旧节点就失效了，注册了只会产生无效的 update 调用。
      */
-    private inside_fragment = false;
+    private insideFragment = false;
     /** 正在生成插槽内容：这里的 `{expr}` 得有自己的文本节点，父组件才能刷新它 */
-    private inside_slot = false;
+    private insideSlot = false;
     /** 用到了 creText */
-    private needs_text = false;
+    private needsText = false;
     /** 用到了 creBound（单向属性 / 模板插值的绑定） */
-    private needs_bound = false;
+    private needsBound = false;
     /** 用到了 creList（`{#for ...}`） */
-    private needs_list = false;
+    private needsList = false;
     /**
      * 容器变量 -> 那个 `for` 产出的列表。
      *
      * 只有"of 后面直接跟着这个变量"（或它的 `entries()`）才登记 —— 改的就是这个
      * 容器，才能换成精确的 `push` / `splice` 调用。
      */
-    private for_sources = new Map<string, string[]>();
+    private forSources = new Map<string, string[]>();
     /** 每个 for 在父级里的片段坐标：精确调用顶掉它之后，就别再让它 sync 一遍 */
-    private for_slots = new Map<string, { update: string; index: number }>();
+    private forSlots = new Map<string, { update: string; index: number }>();
     /** 哪些列表写了 `with key = ...`：只有它们能按键定位（Map / Set 的方法要靠这个） */
-    private for_keyed = new Set<string>();
+    private forKeyed = new Set<string>();
     /**
      * 哪些列表的项**带下标**（`{#for [i, x] of items.entries()}`）。
      *
      * 这种只有 `push` / `pop` 能精确 —— 别的会让所有项的下标都变。
      */
-    private for_shifted = new Set<string>();
-    /** `reactive_array(...)` 之类声明的变量：它们自己会通知改动 */
-    private readonly reactive_containers: Set<string>;
-    /** `$props()` 解构出来的变量，生成 `set_props` 要用 */
-    private prop_names: Array<{ name: string; key: string }> = [];
+    private forShifted = new Set<string>();
+    /** `reactiveArray(...)` 之类声明的变量：它们自己会通知改动 */
+    private readonly reactiveContainers: Set<string>;
+    /** `$props()` 解构出来的变量，生成 `setProps` 要用 */
+    private propNames: Array<{ name: string; key: string }> = [];
     /**
      * `bind:this={x}` 里由它自己声明的变量名。
      *
      * 写标识符时不需要（也不该）在 `<script>` 里先声明；只有 `<script onmount>` 能看见。
      */
-    private this_names = new Set<string>();
+    private thisNames = new Set<string>();
     /** script / module 里声明过的名字（算一次就够） */
     private declared: Set<string> | null = null;
     /**
@@ -602,27 +602,27 @@ class Generator {
      * 刷新写在函数自己身上，而不是挂在调用处 —— 这样谁调用它都会刷新
      * （事件处理器、箭头函数、onmount、定时器……），也不用去改调用点的名字。
      */
-    private wrapped_functions = new Set<string>();
+    private wrappedFunctions = new Set<string>();
     /** `$bindable` 变量 -> 它的刷新函数名 */
-    private refresh_names = new Map<string, string>();
+    private refreshNames = new Map<string, string>();
     /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
-    private pending_refreshes: Array<{ name: string; deps: Set<string> }> = [];
+    private pendingRefreshes: Array<{ name: string; deps: Set<string> }> = [];
     /** 刷新函数开头要跑的赋值（`$node` 的重算） */
-    private refresh_assigns = new Map<string, string>();
+    private refreshAssigns = new Map<string, string>();
     /** `$node`：源变量 -> 重算它的刷新函数 */
-    private node_triggers: Array<{ refresh: string; deps: Set<string> }> = [];
+    private nodeTriggers: Array<{ refresh: string; deps: Set<string> }> = [];
     /** `$node` 的变量名 -> 读写对 / 刷新函数（写入改写要用） */
-    private node_pairs = new Map<string, { pair: string; refresh: string; set: boolean }>();
+    private nodePairs = new Map<string, { pair: string; refresh: string; set: boolean }>();
     /** `$node` 变量 -> 它的 `get` 读了哪些变量（环检测用，也决定谁来触发重算） */
-    private node_deps = new Map<string, Set<string>>();
+    private nodeDeps = new Map<string, Set<string>>();
     /** `$node` 变量 -> 声明语句的位置（环检测报错要指到那儿） */
-    private node_spans = new Map<string, [number, number]>();
+    private nodeSpans = new Map<string, [number, number]>();
     /** `$node` 变量的写入改写（事件处理器复制函数体时也要应用） */
-    private node_write_edits: Edit[] = [];
+    private nodeWriteEdits: Edit[] = [];
     /** `$node` 的订阅：等元素建好再挂 */
-    private node_listens: Array<{ pair: string; refresh: string }> = [];
+    private nodeListens: Array<{ pair: string; refresh: string }> = [];
     /** 容器的精确调用（`list.push(...)`），紧跟在原调用之后插入 */
-    private mutation_edits: Edit[] = [];
+    private mutationEdits: Edit[] = [];
 
 
     constructor(
@@ -631,32 +631,32 @@ class Generator {
         private runtime: string,
         private analysis: ScriptAnalysis | null,
         /** 组件级样式的类名；`<style global>` 或没有样式时为 null */
-        private scope_id: string | null,
+        private scopeId: string | null,
         private filename: string,
         /** 开发模式：往刷新函数里埋循环检测点 */
         private dev: boolean
     ) {
-        this.reactive_containers = reactive_containers_in(root);
+        this.reactiveContainers = reactiveContainersIn(root);
     }
 
     run(): CompileResult {
         // 先定下根调度器的名字：bindactive 的 setter 要在最后触发它的全量刷新
-        const root_name = `update$${this.counter++}`;
-        this.root_name = root_name;
+        const rootName = `update$${this.counter++}`;
+        this.rootName = rootName;
 
-        this.fragment(this.root.template.children, root_name);
+        this.fragment(this.root.template.children, rootName);
 
-        // script 要先处理：`$bindable` 会决定要不要 import to_binding
+        // script 要先处理：`$bindable` 会决定要不要 import toBinding
         const parts = this.root.script ? this.script(this.root.script) : { head: [], body: '' };
         // onmount 跟 script 走同一套处理（`$state` 展开、`$props()` 换成 props）
         const onmount = this.root.onmount ? this.script(this.root.onmount) : null;
 
         const imported = ['creEle', 'creFragment', 'component'];
-        if (this.bindables.length > 0) imported.push('to_binding');
-        if (this.needs_text) imported.push('creText');
-        if (this.needs_bound) imported.push('creBound');
-        if (this.needs_list) imported.push('creList');
-        if (this.dev && this.pending_refreshes.length > 0) imported.push('guard');
+        if (this.bindables.length > 0) imported.push('toBinding');
+        if (this.needsText) imported.push('creText');
+        if (this.needsBound) imported.push('creBound');
+        if (this.needsList) imported.push('creList');
+        if (this.dev && this.pendingRefreshes.length > 0) imported.push('guard');
 
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
 
@@ -677,59 +677,59 @@ class Generator {
         }
 
         // 事件包装：原函数体 + 触发受影响的片段（README 里的 `increment_$1`）
-        const wrappers = this.wrapper_statements();
+        const wrappers = this.wrapperStatements();
         if (wrappers.length > 0) instance.push('', ...wrappers);
 
         // bind: 的 setter
-        const binds = this.bind_statements();
+        const binds = this.bindStatements();
         if (binds.length > 0) instance.push('', ...binds);
 
         // $bindable 非受控时的刷新函数
-        const refreshes = this.refresh_statements();
+        const refreshes = this.refreshStatements();
         if (refreshes.length > 0) instance.push('', ...refreshes);
 
         // `bind:this={x}` 声明的变量：放在这里，模板里的赋值才够得着
-        if (this.this_names.size > 0) {
-            instance.push('', `/* bind:this 声明的变量 */`, `let ${[...this.this_names].join(', ')};`);
+        if (this.thisNames.size > 0) {
+            instance.push('', `/* bind:this 声明的变量 */`, `let ${[...this.thisNames].join(', ')};`);
         }
 
         // 槽位数组要在元素创建之前声明——元素创建时会往里填各自的 update
-        const listen_slots = this.listen_slot_declarations();
-        if (listen_slots.length > 0) instance.push('', ...listen_slots);
+        const listenSlots = this.listenSlotDeclarations();
+        if (listenSlots.length > 0) instance.push('', ...listenSlots);
 
         instance.push('', '/* template */', ...this.statements);
 
         // `$node` 的订阅：元素建好之后才挂（刷新函数要用到它们）
-        if (this.node_listens.length > 0) {
+        if (this.nodeListens.length > 0) {
             instance.push(
                 '',
-                ...this.node_listens.map((item) => `${item.pair}.listen?.(${item.refresh});`)
+                ...this.nodeListens.map((item) => `${item.pair}.listen?.(${item.refresh});`)
             );
         }
 
         // 监听本身等元素都建好再挂：同一总线 + 同一事件只挂一次，谓词合并成 if 树
-        const listens = this.listen_registrations();
+        const listens = this.listenRegistrations();
         if (listens.length > 0) instance.push('', '/* 合并的事件监听 */', ...listens);
 
         // 静态看得出来的环：直接报错，别让它过编译
-        this.check_reactive_cycles();
+        this.checkReactiveCycles();
 
         // 属性修改触发器：得等所有片段都收集完，才知道 props 变了要刷哪些
-        const set_props = this.props_statements();
-        if (set_props.length > 0) instance.push('', ...set_props);
+        const setProps = this.propsStatements();
+        if (setProps.length > 0) instance.push('', ...setProps);
 
         // 挂上之后才跑：这时候 bind:this 的变量已经被赋上元素了
         if (onmount && onmount.body) {
             // onmount 里的顶层写 $state 也算数据流动 —— 挂载完立刻安排一次刷新。
             // （里面定义的**函数**本来就有刷新，走的是 wrapper 那条路）
-            const writes = collect_writes(this.root.onmount!.content);
-            const reactive = [...this.reactive_writes(writes)];
-            const updates = this.update_calls(new Set(reactive));
+            const writes = collectWrites(this.root.onmount!.content);
+            const reactive = [...this.reactiveWrites(writes)];
+            const updates = this.updateCalls(new Set(reactive));
 
             instance.push(
                 '',
                 '/* <script onmount> */',
-                `${root_name}.onmount = () => {`,
+                `${rootName}.onmount = () => {`,
                 onmount.body,
                 updates ? ` ${updates}` : '',
                 '};'
@@ -737,7 +737,7 @@ class Generator {
         }
 
         // 套一层稳定的外壳：HMR 换实例时只换里面，父组件持有的引用不动
-        instance.push('', `return component(${root_name}, create, props, children);`);
+        instance.push('', `return component(${rootName}, create, props, children);`);
 
         output.push(
             '',
@@ -764,8 +764,8 @@ class Generator {
         const stylesheet = this.root.stylesheet;
         const css = !stylesheet
             ? ''
-            : this.scope_id
-              ? scope_stylesheet(stylesheet, this.scope_id)
+            : this.scopeId
+              ? scopeStylesheet(stylesheet, this.scopeId)
               : stylesheet.raw;
 
         return { js: transpile(output.join('\n'), this.filename), css };
@@ -806,11 +806,11 @@ class Generator {
         }
 
         // 3. `$props()` -> `props`
-        const props = find_props(block);
-        const bindables = props ? find_bindables(block, this.source) : [];
+        const props = findProps(block);
+        const bindables = props ? findBindables(block, this.source) : [];
 
         this.bindables = bindables;
-        if (props) this.prop_names = props.names;
+        if (props) this.propNames = props.names;
 
         if (props) {
             edits.push({ start: props.call[0], end: props.call[1], text: 'props' });
@@ -828,30 +828,30 @@ class Generator {
         }
 
         // 4. `$bindable` 变量的写入 -> 读写对
-        this.bindable_edits = this.bindable_writes(block, bindables);
-        edits.push(...this.bindable_edits);
+        this.bindableEdits = this.bindableWrites(block, bindables);
+        edits.push(...this.bindableEdits);
 
         // 5. `$node(...)` -> 读写对 + 变量；它的写入走 setter（没有 `set` 就报错）
-        edits.push(...this.node_declarations(block));
+        edits.push(...this.nodeDeclarations(block));
 
-        this.node_write_edits = this.node_writes(block);
-        edits.push(...this.node_write_edits);
+        this.nodeWriteEdits = this.nodeWrites(block);
+        edits.push(...this.nodeWriteEdits);
 
         // 5.5 写了 `$state` 的顶层函数：刷新直接写进函数体
-        edits.push(...this.function_wrappers(block));
+        edits.push(...this.functionWrappers(block));
 
         // 6. 读写对的声明，插在 `let { ... } = $props()` 之后
         for (const bindable of bindables) {
-            const { start, end } = { start: bindable.statement_end, end: bindable.statement_end };
+            const { start, end } = { start: bindable.statementEnd, end: bindable.statementEnd };
 
             edits.push({
                 start,
                 end,
-                text: `\nconst ${bindable.binding} = to_binding(props[${JSON.stringify(bindable.prop)}], ${bindable.fallback});\nlet ${bindable.name} = ${bindable.binding}.get();`
+                text: `\nconst ${bindable.binding} = toBinding(props[${JSON.stringify(bindable.prop)}], ${bindable.fallback});\nlet ${bindable.name} = ${bindable.binding}.get();`
             });
         }
 
-        return { head, body: apply_edits(block.raw, edits, block.contentStart).trim() };
+        return { head, body: applyEdits(block.raw, edits, block.contentStart).trim() };
     }
 
     /**
@@ -864,41 +864,41 @@ class Generator {
      * else { const __next$1 = a + 1; if (__next$1 !== a) { a = __next$1; __refresh$a(); } }
      * ```
      */
-    private bindable_writes(block: Script, bindables: BindableInfo[]): Edit[] {
+    private bindableWrites(block: Script, bindables: BindableInfo[]): Edit[] {
         if (bindables.length === 0) return [];
 
-        const by_name = new Map(bindables.map((bindable) => [bindable.name, bindable]));
+        const byName = new Map(bindables.map((bindable) => [bindable.name, bindable]));
         const edits: Edit[] = [];
-        let next_counter = 0;
+        let nextCounter = 0;
 
         /** 每个变量一个"刷新依赖它的片段"的函数，片段收集完之后才生成 */
-        const refresh_of = (name: string): string => {
-            const existing = this.refresh_names.get(name);
+        const refreshOf = (name: string): string => {
+            const existing = this.refreshNames.get(name);
             if (existing) return existing;
 
             const generated = `__refresh$${this.counter++}`;
 
-            this.refresh_names.set(name, generated);
-            this.pending_refreshes.push({ name: generated, deps: new Set([name]) });
+            this.refreshNames.set(name, generated);
+            this.pendingRefreshes.push({ name: generated, deps: new Set([name]) });
 
             return generated;
         };
 
         /** 这次写入：变量名、新值的表达式、读写对 */
-        const read_write = (
+        const readWrite = (
             node: TSESTree.Node
         ): { name: string; value: string; binding: string } | null => {
             if (node.type === 'AssignmentExpression') {
                 if (node.left.type !== 'Identifier') return null;
 
-                const bindable = by_name.get(node.left.name);
+                const bindable = byName.get(node.left.name);
                 if (!bindable) return null;
 
                 const right = this.slice(node.right.range);
                 const value =
                     node.operator === '='
                         ? right
-                        : `${node.left.name} ${binary_operator(node.operator)} ${right}`;
+                        : `${node.left.name} ${binaryOperator(node.operator)} ${right}`;
 
                 return { name: node.left.name, value, binding: bindable.binding };
             }
@@ -906,7 +906,7 @@ class Generator {
             if (node.type === 'UpdateExpression') {
                 if (node.argument.type !== 'Identifier') return null;
 
-                const bindable = by_name.get(node.argument.name);
+                const bindable = byName.get(node.argument.name);
                 if (!bindable) return null;
 
                 return {
@@ -921,7 +921,7 @@ class Generator {
 
         simpleTraverse(block.content as unknown as TSESTree.Node, {
             enter: (node, parent) => {
-                const write = read_write(node);
+                const write = readWrite(node);
                 if (!write) return;
 
                 const { name, value, binding } = write;
@@ -929,14 +929,14 @@ class Generator {
                 // 赋值语句：展开成 if / else 两条路。
                 // 非受控那一路比一下新旧值 —— 值没变就别刷新（受控那一路交给父组件的 setter 比）
                 if (parent?.type === 'ExpressionStatement') {
-                    const next = `__next$${++next_counter}`;
+                    const next = `__next$${++nextCounter}`;
 
                     edits.push({
                         start: parent.range[0],
                         end: parent.range[1],
                         text:
                             `if (${binding}.external) ${binding}.set(${value}); ` +
-                            `else { const ${next} = ${value}; if (${next} !== ${name}) { ${name} = ${next}; ${refresh_of(name)}(); } }`
+                            `else { const ${next} = ${value}; if (${next} !== ${name}) { ${name} = ${next}; ${refreshOf(name)}(); } }`
                     });
 
                     return;
@@ -946,7 +946,7 @@ class Generator {
                 edits.push({
                     start: node.range[0],
                     end: node.range[1],
-                    text: `(${binding}.external ? ${binding}.set(${value}) : (${name} = ${value}, ${refresh_of(name)}()))`
+                    text: `(${binding}.external ? ${binding}.set(${value}) : (${name} = ${value}, ${refreshOf(name)}()))`
                 });
             }
         });
@@ -958,11 +958,11 @@ class Generator {
      * 非受控时 `$bindable` 就是个普通变量，改完得自己刷依赖它的片段。
      * 用 function 声明（会提升），这样 script 顶层的写入也不会踩到 TDZ。
      */
-    private refresh_statements(): string[] {
-        return this.pending_refreshes.map((refresh) => {
-            const updates = this.update_calls(refresh.deps);
+    private refreshStatements(): string[] {
+        return this.pendingRefreshes.map((refresh) => {
+            const updates = this.updateCalls(refresh.deps);
             // `$node` 的刷新函数：先重算这个节点
-            const assign = this.refresh_assigns.get(refresh.name) ?? '';
+            const assign = this.refreshAssigns.get(refresh.name) ?? '';
             // dev 下埋个检测点：真循环起来，运行时会抛
             const guard = this.dev ? `guard(${JSON.stringify(refresh.name)}); ` : '';
 
@@ -979,8 +979,8 @@ class Generator {
      * 靠运行时的条件分支或者 store 通知才成立的环抓不到（那些路径静态看不见），
      * 交给 dev 下埋的 `guard`。
      */
-    private check_reactive_cycles(): void {
-        if (this.node_deps.size === 0) return;
+    private checkReactiveCycles(): void {
+        if (this.nodeDeps.size === 0) return;
 
         const done = new Set<string>();
         const visiting = new Set<string>();
@@ -991,7 +991,7 @@ class Generator {
 
             if (visiting.has(name)) {
                 const cycle = [...stack.slice(stack.indexOf(name)), name];
-                const [start, end] = this.node_spans.get(name) ?? [0, 0];
+                const [start, end] = this.nodeSpans.get(name) ?? [0, 0];
 
                 throw new ParseError(
                     `Reactive loop: ${cycle.join(' -> ')} — each one reads the next, so recomputing never settles`,
@@ -1003,9 +1003,9 @@ class Generator {
             visiting.add(name);
             stack.push(name);
 
-            for (const read of this.node_deps.get(name) ?? []) {
+            for (const read of this.nodeDeps.get(name) ?? []) {
                 // 只有读的是另一个 `$node` 才可能成环：普通 $state 不会自己重算
-                if (this.node_deps.has(read)) visit(read);
+                if (this.nodeDeps.has(read)) visit(read);
             }
 
             stack.pop();
@@ -1013,7 +1013,7 @@ class Generator {
             done.add(name);
         };
 
-        for (const name of this.node_deps.keys()) visit(name);
+        for (const name of this.nodeDeps.keys()) visit(name);
     }
 
     /**
@@ -1023,7 +1023,7 @@ class Generator {
      * 名字不变，所以调用处一个字都不用改 —— 无论谁调用它（事件、箭头函数、onmount、
      * 定时器）都会刷新。之前只有直接挂在事件属性上的函数才带刷新。
      */
-    private function_wrappers(block: Script): Edit[] {
+    private functionWrappers(block: Script): Edit[] {
         const edits: Edit[] = [];
 
         for (const [name, info] of this.analysis?.functions ?? []) {
@@ -1032,26 +1032,26 @@ class Generator {
             if (node.type !== 'FunctionDeclaration' || !node.id) continue;
             if (node.range[0] < block.contentStart || node.range[1] > block.contentEnd) continue;
 
-            const reactive = [...this.reactive_writes(info.writes)];
+            const reactive = [...this.reactiveWrites(info.writes)];
             if (reactive.length === 0) continue;
 
             // 容器方法（`items.push(x)` / `items[i] = v`）换成列表自己的精确调用，
             // 并顶掉整块比对。这些插入紧跟原语句，所以先登记再取函数体
-            const mutations = this.mutation_calls(node);
+            const mutations = this.mutationCalls(node);
 
-            this.mutation_edits = mutations.edits;
+            this.mutationEdits = mutations.edits;
 
             const params = node.params.map((param) => this.slice(param.range)).join(', ');
-            // 去掉外层花括号，交给 guard_changes 重新包一层
-            const inner = this.body_source(node.body.range).slice(1, -1);
-            const updates = this.update_calls(new Set(reactive), mutations.skip);
+            // 去掉外层花括号，交给 guardChanges 重新包一层
+            const inner = this.bodySource(node.body.range).slice(1, -1);
+            const updates = this.updateCalls(new Set(reactive), mutations.skip);
 
-            this.mutation_edits = [];
+            this.mutationEdits = [];
 
-            const body = this.guard_changes(
+            const body = this.guardChanges(
                 reactive,
                 updates,
-                writes_are_assignments(node, new Set(reactive)),
+                writesAreAssignments(node, new Set(reactive)),
                 inner
             );
 
@@ -1061,7 +1061,7 @@ class Generator {
                 text: `const ${name} = function ${name}(${params}) {${body}}`
             });
 
-            this.wrapped_functions.add(name);
+            this.wrappedFunctions.add(name);
         }
 
         return edits;
@@ -1075,8 +1075,8 @@ class Generator {
      * shown++;       // ->  shown = __node$1.set(shown + 1); __refresh$2();
      * ```
      */
-    private node_writes(block: Script): Edit[] {
-        if (this.node_pairs.size === 0) return [];
+    private nodeWrites(block: Script): Edit[] {
+        if (this.nodePairs.size === 0) return [];
 
         const edits: Edit[] = [];
 
@@ -1092,7 +1092,7 @@ class Generator {
 
                     if (!target) return;
 
-                    const entry = this.node_pairs.get(target);
+                    const entry = this.nodePairs.get(target);
                     if (!entry) return;
 
                     if (!entry.set) {
@@ -1142,9 +1142,9 @@ class Generator {
      * `$node(...)`：声明换成读写对，变量名照旧。
      *
      * 变量还是个普通变量（`{doubled}` 照常读它），刷新函数负责"重算 + 刷依赖它的片段"，
-     * 所以源变量一变就调那个刷新函数（见 `update_calls`）。
+     * 所以源变量一变就调那个刷新函数（见 `updateCalls`）。
      */
-    private node_declarations(block: Script): Edit[] {
+    private nodeDeclarations(block: Script): Edit[] {
         const edits: Edit[] = [];
 
         const nodes = this.root.nodes.filter(
@@ -1170,9 +1170,9 @@ class Generator {
                 );
             }
 
-            // 订阅等元素都建好再挂（见 instance 里的 node_listens）——
+            // 订阅等元素都建好再挂（见 instance 里的 nodeListens）——
             // 这时候调的话，刷新函数里引用的 update$N 还没声明
-            this.node_listens.push({ pair, refresh });
+            this.nodeListens.push({ pair, refresh });
 
             const lines = [
                 ...(current ? [`let ${current};`] : []),
@@ -1182,16 +1182,16 @@ class Generator {
 
             edits.push({ start: node.statement[0], end: node.statement[1], text: lines.join('\n') });
 
-            this.node_pairs.set(node.name, { pair, refresh, set: Boolean(node.set) });
+            this.nodePairs.set(node.name, { pair, refresh, set: Boolean(node.set) });
 
-            const deps = node.get ? collect_reads(parse_inline(node.get)) : new Set<string>();
+            const deps = node.get ? collectReads(parseInline(node.get)) : new Set<string>();
 
-            this.node_deps.set(node.name, deps);
-            this.node_spans.set(node.name, node.statement);
+            this.nodeDeps.set(node.name, deps);
+            this.nodeSpans.set(node.name, node.statement);
 
-            this.pending_refreshes.push({ name: refresh, deps: new Set([node.name]) });
-            this.refresh_assigns.set(refresh, `${node.name} = ${pair}.get();`);
-            this.node_triggers.push({ refresh, deps });
+            this.pendingRefreshes.push({ name: refresh, deps: new Set([node.name]) });
+            this.refreshAssigns.set(refresh, `${node.name} = ${pair}.get();`);
+            this.nodeTriggers.push({ refresh, deps });
         }
 
         return edits;
@@ -1199,34 +1199,34 @@ class Generator {
 
 
     /** 函数体源码；`$bindable` 的写入顺带改成读写对调用 */
-    private body_source(range: [number, number]): string {
+    private bodySource(range: [number, number]): string {
         const [from, to] = range;
 
         // `$bindable` 的写入改写、`$node` 的写入改写、容器的精确调用，都算进去
-        const edits = [...this.bindable_edits, ...this.node_write_edits, ...this.mutation_edits];
+        const edits = [...this.bindableEdits, ...this.nodeWriteEdits, ...this.mutationEdits];
 
         if (edits.length === 0) return this.source.slice(from, to);
 
         const inside = edits.filter((edit) => edit.start >= from && edit.end <= to);
 
-        return apply_edits(this.source.slice(from, to), inside, from);
+        return applyEdits(this.source.slice(from, to), inside, from);
     }
 
-    private wrapper_statements(): string[] {
+    private wrapperStatements(): string[] {
         const output: string[] = [];
 
         for (const wrapper of this.wrappers) {
             const node = wrapper.node;
             const params = node.params.map((param) => this.slice(param.range)).join(', ');
-            const reactive = [...this.reactive_writes(wrapper.writes)];
+            const reactive = [...this.reactiveWrites(wrapper.writes)];
 
             // 直接改容器（`items.push(x)`）的话，用列表自己的精确调用顶掉整块比对。
-            // 这些插入紧跟原调用（见 mutation_calls），所以先登记再取函数体
-            const mutations = this.mutation_calls(node);
+            // 这些插入紧跟原调用（见 mutationCalls），所以先登记再取函数体
+            const mutations = this.mutationCalls(node);
 
-            this.mutation_edits = mutations.edits;
+            this.mutationEdits = mutations.edits;
 
-            const updates = this.update_calls(new Set(reactive), mutations.skip);
+            const updates = this.updateCalls(new Set(reactive), mutations.skip);
 
             const head =
                 node.type === 'ArrowFunctionExpression'
@@ -1236,14 +1236,14 @@ class Generator {
             let body: string;
 
             if (node.body.type === 'BlockStatement') {
-                // 去掉外层花括号，交给 guard_changes 重新包一层
-                const inner = this.body_source(node.body.range).slice(1, -1);
+                // 去掉外层花括号，交给 guardChanges 重新包一层
+                const inner = this.bodySource(node.body.range).slice(1, -1);
 
-                body = `{ ${this.guard_changes(reactive, updates, writes_are_assignments(node, new Set(reactive)), inner)} }`;
+                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, new Set(reactive)), inner)} }`;
             } else {
-                const inner = this.body_source(node.body.range);
+                const inner = this.bodySource(node.body.range);
 
-                body = `{ ${this.guard_changes(reactive, updates, writes_are_assignments(node, new Set(reactive)), inner)} }`;
+                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, new Set(reactive)), inner)} }`;
             }
 
             output.push(`const ${wrapper.name} = ${head} ${body};`);
@@ -1253,10 +1253,10 @@ class Generator {
     }
 
     /** `bind:` 的 setter：赋值 + 刷新受影响的片段（延迟到这里才能算全片段） */
-    private bind_statements(): string[] {
-        return this.pending_binds.map((bind) => {
-            const reactive = [...this.reactive_writes(bind.writes)];
-            const updates = this.update_calls(new Set(reactive));
+    private bindStatements(): string[] {
+        return this.pendingBinds.map((bind) => {
+            const reactive = [...this.reactiveWrites(bind.writes)];
+            const updates = this.updateCalls(new Set(reactive));
 
             return `const ${bind.name} = ${bind.render(updates, reactive)};`;
         });
@@ -1268,7 +1268,7 @@ class Generator {
      * `plain` 为 false（写入里有 `arr.push(v)` 之类）时不加比较 ——
      * 那种写法变量本身不会变，加了就永远不刷新了。
      */
-    private guard_changes(names: string[], updates: string, plain: boolean, inner: string): string {
+    private guardChanges(names: string[], updates: string, plain: boolean, inner: string): string {
         // 函数体源码结尾通常已经有 `;` 或 `}`，别再补一个
         const joiner = /[;}]$/.test(inner.trim()) ? ' ' : '; ';
 
@@ -1276,7 +1276,7 @@ class Generator {
             return updates ? `${inner}${joiner}${updates}` : inner;
         }
 
-        const previous = names.map(() => `__prev$${this.prev_counter++}`);
+        const previous = names.map(() => `__prev$${this.prevCounter++}`);
         const snapshot = previous.map((name, index) => `${name} = ${names[index]}`).join(', ');
         const changed = names.map((name, index) => `${name} !== ${previous[index]}`).join(' || ');
 
@@ -1284,17 +1284,17 @@ class Generator {
     }
 
     /**
-     * 子组件的属性修改触发器：`update.set_props(props, children)`。
+     * 子组件的属性修改触发器：`update.setProps(props, children)`。
      *
      * 父组件 props 变了只调这个，不重新 create —— 重新 create 会把子组件自己的 state 丢掉。
      */
-    private props_statements(): string[] {
+    private propsStatements(): string[] {
         const changed = new Set<string>();
         const assignments: string[] = [];
         // `$bindable` 的 prop 是个绑定对象，不能直接赋给变量，下面单独处理
         const bound = new Set(this.bindables.map((bindable) => bindable.name));
 
-        for (const entry of this.prop_names) {
+        for (const entry of this.propNames) {
             if (bound.has(entry.name)) continue;
 
             assignments.push(`  ${entry.name} = $props[${JSON.stringify(entry.key)}];`);
@@ -1312,7 +1312,7 @@ class Generator {
 
         // 先存旧值，赋完再比 —— 父推过来一样的值就不用刷新了
         const names = [...changed];
-        const previous = names.map(() => `__prev$${this.prev_counter++}`);
+        const previous = names.map(() => `__prev$${this.prevCounter++}`);
         const body: string[] = [];
 
         if (names.length > 0) {
@@ -1321,15 +1321,15 @@ class Generator {
 
         body.push(...assignments);
 
-        const updates = this.update_calls(changed);
+        const updates = this.updateCalls(changed);
 
         // 插槽：引用没变就别重新挂，父组件已经把里面的节点刷新过了
-        const slot_updates = this.update_calls(new Set(['children']));
+        const slotUpdates = this.updateCalls(new Set(['children']));
 
-        if (slot_updates) {
+        if (slotUpdates) {
             body.push('  if ($children !== undefined && $children !== children) {');
             body.push('    children = $children;');
-            body.push(`    ${slot_updates}`);
+            body.push(`    ${slotUpdates}`);
             body.push('  }');
         }
 
@@ -1342,7 +1342,7 @@ class Generator {
         // 既没有 props 也没有插槽，就不用给父组件留这个入口了
         if (body.length === 0) return [];
 
-        return [`${this.root_name}.set_props = ($props, $children) => {`, ...body, '};'];
+        return [`${this.rootName}.setProps = ($props, $children) => {`, ...body, '};'];
     }
 
     /**
@@ -1351,7 +1351,7 @@ class Generator {
      * 普通变量（比如 counter 里的 `draft`）编译期不知道它什么时候变，
      * 交给 `active` 在运行时全量 update —— 否则会多出这些没用的 update。
      */
-    private reactive_writes(writes: Set<string>): Set<string> {
+    private reactiveWrites(writes: Set<string>): Set<string> {
         const states = this.analysis?.states;
         if (!states) return new Set();
 
@@ -1363,7 +1363,7 @@ class Generator {
      *
      * `skip` 里的是已经被精确调用（`list.push(...)`）顶掉的 for —— 再 sync 一遍就白做了。
      */
-    private update_calls(writes: Set<string>, skip?: Set<string>): string {
+    private updateCalls(writes: Set<string>, skip?: Set<string>): string {
         const grouped = new Map<string, number[]>();
 
         for (const slot of this.slots) {
@@ -1385,7 +1385,7 @@ class Generator {
         }
 
         // `$node` 的源变量变了：重算那个节点，再由它刷自己的片段
-        for (const trigger of this.node_triggers) {
+        for (const trigger of this.nodeTriggers) {
             if (intersects(trigger.deps, writes)) calls.push(`${trigger.refresh}();`);
         }
 
@@ -1405,70 +1405,70 @@ class Generator {
     }
 
     /** 给每个元素挂上 scope 类名，原有 class 保留 */
-    private scoped_attributes(
+    private scopedAttributes(
         attributes: Record<string, AttributeValue | true>
     ): Record<string, AttributeValue | true> {
-        if (!this.scope_id) return attributes;
+        if (!this.scopeId) return attributes;
 
-        const scope = this.scope_id;
+        const scope = this.scopeId;
         const existing = attributes['class'];
 
         if (existing === undefined || existing === true) return { ...attributes, class: scope };
         if (typeof existing === 'string') return { ...attributes, class: `${existing} ${scope}` };
         // class 不会是绑定值
-        if (!Array.isArray(existing) && is_binding_value(existing)) {
+        if (!Array.isArray(existing) && isBindingValue(existing)) {
             return { ...attributes, class: scope };
         }
 
         const chunks = (Array.isArray(existing) ? existing : [existing]).filter(
-            (chunk) => !is_binding_value(chunk)
+            (chunk) => !isBindingValue(chunk)
         );
 
         return { ...attributes, class: [...chunks, ` ${scope}`] };
     }
 
     private element(node: Element, owner: string | null, index: number): string | string[] {
-        return is_component_name(node.name)
+        return isComponentName(node.name)
             ? this.component(node, owner, index)
-            : this.plain_element(node);
+            : this.plainElement(node);
     }
 
     /**
      * 子组件：`<Foo count={count}>slot</Foo>`。
      *
-     * 只 `create()` 一次。依赖的 state 变化时推新 props 给它（`set_props`），
+     * 只 `create()` 一次。依赖的 state 变化时推新 props 给它（`setProps`），
      * 不重新 create —— 重建会把子组件自己的 state 一起丢掉。
      */
     private component(node: Element, owner: string | null, index: number): string[] {
         const parts: string[] = [];
         const deps = new Set<string>();
 
-        for (const [key, value] of Object.entries(this.scoped_attributes(node.attributes))) {
-            parts.push(this.component_attribute(key, value));
+        for (const [key, value] of Object.entries(this.scopedAttributes(node.attributes))) {
+            parts.push(this.componentAttribute(key, value));
 
-            // 绑定值走的是 binding_attribute，但它 getter 读的变量同样是依赖：
+            // 绑定值走的是 bindingAttribute，但它 getter 读的变量同样是依赖：
             // 那些变量变了，父组件要把新的绑定推给子组件
-            if (value !== true && !Array.isArray(value) && is_binding_value(value)) {
+            if (value !== true && !Array.isArray(value) && isBindingValue(value)) {
                 const getter = value.get ?? value.expression;
-                if (getter) add_all(deps, collect_reads(getter.content));
+                if (getter) addAll(deps, collectReads(getter.content));
 
                 continue;
             }
 
-            for (const chunk of chunks_of(value)) {
-                if (typeof chunk !== 'string') add_all(deps, collect_reads(chunk.content));
+            for (const chunk of chunksOf(value)) {
+                if (typeof chunk !== 'string') addAll(deps, collectReads(chunk.content));
             }
         }
 
-        const props_code = `{${parts.join(', ')}}`;
+        const propsCode = `{${parts.join(', ')}}`;
 
         // 插槽只建一次；里面的 updater 记下来，父组件推 props 之前先刷它们
-        let slot_code = 'null';
-        let slot_updaters: string[] = [];
+        let slotCode = 'null';
+        let slotUpdaters: string[] = [];
 
         if (node.children.length > 0) {
-            const saved = this.inside_slot;
-            this.inside_slot = true;
+            const saved = this.insideSlot;
+            this.insideSlot = true;
 
             let items: string[] = [];
             let statements: string[] = [];
@@ -1476,31 +1476,31 @@ class Generator {
             try {
                 [items, statements] = this.capture(() => this.children(node.children, null));
             } finally {
-                this.inside_slot = saved;
+                this.insideSlot = saved;
             }
 
             // 静态文本是字符串字面量，剩下的是可以刷新的 updater
-            slot_updaters = items.filter((item) => !item.startsWith('"'));
+            slotUpdaters = items.filter((item) => !item.startsWith('"'));
             this.statements.push(...statements);
 
-            const slot_name = `slot$${this.counter++}`;
-            this.statements.push(`const ${slot_name} = () => [${items.join(', ')}];`);
+            const slotName = `slot$${this.counter++}`;
+            this.statements.push(`const ${slotName} = () => [${items.join(', ')}];`);
 
-            slot_code = slot_name;
+            slotCode = slotName;
         }
 
         const name = `update$${this.counter++}`;
-        this.statements.push(`const ${name} = ${node.name}.create(${props_code}, ${slot_code});`);
+        this.statements.push(`const ${name} = ${node.name}.create(${propsCode}, ${slotCode});`);
 
         // 没有依赖（或不在能注册片段的上下文里）：建一次就完事
         if (deps.size === 0 || !owner) return [name];
 
         // 有依赖：属性更新器占 children 的下一个编号，props 变了只推 props，不重建
         const updater = `props$${this.counter++}`;
-        const refresh = slot_updaters.map((item) => `${item}();`).join(' ');
+        const refresh = slotUpdaters.map((item) => `${item}();`).join(' ');
 
         this.statements.push(
-            `const ${updater} = () => { ${refresh}${name}.set_props(${props_code}, ${slot_code}); };`,
+            `const ${updater} = () => { ${refresh}${name}.setProps(${propsCode}, ${slotCode}); };`,
             `${updater}.props = true;`
         );
 
@@ -1513,7 +1513,7 @@ class Generator {
      * 组件属性：按**值**传（不是 getter）。
      * `bind:` / `bindactive:` 例外，传 `{ get, set }` 给子组件。
      */
-    private component_attribute(key: string, value: AttributeValue | true): string {
+    private componentAttribute(key: string, value: AttributeValue | true): string {
         const name = JSON.stringify(key);
 
         if (key.startsWith('bind:')) {
@@ -1526,7 +1526,7 @@ class Generator {
         if (value === true) return `${name}: true`;
         if (typeof value === 'string') return `${name}: ${JSON.stringify(value)}`;
 
-        const chunks = chunks_of(value);
+        const chunks = chunksOf(value);
 
         // 单个表达式直接传值，混合的用模板字符串
         if (chunks.length === 1 && typeof chunks[0] !== 'string') {
@@ -1534,14 +1534,14 @@ class Generator {
         }
 
         const parts = chunks.map((chunk) =>
-            typeof chunk === 'string' ? escape_template(chunk) : '${' + chunk.raw + '}'
+            typeof chunk === 'string' ? escapeTemplate(chunk) : '${' + chunk.raw + '}'
         );
 
         return `${name}: \`${parts.join('')}\``;
     }
 
     /** 注册一个动态片段。`owner` 为 null 时（组件属性、for 块内）不用注册 */
-    private register_slot(owner: string | null, index: number, deps: Set<string>): void {
+    private registerSlot(owner: string | null, index: number, deps: Set<string>): void {
         if (owner) this.slots.push({ update: owner, index, deps });
     }
 
@@ -1552,7 +1552,7 @@ class Generator {
      *   只有 `<script onmount>` 能看见它
      * - `bind:this={(el) => ...}` —— 不声明变量，元素挂上时把它当参数传进去跑
      */
-    private this_attribute(binding: BindingValue): { code: string; slot: boolean } {
+    private thisAttribute(binding: BindingValue): { code: string; slot: boolean } {
         const expression = binding.expression;
 
         if (!expression) return { code: '"this": undefined', slot: false };
@@ -1568,7 +1568,7 @@ class Generator {
             }
 
             // 否则由 bind:this 自己声明这个变量（script 里已经声明过就只赋值）
-            if (!this.script_names().has(node.name)) this.this_names.add(node.name);
+            if (!this.scriptNames().has(node.name)) this.thisNames.add(node.name);
 
             return { code: `"this": ($el) => { ${node.name} = $el; }`, slot: false };
         }
@@ -1578,7 +1578,7 @@ class Generator {
     }
 
     /** `<script>` / `<script module>` 里已经声明过的名字 */
-    private script_names(): Set<string> {
+    private scriptNames(): Set<string> {
         if (this.declared) return this.declared;
 
         const names = new Set<string>();
@@ -1617,11 +1617,11 @@ class Generator {
      *
      * 两种形式可以混着写：`{count, active}` 就是"变量 + 主动 getter"。
      */
-    private binding_attribute(
+    private bindingAttribute(
         name: string,
         binding: BindingValue,
         owner: string | null,
-        slot_index: number
+        slotIndex: number
     ): { code: string; slot: boolean } {
         const get = binding.get ?? binding.expression;
 
@@ -1637,62 +1637,62 @@ class Generator {
             const parts: string[] = [];
 
             if (binding.set) {
-                const written = this.setter_from(binding.set);
-                const setter_name = `__bind$${this.counter++}`;
+                const written = this.setterFrom(binding.set);
+                const setterName = `__bind$${this.counter++}`;
 
                 // 没有 getter，所以 setter 的"最终值"就是它拿到的那个值；
                 // 刷新依赖 set 自己写了哪些 state，其余刷新全靠 listener 那次 update
-                this.pending_binds.push({
-                    name: setter_name,
+                this.pendingBinds.push({
+                    name: setterName,
                     render: (updates, names) =>
-                        `(${written.param}) => { ${this.guard_changes(names, updates, written.plain, written.body)} return ${written.param}; }`,
+                        `(${written.param}) => { ${this.guardChanges(names, updates, written.plain, written.body)} return ${written.param}; }`,
                     writes: written.writes
                 });
 
-                parts.push(`set: ${setter_name}`);
+                parts.push(`set: ${setterName}`);
             } else {
                 parts.push('set: ($value) => $value');
             }
 
-            parts.push(`listen: ${this.listen_source(binding.listen.content)}`);
+            parts.push(`listen: ${this.listenSource(binding.listen.content)}`);
             if (binding.active) parts.push('active: true');
 
             return { code: `${name}: { ${parts.join(', ')} }`, slot: false };
         }
 
-        const getter = this.getter_source(get.content);
+        const getter = this.getterSource(get.content);
         const setter = `__bind$${this.counter++}`;
         const written = binding.set
-            ? this.setter_from(binding.set)
+            ? this.setterFrom(binding.set)
             : {
                   param: '$value',
                   body: `${get.raw} = $value; `,
-                  writes: collect_reads(get.content),
+                  writes: collectReads(get.content),
                   // 简写形式生成的是一句赋值；`bind:value={obj.x}` 这种不是，比较不出来
-                  plain: is_identifier(get.raw.trim())
+                  plain: isIdentifier(get.raw.trim())
               };
 
-        this.pending_binds.push({
+        this.pendingBinds.push({
             name: setter,
             // setter 把最终值返回：子组件 `x = binding.set(v)` 拿到的就是父组件的值
             render: (updates, names) =>
-                `(${written.param}) => { ${this.guard_changes(names, updates, written.plain, written.body)} return (${getter})(); }`,
+                `(${written.param}) => { ${this.guardChanges(names, updates, written.plain, written.body)} return (${getter})(); }`,
             writes: written.writes
         });
 
         const parts = ['external: true', `get: ${getter}`, `set: ${setter}`];
 
-        if (binding.listen) parts.push(`listen: ${this.listen_source(binding.listen.content)}`);
+        if (binding.listen) parts.push(`listen: ${this.listenSource(binding.listen.content)}`);
         if (binding.active) parts.push('active: true');
 
         // get 读了哪些变量 -> 那些变量变化时精确重跑这个 getter
-        this.register_slot(owner, slot_index, collect_reads(get.content));
+        this.registerSlot(owner, slotIndex, collectReads(get.content));
 
         return { code: `${name}: { ${parts.join(', ')} }`, slot: true };
     }
 
     /** 用户自己写的 `set`：参数名和主体都搬进产物，写过的变量拿去算 update 调用 */
-    private setter_from(set: Expression): {
+    private setterFrom(set: Expression): {
         param: string;
         body: string;
         writes: Set<string>;
@@ -1700,20 +1700,20 @@ class Generator {
     } {
         const node = set.content;
 
-        if (!is_function_like(node)) {
+        if (!isFunctionLike(node)) {
             // 不是函数就当成一个可调用的 setter，写没写到响应式变量看不出来
             return { param: '$value', body: `(${set.raw})($value); `, writes: new Set(), plain: false };
         }
 
-        const { param, body } = this.setter_source(node);
-        const writes = collect_writes(node);
+        const { param, body } = this.setterSource(node);
+        const writes = collectWrites(node);
 
-        return { param, body, writes, plain: writes_are_assignments(node, writes) };
+        return { param, body, writes, plain: writesAreAssignments(node, writes) };
     }
 
     /** getter：`() => target.value` 这样的箭头函数，或者干脆就是一个表达式 */
-    private getter_source(get: TSESTree.Node): string {
-        if (!is_function_like(get)) return `() => (${this.slice(get.range)})`;
+    private getterSource(get: TSESTree.Node): string {
+        if (!isFunctionLike(get)) return `() => (${this.slice(get.range)})`;
 
         const body = get.body;
 
@@ -1723,7 +1723,7 @@ class Generator {
     }
 
     /** setter：参数名用用户写的那个，主体搬进产物 */
-    private setter_source(set: FunctionLike): { param: string; body: string } {
+    private setterSource(set: FunctionLike): { param: string; body: string } {
         const first = set.params[0];
         const param = first?.type === 'Identifier' ? first.name : '$value';
         const body = set.body;
@@ -1743,7 +1743,7 @@ class Generator {
      *   没有 `addEventListener` 就用 `on`
      * - 谓词（guard）可省：省了就是恒真，事件来了直接 update
      */
-    private listen_source(listen: TSESTree.Node): string {
+    private listenSource(listen: TSESTree.Node): string {
         const call = listen.type === 'CallExpression' ? listen : null;
 
         if (!call || call.callee.type !== 'Identifier' || call.callee.name !== 'listen') {
@@ -1753,20 +1753,20 @@ class Generator {
         const [bus, event, guard] = call.arguments;
         if (!bus || !event) return this.slice(listen.range);
 
-        const bus_text = this.slice(bus.range);
-        const event_text = this.slice(event.range);
+        const busText = this.slice(bus.range);
+        const eventText = this.slice(event.range);
 
-        let index = this.listen_groups.findIndex((item) => item.bus === bus_text && item.event === event_text);
+        let index = this.listenGroups.findIndex((item) => item.bus === busText && item.event === eventText);
 
         if (index < 0) {
-            this.listen_groups.push({ bus: bus_text, event: event_text, slots: [] });
-            index = this.listen_groups.length - 1;
+            this.listenGroups.push({ bus: busText, event: eventText, slots: [] });
+            index = this.listenGroups.length - 1;
         }
 
-        const group = this.listen_groups[index];
+        const group = this.listenGroups[index];
         const slot = group.slots.length;
 
-        group.slots.push(this.guard_chain(guard));
+        group.slots.push(this.guardChain(guard));
 
         // 不在这儿挂监听：把 update 存进槽位，等所有元素建好由组里那一个 handler 统一处理
         return `(update) => { __listen$${index}[${slot}] = update; }`;
@@ -1778,7 +1778,7 @@ class Generator {
      * `(ev) => A && B` 拆成 `['A', 'B']`——公共前缀（A）就能在同组里共用一个 `if`。
      * 拆不开的（块体、不是函数字面量）整条当一个条件，用 `$event` 调它。
      */
-    private guard_chain(guard: TSESTree.Node | undefined): { chain: string[]; params: string[] } {
+    private guardChain(guard: TSESTree.Node | undefined): { chain: string[]; params: string[] } {
         if (!guard) return { chain: [], params: [] };
 
         if (guard.type === 'ArrowFunctionExpression' || guard.type === 'FunctionExpression') {
@@ -1787,7 +1787,7 @@ class Generator {
 
             // 表达式体的 && 链能拆；块体没法拆，整条当谓词
             if (guard.body.type !== 'BlockStatement') {
-                return { chain: split_and(guard.body, this.source), params: name ? [name] : [] };
+                return { chain: splitAnd(guard.body, this.source), params: name ? [name] : [] };
             }
         }
 
@@ -1795,13 +1795,13 @@ class Generator {
     }
 
     /** 槽位数组的声明：得在元素创建之前（元素创建时会往里填 update） */
-    private listen_slot_declarations(): string[] {
-        return this.listen_groups.map((_group, index) => `const __listen$${index} = [];`);
+    private listenSlotDeclarations(): string[] {
+        return this.listenGroups.map((_group, index) => `const __listen$${index} = [];`);
     }
 
     /** 每组挂一次监听，handler 里是合并好的 if 树 */
-    private listen_registrations(): string[] {
-        return this.listen_groups.map((group, index) => {
+    private listenRegistrations(): string[] {
+        return this.listenGroups.map((group, index) => {
             const slots = `__listen$${index}`;
 
             // 各槽位的谓词可能给事件参数起了不同的名字，这里统一绑到 $event 上
@@ -1810,7 +1810,7 @@ class Generator {
             );
             const bindings = names.map((name) => `const ${name} = $event;`).join(' ');
 
-            const body = emit_branch(build_branch(group.slots), slots);
+            const body = emitBranch(buildBranch(group.slots), slots);
             const handler = `($event) => { ${bindings} ${body} }`;
 
             return (
@@ -1821,16 +1821,16 @@ class Generator {
         });
     }
 
-    private plain_element(node: Element): string {
+    private plainElement(node: Element): string {
         const name = `update$${this.counter++}`;
-        const items = this.children(node.children, this.inside_fragment ? null : name);
+        const items = this.children(node.children, this.insideFragment ? null : name);
 
         const props: string[] = [];
-        let prop_index = 0;
+        let propIndex = 0;
 
-        for (const [key, value] of Object.entries(this.scoped_attributes(node.attributes))) {
-            const attribute = this.attribute(key, value, name, items.length + prop_index);
-            if (attribute.slot) prop_index += 1;
+        for (const [key, value] of Object.entries(this.scopedAttributes(node.attributes))) {
+            const attribute = this.attribute(key, value, name, items.length + propIndex);
+            if (attribute.slot) propIndex += 1;
             props.push(attribute.code);
         }
 
@@ -1849,29 +1849,29 @@ class Generator {
         key: string,
         value: AttributeValue | true,
         owner: string | null,
-        slot_index: number,
+        slotIndex: number,
         /** 写进产物里的键名。组件属性会去掉 `bind:` 前缀——前缀只有 creEle 才认 */
-        output_key = key
+        outputKey = key
     ): { code: string; slot: boolean } {
-        const name = JSON.stringify(output_key);
+        const name = JSON.stringify(outputKey);
 
         if (value === true) return { code: `${name}: true`, slot: false };
         if (typeof value === 'string') return { code: `${name}: ${JSON.stringify(value)}`, slot: false };
 
-        const chunks = chunks_of(value);
+        const chunks = chunksOf(value);
         const expressions = chunks.filter((chunk): chunk is Expression => typeof chunk !== 'string');
 
         if (key === 'bind:this') {
-            return this.this_attribute(value as BindingValue);
+            return this.thisAttribute(value as BindingValue);
         }
 
         if (key.startsWith('bind:')) {
-            return this.binding_attribute(name, value as BindingValue, owner, slot_index);
+            return this.bindingAttribute(name, value as BindingValue, owner, slotIndex);
         }
 
         // 普通属性也可以写绑定值（`title={ get: ..., listen: ... }`）：单向，不往回写
-        if (!Array.isArray(value) && is_binding_value(value)) {
-            return { code: `${name}: ${this.bound_source(value)}`, slot: false };
+        if (!Array.isArray(value) && isBindingValue(value)) {
+            return { code: `${name}: ${this.boundSource(value)}`, slot: false };
         }
 
         if (key.startsWith('on')) {
@@ -1881,13 +1881,13 @@ class Generator {
         }
 
         const parts = chunks.map((chunk) =>
-            typeof chunk === 'string' ? escape_template(chunk) : '${' + chunk.raw + '}'
+            typeof chunk === 'string' ? escapeTemplate(chunk) : '${' + chunk.raw + '}'
         );
 
         const deps = new Set<string>();
-        for (const expression of expressions) add_all(deps, collect_reads(expression.content));
+        for (const expression of expressions) addAll(deps, collectReads(expression.content));
 
-        if (owner) this.slots.push({ update: owner, index: slot_index, deps });
+        if (owner) this.slots.push({ update: owner, index: slotIndex, deps });
 
         return { code: `${name}: () => \`${parts.join('')}\``, slot: Boolean(owner) };
     }
@@ -1900,12 +1900,12 @@ class Generator {
             const info = this.analysis?.functions.get(node.name);
 
             if (info) {
-                // 写了 state 的函数会自带刷新（见 function_wrappers），直接用它。
-                // 这里按写入判断而不是查 wrapped_functions —— 模板先于 script() 处理，
+                // 写了 state 的函数会自带刷新（见 functionWrappers），直接用它。
+                // 这里按写入判断而不是查 wrappedFunctions —— 模板先于 script() 处理，
                 // 那时候那张表还是空的
-                if ([...this.reactive_writes(info.writes)].length > 0) return node.name;
+                if ([...this.reactiveWrites(info.writes)].length > 0) return node.name;
 
-                const name = `${node.name}_$${++this.wrapper_counter}`;
+                const name = `${node.name}_$${++this.wrapperCounter}`;
                 this.wrappers.push({ name, node: info.node, writes: info.writes });
                 return name;
             }
@@ -1914,7 +1914,7 @@ class Generator {
         if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
             const name = `__handler$${this.counter++}`;
 
-            this.wrappers.push({ name, node, writes: collect_writes(node) });
+            this.wrappers.push({ name, node, writes: collectWrites(node) });
 
             return name;
         }
@@ -1944,19 +1944,19 @@ class Generator {
      * listen 决定什么时候重跑——编译期不需要知道依赖是什么，所以跨模块的 store
      * 也能驱动它。跟 `bind:` 的区别是不往回写。
      */
-    private bound_source(binding: BindingValue): string {
+    private boundSource(binding: BindingValue): string {
         const getter = binding.get ?? binding.expression;
-        const render = getter ? this.getter_source(getter.content) : 'null';
-        const listen = binding.listen ? this.listen_source(binding.listen.content) : null;
+        const render = getter ? this.getterSource(getter.content) : 'null';
+        const listen = binding.listen ? this.listenSource(binding.listen.content) : null;
 
-        this.needs_bound = true;
+        this.needsBound = true;
 
         return `creBound(${render}${listen ? `, ${listen}` : ''})`;
     }
 
     private child(node: TemplateNode, index: number, owner: string | null): string | string[] | null {
         // 模板插值里的绑定值：`{ listen: (update) => ... }`
-        if (!('type' in node)) return this.bound_source(node as BindingValue);
+        if (!('type' in node)) return this.boundSource(node as BindingValue);
 
         switch (node.type) {
             case 'comment':
@@ -1968,31 +1968,31 @@ class Generator {
             case 'expression':
                 // 插槽里的表达式要插到子组件里去，没有父元素能挂它的片段，
                 // 所以给它一个自己的文本节点，父组件拿到返回值就能刷新
-                if (this.inside_slot) {
+                if (this.insideSlot) {
                     const name = `update$${this.counter++}`;
 
-                    this.needs_text = true;
+                    this.needsText = true;
                     this.statements.push(`const ${name} = creText(() => (${node.raw}));`);
 
                     return name;
                 }
 
-                if (owner) this.slots.push({ update: owner, index, deps: collect_reads(node.content) });
+                if (owner) this.slots.push({ update: owner, index, deps: collectReads(node.content) });
                 return `() => (${node.raw})`;
 
             case 'element':
                 return this.element(node, owner, index);
 
             case 'IfBlock':
-                return this.if_block(node, index, owner);
+                return this.ifBlock(node, index, owner);
 
             case 'ForBlock':
-                return this.for_block(node, index, owner);
+                return this.forBlock(node, index, owner);
         }
     }
 
-    private if_block(node: IfBlock, index: number, owner: string | null): string {
-        const deps = template_reads(node);
+    private ifBlock(node: IfBlock, index: number, owner: string | null): string {
+        const deps = templateReads(node);
 
         // 分支内容由 if 片段自己返回，里面的表达式不单独注册片段
         const branches: Array<{ test: string | null; items: string[] }> = [
@@ -2026,8 +2026,8 @@ class Generator {
      * 只要重新绑一次循环变量再刷那些片段，DOM 不动。写了 `with key = ...` 就按 key
      * 匹配，没写就按位置 —— 两种都不重建已有的项。
      */
-    private for_block(node: ForBlock, index: number, owner: string | null): string {
-        const deps = template_reads(node);
+    private forBlock(node: ForBlock, index: number, owner: string | null): string {
+        const deps = templateReads(node);
         const iter = `__iter$${this.counter++}`;
         const row = `__row$${this.counter++}`;
         const right = this.slice(node.content.right.range);
@@ -2042,7 +2042,7 @@ class Generator {
         const binding = `let ${pattern} = ${iter};`;
 
         // 块内的片段注册到这一项的 updater 上（以前传 null，等于每次重建）
-        const [inner, inner_statements] = this.capture(() => this.children(node.children, row));
+        const [inner, innerStatements] = this.capture(() => this.children(node.children, row));
 
         let fallback = 'null';
 
@@ -2055,10 +2055,10 @@ class Generator {
         }
 
         // 只有 of 后面直接是这个变量（或它的 entries()）才认：改它就能精确定位
-        const source = source_variable_of(node.content.right);
+        const source = sourceVariableOf(node.content.right);
 
         // 源先取一次：后面 sync、订阅都用它，避免把表达式求值两遍
-        const source_name = `__src$${this.counter++}`;
+        const sourceName = `__src$${this.counter++}`;
         const render = `render$${this.counter++}`;
         const list = `__list$${this.counter++}`;
 
@@ -2074,12 +2074,12 @@ class Generator {
         const entry =
             node.key && names.length === 2 ? `(${names.join(', ')}) => [${names.join(', ')}]` : 'null';
 
-        this.needs_list = true;
+        this.needsList = true;
 
         this.statements.push(
             `const ${render} = (${iter}) => {`,
             `  ${binding}`,
-            ...inner_statements.map((line) => `  ${line}`),
+            ...innerStatements.map((line) => `  ${line}`),
             `  const ${row} = creFragment([${inner.join(', ')}]);`,
             `  return {`,
             // 拿 fragment 里的真实节点：fragment 本身一插入就摊平了，不能拿它当节点
@@ -2090,12 +2090,12 @@ class Generator {
             '};',
             // 只给订阅判断用（有没有 subscribe）。source 仍写 `${right}`：
             // 每次重新求值，`entries()` 这种一次性迭代器才不会被耗尽
-            `const ${source_name} = ${right};`,
+            `const ${sourceName} = ${right};`,
             `var ${list} = creList({ render: ${render}, key: ${key}, entry: ${entry}, indexed: ${node.content.right.type === 'Identifier' ? 'false' : 'true'}, fallback: ${fallback}, source: () => ${right} });`,
             `${list}.sync(${right});`,
             // 响应式容器：订阅它的改动。编译期不一定知道谁是响应式（可能是 import 进来的），
             // 所以运行时看有没有 subscribe——连"编译期看不见的改动"也能精确更新
-            `if (typeof ${source_name}?.subscribe === 'function') ${source_name}.subscribe((change) => ${list}.apply(change));`
+            `if (typeof ${sourceName}?.subscribe === 'function') ${sourceName}.subscribe((change) => ${list}.apply(change));`
         );
 
         // 依赖变了由父级刷新这一段 -> creList 重新取一次再比对（不是重建）
@@ -2106,17 +2106,17 @@ class Generator {
         if (source && this.analysis?.states.has(source)) {
             // 同一个容器可能喂给好几个 for（`items` 和 `items.entries()`），
             // 改动要同时更新它们，所以这里是一对多
-            const known = this.for_sources.get(source);
+            const known = this.forSources.get(source);
 
             if (known) known.push(list);
-            else this.for_sources.set(source, [list]);
+            else this.forSources.set(source, [list]);
 
-            if (node.key) this.for_keyed.add(list);
+            if (node.key) this.forKeyed.add(list);
 
-            // 项带下标的（`entries()`）跟普通数组不一样，见 for_shifted
-            if (node.content.right.type !== 'Identifier') this.for_shifted.add(list);
+            // 项带下标的（`entries()`）跟普通数组不一样，见 forShifted
+            if (node.content.right.type !== 'Identifier') this.forShifted.add(list);
 
-            if (owner) this.for_slots.set(list, { update: owner, index });
+            if (owner) this.forSlots.set(list, { update: owner, index });
         }
 
         return list;
@@ -2130,9 +2130,9 @@ class Generator {
      */
     /**
      * @returns `edits` 是"紧跟在原调用之后"的插入（不是追加到函数末尾——
-     * 参数里可能引用了会被后面语句改掉的变量，`next_id` 就是个例子）
+     * 参数里可能引用了会被后面语句改掉的变量，`nextId` 就是个例子）
      */
-    private mutation_calls(node: TSESTree.Node): { edits: Edit[]; skip: Set<string> } {
+    private mutationCalls(node: TSESTree.Node): { edits: Edit[]; skip: Set<string> } {
         const edits: Edit[] = [];
         const skip = new Set<string>();
 
@@ -2142,7 +2142,7 @@ class Generator {
 
             edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}?.${call};` });
 
-            const slot = this.for_slots.get(list);
+            const slot = this.forSlots.get(list);
             if (slot) skip.add(`${slot.update}#${slot.index}`);
         };
 
@@ -2151,8 +2151,8 @@ class Generator {
          *
          * 响应式容器自己会通知 `for`，这里返回空数组，别重复。
          */
-        const lists_of = (name: string): string[] =>
-            this.reactive_containers.has(name) ? [] : (this.for_sources.get(name) ?? []);
+        const listsOf = (name: string): string[] =>
+            this.reactiveContainers.has(name) ? [] : (this.forSources.get(name) ?? []);
 
         /**
          * 值表达式在产物里会用到两次（原调用一次、精确调用一次）—— 不是简单表达式就先
@@ -2219,10 +2219,10 @@ class Generator {
                     }
 
                     for (const target of targets) {
-                        for (const list of lists_of(target.name)) {
+                        for (const list of listsOf(target.name)) {
                             const value = reuse(target.value, target.at, parent);
 
-                            precise(list, `set_at(${target.index}, ${value})`, child, parent);
+                            precise(list, `setAt(${target.index}, ${value})`, child, parent);
                         }
                     }
 
@@ -2237,7 +2237,7 @@ class Generator {
                 const method = callee.property.name;
                 if (callee.object.type !== 'Identifier') return;
 
-                const lists = lists_of(callee.object.name);
+                const lists = listsOf(callee.object.name);
                 if (lists.length === 0) return;
 
                 const args = child.arguments
@@ -2249,13 +2249,13 @@ class Generator {
                     // Map / Set：按一个键就能定位到某一项
                     if (KEYED_MUTATIONS.has(method)) {
                         // 没有 `with key = ...` 就说不清是哪一项，退回整块比对
-                        if (!this.for_keyed.has(list)) continue;
+                        if (!this.forKeyed.has(list)) continue;
 
                         if (method === 'clear') precise(list, 'clear()', child, parent);
-                        else if (method === 'delete') precise(list, `remove_key(${args})`, child, parent);
+                        else if (method === 'delete') precise(list, `removeKey(${args})`, child, parent);
                         // `map.set(k, v)` 是键 + 值；`set.add(v)` 里值本身就是键
-                        else if (method === 'add') precise(list, `set_key(${args}, ${args})`, child, parent);
-                        else precise(list, `set_key(${args})`, child, parent);
+                        else if (method === 'add') precise(list, `setKey(${args}, ${args})`, child, parent);
+                        else precise(list, `setKey(${args})`, child, parent);
 
                         continue;
                     }
@@ -2264,7 +2264,7 @@ class Generator {
 
                     // `{#for [i, x] of items.entries()}`：项是 [下标, 值]。追加 / 删末尾不动
                     // 前面那些项的下标，所以这两个仍然精确；别的会让所有下标变，退回整块比对
-                    if (this.for_shifted.has(list) && method !== 'push' && method !== 'pop') continue;
+                    if (this.forShifted.has(list) && method !== 'push' && method !== 'pop') continue;
 
                     // 紧跟在那句调用之后：此刻参数还是原值
                     precise(list, `${method}(${args})`, child, parent);
@@ -2278,17 +2278,17 @@ class Generator {
     /** 临时把生成语句收集到别处，用于 render 函数体 */
     private capture<T>(run: () => T): [T, string[]] {
         const saved = this.statements;
-        const saved_fragment = this.inside_fragment;
+        const savedFragment = this.insideFragment;
         const inner: string[] = [];
 
         this.statements = inner;
-        this.inside_fragment = true;
+        this.insideFragment = true;
 
         try {
             return [run(), inner];
         } finally {
             this.statements = saved;
-            this.inside_fragment = saved_fragment;
+            this.insideFragment = savedFragment;
         }
     }
 
@@ -2301,7 +2301,7 @@ class Generator {
  * 把几个 script 的分析结果并起来（`<script>` 和 `<script onmount>`）。
  * 区间都是绝对偏移，所以并一份用不会串；同名保留先出现的那个。
  */
-function merge_analyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
+function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
     if (list.length === 0) return null;
 
     const merged: ScriptAnalysis = { states: new Map(), functions: new Map() };
@@ -2322,16 +2322,16 @@ function merge_analyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
 /** 把 Root 变成可执行的 JS（以及 CSS） */
 export function generate(root: Root, source: string, options: CompileOptions = {}): CompileResult {
     // onmount 里也能写 $state / 事件处理函数，所以一起分析
-    const analysis = merge_analyses(
+    const analysis = mergeAnalyses(
         [root.script, root.onmount]
             .filter((block): block is Script => block != null)
-            .map((block) => analyze_script(block.content, source))
+            .map((block) => analyzeScript(block.content, source))
     );
 
     // `<style global>` 和没有样式的组件都不需要 scope 类名
-    const scope_id =
-        root.stylesheet && !is_global(root.stylesheet)
-            ? create_scope_id(source, options.filename)
+    const scopeId =
+        root.stylesheet && !isGlobal(root.stylesheet)
+            ? createScopeId(source, options.filename)
             : null;
 
     return new Generator(
@@ -2339,7 +2339,7 @@ export function generate(root: Root, source: string, options: CompileOptions = {
         root,
         options.runtimeModule ?? '@graints/runtime',
         analysis,
-        scope_id,
+        scopeId,
         options.filename ?? 'component.grain',
         options.dev ?? false
     ).run();

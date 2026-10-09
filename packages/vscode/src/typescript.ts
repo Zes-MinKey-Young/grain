@@ -4,11 +4,11 @@ import type * as TS from 'typescript';
 
 import { log } from './log.js';
 import {
-    is_runtime_file,
+    isRuntimeFile,
     RUNTIME_DECL_FILE,
     RUNTIME_MODULE_TEXT,
     RUNTIME_TYPES,
-    runtime_package_json
+    runtimePackageJson
 } from './runtime-types.js';
 
 import type { Script } from '../../compiler/index.js';
@@ -17,7 +17,7 @@ type TypeScript = typeof TS;
 
 let typescript: TypeScript | null = null;
 
-function get_ts(): TypeScript {
+function getTs(): TypeScript {
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     return (typescript ??= require('typescript') as TypeScript);
 }
@@ -192,20 +192,20 @@ export default __grain_component;`;
  * 在语言服务问起一个**还没在编辑器里打开过**的文件时临时补上 ——
  * tsconfig 的 `paths` 指向的文件经常是没打开过的，不补就解析不到。
  */
-let virtual_provider: ((grain_file: string) => string | null | undefined) | null = null;
+let virtualProvider: ((grainFile: string) => string | null | undefined) | null = null;
 
-export function set_virtual_provider(provider: typeof virtual_provider): void {
-    virtual_provider = provider;
+export function setVirtualProvider(provider: typeof virtualProvider): void {
+    virtualProvider = provider;
 }
 
 let options: TS.CompilerOptions | null = null;
 /** 当前生效的 tsconfig 路径（按它判断要不要重建语言服务） */
-let tsconfig_path: string | null = null;
+let tsconfigPath: string | null = null;
 /** tsconfig.json 里的编译选项 */
 let overrides: TS.CompilerOptions | null = null;
 
-function get_options(): TS.CompilerOptions {
-    const ts = get_ts();
+function getOptions(): TS.CompilerOptions {
+    const ts = getTs();
 
     if (options) return options;
 
@@ -233,8 +233,8 @@ function get_options(): TS.CompilerOptions {
  * 读 tsconfig.json（会顺着 `extends` 找下去），拿来当编译选项。
  * 这样项目里配的 `lib` / `target` / `strict` 都能生效。
  */
-function read_tsconfig(path: string): TS.CompilerOptions | null {
-    const ts = get_ts();
+function readTsconfig(path: string): TS.CompilerOptions | null {
+    const ts = getTs();
 
     const host: TS.ParseConfigFileHost = {
         useCaseSensitiveFileNames: ts.sys.useCaseSensitiveFileNames,
@@ -255,19 +255,19 @@ function read_tsconfig(path: string): TS.CompilerOptions | null {
  * 按**路径**比较，所以同一个目录下反复分析不会重建语言服务；
  * 换到别的目录（配置不同）才重建。传 null 表示没有 tsconfig，用插件自带的一套。
  */
-export function use_tsconfig(path: string | null): void {
-    if (path === tsconfig_path) return;
+export function useTsconfig(path: string | null): void {
+    if (path === tsconfigPath) return;
 
-    tsconfig_path = path;
-    overrides = path ? read_tsconfig(path) : null;
+    tsconfigPath = path;
+    overrides = path ? readTsconfig(path) : null;
     options = null;
 
-    typescript_service.reset();
+    typescriptService.reset();
 }
 
 /** tsconfig 改过了，下次重新读一遍 */
-export function forget_tsconfig(): void {
-    tsconfig_path = null;
+export function forgetTsconfig(): void {
+    tsconfigPath = null;
 }
 
 /**
@@ -290,7 +290,7 @@ export interface VirtualExpression {
     raw: string;
 }
 
-export function build_virtual(
+export function buildVirtual(
     source: string,
     scripts: VirtualScript[],
     expressions: VirtualExpression[],
@@ -341,7 +341,7 @@ function normalize(file: string): string {
     return file.replace(/\\/g, '/').replace(/^([A-Za-z]):/, (_match, drive) => `${drive.toLowerCase()}:`);
 }
 
-export function virtual_name(filename: string): string {
+export function virtualName(filename: string): string {
     return normalize(`${filename}.ts`);
 }
 
@@ -352,7 +352,7 @@ export function virtual_name(filename: string): string {
  * （我们喂给它的虚拟文件），那个文件在磁盘上并不存在；
  * 偏移跟原文件一一对应，所以去掉 `.ts` 就能直接跳到真正的 `.grain`。
  */
-export function real_name(file: string): string {
+export function realName(file: string): string {
     return file.endsWith('.grain.ts') ? file.slice(0, -'.ts'.length) : file;
 }
 
@@ -446,18 +446,18 @@ class TypeScriptService {
      * tsconfig 里 `paths` 指向的文件基本都是这种情况，不补就直接
      * "Cannot find module"。
      */
-    private lazy_virtual(file: string): string | undefined {
-        if (!file.endsWith('.grain.ts') || this.contents.has(file) || !virtual_provider) return undefined;
+    private lazyVirtual(file: string): string | undefined {
+        if (!file.endsWith('.grain.ts') || this.contents.has(file) || !virtualProvider) return undefined;
 
         const grain = file.slice(0, -'.ts'.length);
-        if (!get_ts().sys.fileExists(grain)) return undefined;
+        if (!getTs().sys.fileExists(grain)) return undefined;
 
-        const mtime = Math.floor((get_ts().sys.getModifiedTime?.(grain)?.getTime() ?? 0) / 1000);
+        const mtime = Math.floor((getTs().sys.getModifiedTime?.(grain)?.getTime() ?? 0) / 1000);
         const cached = this.lazy.get(file);
 
         if (cached && cached.mtime === mtime) return cached.text;
 
-        const text = virtual_provider(grain);
+        const text = virtualProvider(grain);
         if (text === null || text === undefined) return undefined;
 
         this.lazy.set(file, { text, mtime });
@@ -466,7 +466,7 @@ class TypeScriptService {
     }
 
     private host(): TS.LanguageServiceHost {
-        const ts = get_ts();
+        const ts = getTs();
         const contents = this.contents;
         const versions = this.versions;
 
@@ -485,7 +485,7 @@ class TypeScriptService {
             getScriptSnapshot: (file) => {
                 if (file === RUNTIME_DECL_FILE) return ts.ScriptSnapshot.fromString(RUNTIME_MODULE_TEXT);
 
-                const content = contents.get(file) ?? this.lazy_virtual(file);
+                const content = contents.get(file) ?? this.lazyVirtual(file);
 
                 if (content !== undefined) return ts.ScriptSnapshot.fromString(content);
 
@@ -494,30 +494,30 @@ class TypeScriptService {
                     return ts.ScriptSnapshot.fromString(ts.sys.readFile(file) ?? '');
                 }
 
-                if (is_runtime_file(file)) {
+                if (isRuntimeFile(file)) {
                     return ts.ScriptSnapshot.fromString(
-                        file.endsWith('.json') ? runtime_package_json() : RUNTIME_TYPES
+                        file.endsWith('.json') ? runtimePackageJson() : RUNTIME_TYPES
                     );
                 }
 
                 return undefined;
             },
             getCurrentDirectory: () => ts.sys.getCurrentDirectory(),
-            getCompilationSettings: () => get_options(),
+            getCompilationSettings: () => getOptions(),
             getDefaultLibFileName: (settings) => ts.getDefaultLibFilePath(settings),
-            // 装了 `@graints/runtime` 就用它自己的声明，`is_runtime_file` 那条是没装时的兜底
+            // 装了 `@graints/runtime` 就用它自己的声明，`isRuntimeFile` 那条是没装时的兜底
             fileExists: (file) =>
                 contents.has(file) ||
-                this.lazy_virtual(file) !== undefined ||
+                this.lazyVirtual(file) !== undefined ||
                 ts.sys.fileExists(file) ||
-                is_runtime_file(file),
+                isRuntimeFile(file),
             readFile: (file) =>
                 (contents.get(file) ??
-                    this.lazy_virtual(file) ??
+                    this.lazyVirtual(file) ??
                     ts.sys.readFile(file) ??
-                    (is_runtime_file(file)
+                    (isRuntimeFile(file)
                         ? file.endsWith('.json')
-                            ? runtime_package_json()
+                            ? runtimePackageJson()
                             : RUNTIME_TYPES
                         : null)) ??
                 undefined,
@@ -528,17 +528,17 @@ class TypeScriptService {
     }
 
     private get(): TS.LanguageService {
-        return (this.service ??= get_ts().createLanguageService(this.host()));
+        return (this.service ??= getTs().createLanguageService(this.host()));
     }
 
     /**
      * 解析一个 import 说明符，按当前编译选项来 —— 所以 tsconfig 的 `paths` 也认。
      *
      * 宿主要用我们自己的（认得虚拟文件），否则 `./Foo.grain` 解析不到 `Foo.grain.ts`。
-     * 返回的是虚拟文件路径，要真实文件的话用 `real_name()` 转一下。
+     * 返回的是虚拟文件路径，要真实文件的话用 `realName()` 转一下。
      */
-    resolve_module(specifier: string, from: string): string | null {
-        const resolved = get_ts().resolveModuleName(specifier, from, get_options(), this.host());
+    resolveModule(specifier: string, from: string): string | null {
+        const resolved = getTs().resolveModuleName(specifier, from, getOptions(), this.host());
 
         return resolved.resolvedModule?.resolvedFileName ?? null;
     }
@@ -575,34 +575,34 @@ class TypeScriptService {
      * `getCompletionsAtPosition` 在语法不完整的地方会直接返回 undefined（`Math.` 后面空着时），
      * 所以自己来：拿点号左边的表达式问类型，再把成员枚举出来。
      */
-    member_completions(file: string, offset: number): CompletionEntry[] {
-        const ts = get_ts();
+    memberCompletions(file: string, offset: number): CompletionEntry[] {
+        const ts = getTs();
         const dot = offset - 1;
 
         const program = this.get().getProgram();
-        const source_file = program?.getSourceFile(file);
+        const sourceFile = program?.getSourceFile(file);
 
         // 无条件先打一条：早退的话，日志里能直接看出"虚拟文件里点号位置不是 ."
         // （多半是虚拟文件比文档旧，偏移对不上）
         log(
-            'member_completions',
+            'memberCompletions',
             'dot', dot,
-            'char', source_file ? JSON.stringify(source_file.text[dot] ?? '') : 'no virtual file'
+            'char', sourceFile ? JSON.stringify(sourceFile.text[dot] ?? '') : 'no virtual file'
         );
 
-        if (!program || !source_file || source_file.text[dot] !== '.') return [];
+        if (!program || !sourceFile || sourceFile.text[dot] !== '.') return [];
 
         // 点号左边那个表达式：结束位置正好落在点号上的最内层节点
         let target: TS.Node | undefined;
 
         const visit = (node: TS.Node): void => {
-            if (node.getEnd() === dot && node.getStart(source_file) < dot) target = node;
+            if (node.getEnd() === dot && node.getStart(sourceFile) < dot) target = node;
             node.forEachChild(visit);
         };
 
-        visit(source_file);
+        visit(sourceFile);
 
-        log('member_completions left', target ? `"${target.getText(source_file)}"` : 'not found');
+        log('memberCompletions left', target ? `"${target.getText(sourceFile)}"` : 'not found');
 
         if (!target) return [];
 
@@ -615,7 +615,7 @@ class TypeScriptService {
         const visible = properties.filter((symbol) => !symbol.getName().startsWith('__'));
 
         log(
-            'member_completions type',
+            'memberCompletions type',
             checker.typeToString(type),
             'members',
             visible.length,
@@ -647,7 +647,7 @@ class TypeScriptService {
     }
 
     /** 补全项的签名和文档（VS Code 选中某一项时才来要） */
-    completion_detail(file: string, offset: number, name: string): CompletionDetail | null {
+    completionDetail(file: string, offset: number, name: string): CompletionDetail | null {
         const details = this.get().getCompletionEntryDetails(file, offset, name, undefined, undefined, undefined, undefined);
         if (!details) return null;
 
@@ -664,7 +664,7 @@ class TypeScriptService {
      * 模板区域在虚拟文件里是空白，拿不到分类 —— 那边交给 TextMate。
      */
     classifications(file: string, length: number): SemanticSpan[] {
-        const ts = get_ts();
+        const ts = getTs();
         const service = this.get();
 
         const { spans } = service.getEncodedSemanticClassifications(
@@ -715,10 +715,10 @@ class TypeScriptService {
         this.versions.delete(key);
     }
 
-    quick_info(file: string, offset: number): QuickInfo | null {
+    quickInfo(file: string, offset: number): QuickInfo | null {
         const key = normalize(file);
         const info = this.get().getQuickInfoAtPosition(key, offset);
-        log('quick_info', key, offset, '->', info ? 'hit' : 'miss');
+        log('quickInfo', key, offset, '->', info ? 'hit' : 'miss');
 
         if (!info) return null;
 
@@ -743,7 +743,7 @@ class TypeScriptService {
 
             return {
                 // 跳到别的 .grain 时给真实文件，不是它那份虚拟文件
-                file: target === key ? null : real_name(target),
+                file: target === key ? null : realName(target),
                 start: entry.textSpan.start,
                 end: entry.textSpan.start + entry.textSpan.length
             };
@@ -756,7 +756,7 @@ class TypeScriptService {
      * 注意结果里可能包含我们补在虚拟文件末尾的声明（`declare let x`），
      * 那个偏移超出源码长度，由 analysis 那边过滤掉。
      */
-    rename_locations(file: string, offset: number): Array<{ start: number; end: number }> {
+    renameLocations(file: string, offset: number): Array<{ start: number; end: number }> {
         const key = normalize(file);
         const found = this.get().findRenameLocations(key, offset, false, false, {
             providePrefixAndSuffixTextForRename: false
@@ -788,8 +788,8 @@ class TypeScriptService {
             }));
     }
 
-    semantic_problems(file: string): SemanticProblem[] {
-        const ts = get_ts();
+    semanticProblems(file: string): SemanticProblem[] {
+        const ts = getTs();
         const key = normalize(file);
 
         const problems = this.get()
@@ -808,4 +808,4 @@ class TypeScriptService {
     }
 }
 
-export const typescript_service = new TypeScriptService();
+export const typescriptService = new TypeScriptService();

@@ -1,4 +1,4 @@
-import { reactive_array, reactive_set } from '@graints/runtime';
+import { reactiveArray, reactiveSet } from '@graints/runtime';
 
 /**
  * A reactive array.
@@ -7,28 +7,28 @@ import { reactive_array, reactive_set } from '@graints/runtime';
  * which is exactly the case the container is for: it announces its own changes, so the `for`
  * loop over it still updates precisely.
  */
-export const rows = reactive_array(['alpha', 'beta']);
+export const rows = reactiveArray(['alpha', 'beta']);
 
 let added = 0;
 
 /** Mutates `rows` from outside the component */
-export function add_row(): void {
+export function addRow(): void {
     added += 1;
 
     rows.push(`added ${added}`);
 }
 
 /** Same, but removes from the front */
-export function drop_row(): void {
+export function dropRow(): void {
     rows.shift();
 }
 
 /** A reactive Set — no order, but the same story */
-export const tags = reactive_set(['one']);
+export const tags = reactiveSet(['one']);
 
 let tagged = 0;
 
-export function add_tag(): void {
+export function addTag(): void {
     tagged += 1;
 
     tags.add(`tag ${tagged}`);

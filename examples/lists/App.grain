@@ -1,5 +1,5 @@
 <script>
-    import { add_row, add_tag, drop_row, rows, tags } from './rows';
+    import { addRow, addTag, dropRow, rows, tags } from './rows';
 
     // A plain `$state` array: the compiler sees every write to it and turns
     // `push` / `shift` / `splice` into the matching precise call
@@ -8,25 +8,25 @@
         { id: 2, text: 'write the runtime' }
     ]);
 
-    let next_id = $state(3);
+    let nextId = $state(3);
 
-    function add_todo() {
-        todos.push({ id: next_id, text: `todo ${next_id}` });
-        next_id += 1;
+    function addTodo() {
+        todos.push({ id: nextId, text: `todo ${nextId}` });
+        nextId += 1;
     }
 
-    function drop_first() {
+    function dropFirst() {
         todos.shift();
     }
 
-    function replace_second() {
+    function replaceSecond() {
         todos.splice(1, 1, { id: 100, text: 'replaced' });
     }
 
     function flip() {
         todos = [todos[1], todos[0]];
     }
-    function flip_in_place() {
+    function flipInPlace() {
         [todos[0], todos[1]] = [todos[1], todos[0]];
     }
 
@@ -51,7 +51,7 @@
         picked.delete(color);
     }
 
-    function reset_scores() {
+    function resetScores() {
         scores.clear();
     }
 </script>
@@ -66,15 +66,15 @@
 {/for}
 
 <p class="buttons">
-    <button onclick={add_todo}>push</button>
-    <button onclick={drop_first}>shift</button>
-    <button onclick={replace_second}>splice(1, 1)</button>
+    <button onclick={addTodo}>push</button>
+    <button onclick={dropFirst}>shift</button>
+    <button onclick={replaceSecond}>splice(1, 1)</button>
     <button onclick={flip}>reorder (replacing the array)</button>
-    <button onclick={flip_in_place}>reorder (in-place)</button>
+    <button onclick={flipInPlace}>reorder (in-place)</button>
 </p>
 
 <h2>2 · keyed for over a reactive array</h2>
-<p class="hint">rows is a reactive_array, and it is mutated in ./rows — outside this component, where the compiler cannot see it</p>
+<p class="hint">rows is a reactiveArray, and it is mutated in ./rows — outside this component, where the compiler cannot see it</p>
 
 {#for row of rows with key = row}
     <p class="row">{row} <code>Math.random() =</code> {Math.random()}</p>
@@ -83,8 +83,8 @@
 {/for}
 
 <p class="buttons">
-    <button onclick={add_row}>push (from the other module)</button>
-    <button onclick={drop_row}>shift (from the other module)</button>
+    <button onclick={addRow}>push (from the other module)</button>
+    <button onclick={dropRow}>shift (from the other module)</button>
 </p>
 
 <h2>3 · reactive Set</h2>
@@ -96,7 +96,7 @@
 {/for}
 
 <p class="buttons">
-    <button onclick={add_tag}>add</button>
+    <button onclick={addTag}>add</button>
 </p>
 
 <h2>4 · entries()</h2>
@@ -121,7 +121,7 @@
     <button onclick={() => score('ada', 10)}>set ada=10</button>
     <button onclick={() => score('bob', 20)}>set bob=20</button>
     <button onclick={() => unscore('ada')}>delete ada</button>
-    <button onclick={reset_scores}>clear</button>
+    <button onclick={resetScores}>clear</button>
 </p>
 
 {#for color of picked with key = color}

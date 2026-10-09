@@ -29,7 +29,7 @@ export interface AttributeName {
     end: number;
 }
 
-function skip_quoted(source: string, from: number, to: number): number {
+function skipQuoted(source: string, from: number, to: number): number {
     const quote = source[from];
     let i = from + 1;
 
@@ -47,7 +47,7 @@ function skip_quoted(source: string, from: number, to: number): number {
     return to;
 }
 
-function skip_braced(source: string, from: number, to: number): number {
+function skipBraced(source: string, from: number, to: number): number {
     let depth = 0;
     let i = from;
 
@@ -60,7 +60,7 @@ function skip_braced(source: string, from: number, to: number): number {
             depth -= 1;
             if (depth === 0) return i + 1;
         } else if (char === '"' || char === "'") {
-            i = skip_quoted(source, i, to);
+            i = skipQuoted(source, i, to);
             continue;
         }
 
@@ -76,7 +76,7 @@ function skip_braced(source: string, from: number, to: number): number {
  * 属性没有位置信息，只能回头扫源码。引号和 `{ ... }` 里的东西都跳过去，
  * 不会把它们当成属性名。
  */
-export function attributes_in(source: string, from: number, to: number): AttributeName[] {
+export function attributesIn(source: string, from: number, to: number): AttributeName[] {
     const found: AttributeName[] = [];
 
     let i = from;
@@ -85,12 +85,12 @@ export function attributes_in(source: string, from: number, to: number): Attribu
         const char = source[i];
 
         if (char === '"' || char === "'") {
-            i = skip_quoted(source, i, to);
+            i = skipQuoted(source, i, to);
             continue;
         }
 
         if (char === '{') {
-            i = skip_braced(source, i, to);
+            i = skipBraced(source, i, to);
             continue;
         }
 
@@ -111,7 +111,7 @@ export function attributes_in(source: string, from: number, to: number): Attribu
 }
 
 /** 一段 AST 里光标下的标识符（最里层那个） */
-export function identifier_at(node: unknown, offset: number): string | null {
+export function identifierAt(node: unknown, offset: number): string | null {
     let found: string | null = null;
     let best = Number.MAX_SAFE_INTEGER;
 

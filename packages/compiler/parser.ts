@@ -1,17 +1,17 @@
-import { check_bindings } from './check.js';
+import { checkBindings } from './check.js';
 import { ParseError } from './errors.js';
-import { expand_macros, type MacroReparse } from './macro.js';
-import { find_nodes } from './nodes.js';
-import { parse_expressions } from './read/expression.js';
-import { parse_script } from './read/script.js';
-import { parse_style } from './read/style.js';
-import { scan_script, scan_style } from './scan.js';
+import { expandMacros, type MacroReparse } from './macro.js';
+import { findNodes } from './nodes.js';
+import { parseExpressions } from './read/expression.js';
+import { parseScript } from './read/script.js';
+import { parseStyle } from './read/style.js';
+import { scanScript, scanStyle } from './scan.js';
 import {
     REGEX_BINDING_VALUE,
-    read_attribute_value,
-    read_binding_value,
-    read_block_attributes,
-    read_fragment
+    readAttributeValue,
+    readBindingValue,
+    readBlockAttributes,
+    readFragment
 } from './template.js';
 import type {
     RawScript,
@@ -23,7 +23,7 @@ import type {
     Template,
     TemplateNode
 } from './types.js';
-import { create_locator, is_whitespace, type Locator } from './utils.js';
+import { createLocator, isWhitespace, type Locator } from './utils.js';
 
 export interface ParseOptions {
     /** 文件名，只用于错误信息 */
@@ -41,7 +41,7 @@ export class Parser {
         public options: ParseOptions = {}
     ) {
         this.length = source.length;
-        this.locate = create_locator(source);
+        this.locate = createLocator(source);
     }
 
     /**
@@ -57,18 +57,18 @@ export class Parser {
      * 完整解析：先解析出 Root（SFC 本体），再解析 CSS 与 TS。
      */
     parse(): Root {
-        const root = this.parse_root();
+        const root = this.parseRoot();
         const masked = this.masked;
 
         // ---- 第二阶段：Root 结构确定之后才解析 CSS 与 TS ----
-        const stylesheet = root.stylesheet ? parse_style(root.stylesheet, this.locate) : null;
-        const module = root.module ? parse_script(root.module, masked) : null;
-        const script = root.script ? parse_script(root.script, masked) : null;
-        const onmount = root.onmount ? parse_script(root.onmount, masked) : null;
-        const macro = root.macro ? parse_script(root.macro, masked) : null;
+        const stylesheet = root.stylesheet ? parseStyle(root.stylesheet, this.locate) : null;
+        const module = root.module ? parseScript(root.module, masked) : null;
+        const script = root.script ? parseScript(root.script, masked) : null;
+        const onmount = root.onmount ? parseScript(root.onmount, masked) : null;
+        const macro = root.macro ? parseScript(root.macro, masked) : null;
 
         // 模板里的 `{ ... }` 表达式同样交给 TS 解析器
-        parse_expressions(root.template, masked);
+        parseExpressions(root.template, masked);
 
         const result: Root = {
             ...root,
@@ -88,27 +88,27 @@ export class Parser {
         // 无条件跑：内置宏（`$store`）不需要写 `<script macro>`
         // 重解析用的是 Parser 实例，从这里传进去——避免 macro 反过来 import parser
         const reparse: MacroReparse = {
-            binding: (text, filename) => read_binding_value(new Parser(`{${text}}`, { filename })),
-            attribute: (text, filename) => read_attribute_value(new Parser(text, { filename })),
+            binding: (text, filename) => readBindingValue(new Parser(`{${text}}`, { filename })),
+            attribute: (text, filename) => readAttributeValue(new Parser(text, { filename })),
             // 绑定语法（`listen: ...`）按绑定值读；否则按属性值——
             // 值里没有 `{` 就补一对花括号，不然会被当成一段字面文本
             value: (text, filename) =>
                 REGEX_BINDING_VALUE.test(text)
-                    ? read_binding_value(new Parser(`{${text}}`, { filename }))
-                    : read_attribute_value(new Parser(text.includes('{') ? text : `{${text}}`, { filename }))
+                    ? readBindingValue(new Parser(`{${text}}`, { filename }))
+                    : readAttributeValue(new Parser(text.includes('{') ? text : `{${text}}`, { filename }))
         };
 
-        const run = expand_macros(result, this.source, this.options.filename, reparse);
+        const run = expandMacros(result, this.source, this.options.filename, reparse);
 
         result.expanded = run.appended;
         result.replacements = run.replacements;
         result.macros = run.macros;
 
         // `$node(...)`：宏展开之后再找（它的参数里可能就用了宏）
-        result.nodes = find_nodes(result, this.source, reparse);
+        result.nodes = findNodes(result, this.source, reparse);
 
         // 都解析完了才检查 `bind:value={ ... }` 里那三个函数的形状
-        check_bindings(result);
+        checkBindings(result);
 
         return result;
     }
@@ -119,7 +119,7 @@ export class Parser {
      * 逐个切出顶层块（`<script>` / `<script module>` / `<style>`），
      * 剩下的内容全部作为模板解析。此时块只有原文与区间，不做 TS / CSS 解析。
      */
-    parse_root(): RootStage {
+    parseRoot(): RootStage {
         let script: RawScript | null = null;
         let module: RawScript | null = null;
         let onmount: RawScript | null = null;
@@ -129,8 +129,8 @@ export class Parser {
         const children: RawTemplateNode[] = [];
 
         while (this.index < this.length) {
-            if (this.is_block('script')) {
-                const block = this.read_script();
+            if (this.isBlock('script')) {
+                const block = this.readScript();
 
                 if (block.context === 'module') {
                     if (module) this.error('A component can only have one `<script module>`', block.start, block.end);
@@ -149,14 +149,14 @@ export class Parser {
                 continue;
             }
 
-            if (this.is_block('style')) {
-                const block = this.read_style();
+            if (this.isBlock('style')) {
+                const block = this.readStyle();
                 if (stylesheet) this.error('A component can only have one `<style>`', block.start, block.end);
                 stylesheet = block;
                 continue;
             }
 
-            children.push(...read_fragment(this));
+            children.push(...readFragment(this));
         }
 
         const start = children[0]?.start ?? 0;
@@ -178,23 +178,23 @@ export class Parser {
     // ------------------------------------------------------------ 块
 
     /** `source` 的当前位置是否是一个 `<script>` / `<style>` 开始标签（排除 `<scriptx>` 这类） */
-    is_block(name: 'script' | 'style'): boolean {
+    isBlock(name: 'script' | 'style'): boolean {
         if (!this.match('<' + name)) return false;
 
         const next = this.source[this.index + name.length + 1];
-        return next === undefined || next === '>' || next === '/' || is_whitespace(next);
+        return next === undefined || next === '>' || next === '/' || isWhitespace(next);
     }
 
-    private read_script(): RawScript {
+    private readScript(): RawScript {
         const start = this.index;
         this.eat('<script', true);
-        const attributes = read_block_attributes(this);
-        this.allow_whitespace();
+        const attributes = readBlockAttributes(this);
+        this.allowWhitespace();
         this.eat('/');
         this.eat('>', true);
 
-        const content_start = this.index;
-        const { contentEnd, end } = scan_script(this.source, content_start, this.locate);
+        const contentStart = this.index;
+        const { contentEnd, end } = scanScript(this.source, contentStart, this.locate);
         this.index = end;
 
         let context: ScriptContext = 'default';
@@ -221,22 +221,22 @@ export class Parser {
             attributes,
             start,
             end: this.index,
-            contentStart: content_start,
+            contentStart: contentStart,
             contentEnd,
-            raw: this.source.slice(content_start, contentEnd)
+            raw: this.source.slice(contentStart, contentEnd)
         };
     }
 
-    private read_style(): RawStyle {
+    private readStyle(): RawStyle {
         const start = this.index;
         this.eat('<style', true);
-        const attributes = read_block_attributes(this);
-        this.allow_whitespace();
+        const attributes = readBlockAttributes(this);
+        this.allowWhitespace();
         this.eat('/');
         this.eat('>', true);
 
-        const content_start = this.index;
-        const { contentEnd, end } = scan_style(this.source, content_start, this.locate);
+        const contentStart = this.index;
+        const { contentEnd, end } = scanStyle(this.source, contentStart, this.locate);
         this.index = end;
 
         return {
@@ -244,9 +244,9 @@ export class Parser {
             attributes,
             start,
             end: this.index,
-            contentStart: content_start,
+            contentStart: contentStart,
             contentEnd,
-            raw: this.source.slice(content_start, contentEnd)
+            raw: this.source.slice(contentStart, contentEnd)
         };
     }
 
@@ -277,8 +277,8 @@ export class Parser {
         return match[0];
     }
 
-    allow_whitespace(): void {
-        while (this.index < this.length && is_whitespace(this.source[this.index])) {
+    allowWhitespace(): void {
+        while (this.index < this.length && isWhitespace(this.source[this.index])) {
             this.index += 1;
         }
     }
@@ -296,6 +296,6 @@ export function parse(source: string, options: ParseOptions = {}): Root {
 }
 
 /** 只做第一阶段：解析出 Root 的骨架，script / style 只有原文 */
-export function parse_root(source: string, options: ParseOptions = {}): RootStage {
-    return new Parser(source, options).parse_root();
+export function parseRoot(source: string, options: ParseOptions = {}): RootStage {
+    return new Parser(source, options).parseRoot();
 }

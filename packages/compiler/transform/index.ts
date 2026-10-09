@@ -3,11 +3,11 @@ import type { Root } from '../types.js';
 import { generate, type CompileOptions, type CompileResult } from './generate.js';
 
 export { generate, type CompileOptions, type CompileResult } from './generate.js';
-export { create_scope_id, is_global, scope_stylesheet } from './style.js';
+export { createScopeId, isGlobal, scopeStylesheet } from './style.js';
 export {
-    analyze_script,
-    collect_reads,
-    collect_writes,
+    analyzeScript,
+    collectReads,
+    collectWrites,
     intersects,
     type FunctionInfo,
     type FunctionLike,
@@ -24,6 +24,6 @@ export function compile(source: string, options: CompileOptions & ParseOptions =
 }
 
 /** 已经解析好的 Root -> 可执行 JS + CSS */
-export function compile_root(root: Root, source: string, options: CompileOptions = {}): CompileResult {
+export function compileRoot(root: Root, source: string, options: CompileOptions = {}): CompileResult {
     return generate(root, source, options);
 }

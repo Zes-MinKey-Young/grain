@@ -50,27 +50,27 @@ function slice(source: string, range: [number, number]): string {
 }
 
 /** 赋值目标的最底层变量名：`a` -> a，`a.b.c` -> a，`[x, y] = ...` -> x, y */
-function base_names(node: TSESTree.Node): string[] {
+function baseNames(node: TSESTree.Node): string[] {
     switch (node.type) {
         case 'Identifier':
             return [node.name];
 
         case 'MemberExpression':
-            return base_names(node.object);
+            return baseNames(node.object);
 
         case 'ObjectPattern':
             return node.properties.flatMap((property) =>
-                property.type === 'RestElement' ? base_names(property.argument) : base_names(property.value)
+                property.type === 'RestElement' ? baseNames(property.argument) : baseNames(property.value)
             );
 
         case 'ArrayPattern':
-            return node.elements.flatMap((element) => (element ? base_names(element) : []));
+            return node.elements.flatMap((element) => (element ? baseNames(element) : []));
 
         case 'RestElement':
-            return base_names(node.argument);
+            return baseNames(node.argument);
 
         case 'AssignmentPattern':
-            return base_names(node.left);
+            return baseNames(node.left);
 
         default:
             return [];
@@ -78,18 +78,18 @@ function base_names(node: TSESTree.Node): string[] {
 }
 
 /** 收集一段代码写过的变量名 */
-export function collect_writes(node: TSESTree.Node): Set<string> {
+export function collectWrites(node: TSESTree.Node): Set<string> {
     const names = new Set<string>();
 
     simpleTraverse(node, {
         enter(child) {
             switch (child.type) {
                 case 'AssignmentExpression':
-                    for (const name of base_names(child.left)) names.add(name);
+                    for (const name of baseNames(child.left)) names.add(name);
                     break;
 
                 case 'UpdateExpression':
-                    for (const name of base_names(child.argument)) names.add(name);
+                    for (const name of baseNames(child.argument)) names.add(name);
                     break;
 
                 case 'CallExpression': {
@@ -99,7 +99,7 @@ export function collect_writes(node: TSESTree.Node): Set<string> {
                         callee.property.type === 'Identifier' &&
                         MUTATION_METHODS.has(callee.property.name)
                     ) {
-                        for (const name of base_names(callee.object)) names.add(name);
+                        for (const name of baseNames(callee.object)) names.add(name);
                     }
                     break;
                 }
@@ -111,7 +111,7 @@ export function collect_writes(node: TSESTree.Node): Set<string> {
 }
 
 /** 收集一段代码读过的变量名（属性名不算） */
-export function collect_reads(node: TSESTree.Node): Set<string> {
+export function collectReads(node: TSESTree.Node): Set<string> {
     const names = new Set<string>();
 
     simpleTraverse(node, {
@@ -130,7 +130,7 @@ export function collect_reads(node: TSESTree.Node): Set<string> {
 }
 
 /** 扫描 `<script>` 顶层：找出 `$state` 变量和顶层函数 */
-export function analyze_script(program: TSProgram, source: string): ScriptAnalysis {
+export function analyzeScript(program: TSProgram, source: string): ScriptAnalysis {
     const states = new Map<string, StateInfo>();
     const functions = new Map<string, FunctionInfo>();
 
@@ -156,7 +156,7 @@ export function analyze_script(program: TSProgram, source: string): ScriptAnalys
                     functions.set(declarator.id.name, {
                         name: declarator.id.name,
                         node: init,
-                        writes: collect_writes(init)
+                        writes: collectWrites(init)
                     });
                 }
             }
@@ -164,7 +164,7 @@ export function analyze_script(program: TSProgram, source: string): ScriptAnalys
             functions.set(statement.id.name, {
                 name: statement.id.name,
                 node: statement,
-                writes: collect_writes(statement)
+                writes: collectWrites(statement)
             });
         }
     }

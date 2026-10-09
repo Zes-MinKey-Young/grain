@@ -204,20 +204,20 @@ interface ReactiveContainer {
  *
  * @example
  * ```ts
- * const items = reactive_array([{ id: 1, name: 'a' }]);
+ * const items = reactiveArray([{ id: 1, name: 'a' }]);
  * ```
  */
-declare function reactive_array<T>(initial?: T[]): T[] & ReactiveContainer;
+declare function reactiveArray<T>(initial?: T[]): T[] & ReactiveContainer;
 
 /**
  * A Map that announces its changes.
  *
  * @example
  * ```ts
- * const by_id = reactive_map([[1, 'a']]);
+ * const byId = reactiveMap([[1, 'a']]);
  * ```
  */
-declare function reactive_map<K, V>(
+declare function reactiveMap<K, V>(
     initial?: Iterable<readonly [K, V]>
 ): Map<K, V> & ReactiveContainer;
 
@@ -226,7 +226,7 @@ declare function reactive_map<K, V>(
  *
  * @example
  * ```ts
- * const tags = reactive_set(['one']);
+ * const tags = reactiveSet(['one']);
  * ```
  */
-declare function reactive_set<T>(initial?: Iterable<T>): Set<T> & ReactiveContainer;
+declare function reactiveSet<T>(initial?: Iterable<T>): Set<T> & ReactiveContainer;

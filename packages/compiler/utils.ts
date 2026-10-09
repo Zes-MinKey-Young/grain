@@ -25,7 +25,7 @@ const ENTITIES: Record<string, string> = {
     quot: '"'
 };
 
-export function is_whitespace(char: string | undefined): boolean {
+export function isWhitespace(char: string | undefined): boolean {
     return (
         char === ' ' ||
         char === '\t' ||
@@ -37,7 +37,7 @@ export function is_whitespace(char: string | undefined): boolean {
     );
 }
 
-export function is_alpha(char: string | null | undefined): boolean {
+export function isAlpha(char: string | null | undefined): boolean {
     if (char == null) return false;
 
     return (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z');
@@ -50,7 +50,7 @@ export type Locator = (offset: number) => { line: number; column: number };
  * 因为解析时前面补的是等长空白，这些 offset 就是整个 SFC 里的绝对偏移，可以直接用。
  * 拿不到就退回调用方给的兜底区间。
  */
-export function error_range(error: unknown, fallback: [number, number]): [number, number] {
+export function errorRange(error: unknown, fallback: [number, number]): [number, number] {
     const location = (error as { location?: { start?: { offset?: number }; end?: { offset?: number } } } | null)
         ?.location;
 
@@ -65,31 +65,31 @@ export function error_range(error: unknown, fallback: [number, number]): [number
 }
 
 /** offset -> line / column（1-based），用于错误信息 */
-export function create_locator(source: string): Locator {
-    const line_starts = [0];
+export function createLocator(source: string): Locator {
+    const lineStarts = [0];
 
     for (let i = 0; i < source.length; i += 1) {
-        if (source.charCodeAt(i) === 10) line_starts.push(i + 1);
+        if (source.charCodeAt(i) === 10) lineStarts.push(i + 1);
     }
 
     return (offset: number) => {
         let low = 0;
-        let high = line_starts.length - 1;
+        let high = lineStarts.length - 1;
 
         while (low < high) {
             const mid = (low + high + 1) >> 1;
-            if (line_starts[mid] <= offset) low = mid;
+            if (lineStarts[mid] <= offset) low = mid;
             else high = mid - 1;
         }
 
-        return { line: low + 1, column: offset - line_starts[low] + 1 };
+        return { line: low + 1, column: offset - lineStarts[low] + 1 };
     };
 }
 
 const REGEX_ENTITY = /&(#[0-9a-fA-FxX]+|[a-zA-Z]+);/g;
 
 /** 解码文本节点里的 HTML 实体 */
-export function decode_entities(raw: string): string {
+export function decodeEntities(raw: string): string {
     if (!raw.includes('&')) return raw;
 
     return raw.replace(REGEX_ENTITY, (match, body: string) => {

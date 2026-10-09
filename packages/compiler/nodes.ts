@@ -1,6 +1,6 @@
 // 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
 // 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
-import { parse as parse_ts, simpleTraverse } from '@typescript-eslint/typescript-estree';
+import { parse as parseTs, simpleTraverse } from '@typescript-eslint/typescript-estree';
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
 
 import { ParseError } from './errors.js';
@@ -57,7 +57,7 @@ import type { NodeDecl, RawBindingValue, Root, Script } from './types.js';
  * @param reparse 绑定值的重新解析（由 parser 注入）
  * @returns 每个 `$node` 声明一条；没有就返回空数组
  */
-export function find_nodes(root: Root, source: string, reparse: MacroReparse): NodeDecl[] {
+export function findNodes(root: Root, source: string, reparse: MacroReparse): NodeDecl[] {
     const found: NodeDecl[] = [];
 
     for (const block of [root.script, root.module]) {
@@ -72,7 +72,7 @@ export function find_nodes(root: Root, source: string, reparse: MacroReparse): N
                     if (init.type !== 'CallExpression') continue;
                     if (init.callee.type !== 'Identifier' || init.callee.name !== '$node') continue;
 
-                    found.push(read_node(item.id.name, init, statement, source, reparse));
+                    found.push(readNode(item.id.name, init, statement, source, reparse));
                 }
             }
 
@@ -80,7 +80,7 @@ export function find_nodes(root: Root, source: string, reparse: MacroReparse): N
             if (statement.type === 'ExpressionStatement') {
                 simpleTraverse(statement.expression, {
                     enter: (node) => {
-                        if (is_node_call(node)) {
+                        if (isNodeCall(node)) {
                             throw new ParseError(
                                 '`$node` only makes sense as a declaration, for example `const doubled = $node({ get: () => count * 2 })`',
                                 node.range[0],
@@ -96,13 +96,13 @@ export function find_nodes(root: Root, source: string, reparse: MacroReparse): N
     return found;
 }
 
-function is_node_call(node: TSESTree.Node): boolean {
+function isNodeCall(node: TSESTree.Node): boolean {
     return (
         node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === '$node'
     );
 }
 
-function read_node(
+function readNode(
     name: string,
     call: TSESTree.CallExpression,
     statement: TSESTree.Node,
@@ -167,24 +167,24 @@ function read_node(
 
     // 注意用项的 `raw`（重新读出来的那段文本），不是它的偏移——
     // 那些偏移是相对传给 reparse 的文本的，拿来切源码会错位
-    const source_of = (item: typeof get): string | null => (item ? item.raw : null);
+    const sourceOf = (item: typeof get): string | null => (item ? item.raw : null);
 
-    const getter = source_of(get);
+    const getter = sourceOf(get);
 
     return {
         name,
         statement: [statement.range[0], statement.range[1]],
         // 变量形式（`{count}`）补成 getter；`get:` 写什么就是什么
-        get: get === expression && expression ? `() => (${source_of(expression)})` : getter,
-        set: source_of(set),
-        listen: source_of(listen),
+        get: get === expression && expression ? `() => (${sourceOf(expression)})` : getter,
+        set: sourceOf(set),
+        listen: sourceOf(listen),
         active: binding.active
     };
 }
 
 /** 一段表达式源码 -> AST（用来算它读了哪些变量） */
-export function parse_inline(code: string): TSESTree.Expression {
-    const program = parse_ts(`(${code})`, { loc: true, range: true });
+export function parseInline(code: string): TSESTree.Expression {
+    const program = parseTs(`(${code})`, { loc: true, range: true });
     const first = program.body[0];
 
     if (!first || first.type !== 'ExpressionStatement') {
@@ -195,6 +195,6 @@ export function parse_inline(code: string): TSESTree.Expression {
 }
 
 /** 声明语句所在的块（用来判断该往哪儿放生成的代码） */
-export function block_of(block: Script, statement: [number, number]): boolean {
+export function blockOf(block: Script, statement: [number, number]): boolean {
     return statement[0] >= block.contentStart && statement[1] <= block.contentEnd;
 }
