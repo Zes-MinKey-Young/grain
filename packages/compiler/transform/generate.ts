@@ -2041,8 +2041,11 @@ class Generator {
 
         const binding = `let ${pattern} = ${iter};`;
 
-        // 块内的片段注册到这一项的 updater 上（以前传 null，等于每次重建）
-        const [inner, innerStatements] = this.capture(() => this.children(node.children, row));
+        // 块内的片段要注册（这一项是复用的，不是每次重建）—— 有了编号才能精确刷新
+        // 记下起点，后面只挑"块内"的
+        const slotBase = this.slots.length;
+
+        const [inner, innerStatements] = this.capture(() => this.children(node.children, row), false);
 
         let fallback = 'null';
 
@@ -2074,6 +2077,36 @@ class Generator {
         const entry =
             node.key && names.length === 2 ? `(${names.join(', ')}) => [${names.join(', ')}]` : 'null';
 
+        // 项带下标：`entries()` 这种，源不是容器变量本身
+        const indexed = node.content.right.type !== 'Identifier';
+
+        // 每个列表只管自己的 DOM —— 交换数组元素那件事是用户代码做的，所以同一个
+        // 数组喂几个 for 都没关系
+        const swapByValue = indexed;
+
+        /**
+         * 块内读了下标变量的片段，按它们挂在哪个 updater 上分组。
+         *
+         * 值没换、只是位置变了的时候只刷这些 —— 下标和值写在同一个插值里的话那个
+         * 片段两边都读，会一起刷（`{i}:{item.id}`），分成两个插值才能真的只刷下标。
+         */
+        const indexGroups = new Map<string, number[]>();
+
+        if (indexed && names.length === 2) {
+            for (const slot of this.slots.slice(slotBase)) {
+                if (!slot.deps.has(names[0])) continue;
+
+                const indices = indexGroups.get(slot.update) ?? [];
+
+                indices.push(slot.index);
+                indexGroups.set(slot.update, indices);
+            }
+        }
+
+        const indexRefresh = [...indexGroups]
+            .map(([updater, indices]) => `${updater}(${[...indices].sort((a, b) => a - b).join(', ')});`)
+            .join(' ');
+
         this.needsList = true;
 
         this.statements.push(
@@ -2084,14 +2117,20 @@ class Generator {
             `  return {`,
             // 拿 fragment 里的真实节点：fragment 本身一插入就摊平了，不能拿它当节点
             `    nodes: Array.from(${row}.el.childNodes),`,
-            // 不带编号地刷这一项：把里面所有片段（含属性里的）重跑一遍，DOM 不动
-            `    update: (next) => { ${pattern} = next; ${row}(); },`,
+            // 复用这一项时把循环变量重新绑到新值上，再刷依赖它的片段（DOM 不动）。
+            //
+            // 项带下标时（`entries()`）特殊处理：值没换、只是位置变了的话，只有下标
+            // 那一块需要更新 —— 整行重跑会把行里其它部分（比如 `Math.random()`）
+            // 也一并重算
+            swapByValue && names.length === 2 && indexRefresh !== ''
+                ? `    update: (next) => { if (next[1] === ${names[1]}) { ${names[0]} = next[0]; ${indexRefresh} } else { ${pattern} = next; ${row}(); } },`
+                : `    update: (next) => { ${pattern} = next; ${row}(); },`,
             `  };`,
             '};',
             // 只给订阅判断用（有没有 subscribe）。source 仍写 `${right}`：
             // 每次重新求值，`entries()` 这种一次性迭代器才不会被耗尽
             `const ${sourceName} = ${right};`,
-            `var ${list} = creList({ render: ${render}, key: ${key}, entry: ${entry}, indexed: ${node.content.right.type === 'Identifier' ? 'false' : 'true'}, fallback: ${fallback}, source: () => ${right} });`,
+            `var ${list} = creList({ render: ${render}, key: ${key}, entry: ${entry}, indexed: ${indexed}, swapByValue: ${swapByValue}, fallback: ${fallback}, source: () => ${right} });`,
             `${list}.sync(${right});`,
             // 响应式容器：订阅它的改动。编译期不一定知道谁是响应式（可能是 import 进来的），
             // 所以运行时看有没有 subscribe——连"编译期看不见的改动"也能精确更新
@@ -2311,14 +2350,20 @@ class Generator {
         return { edits, skip };
     }
 
-    /** 临时把生成语句收集到别处，用于 render 函数体 */
-    private capture<T>(run: () => T): [T, string[]] {
+    /**
+     * 临时把生成语句收集到别处，用于 render 函数体。
+     *
+     * `insideFragment` 默认 true：里面的东西每次重建都会新建，旧节点失效，注册片段没意义。
+     * 但 `for` 的项是**复用**的（靠 `update` 刷新），所以它要传 false —— 不然块内的
+     * 片段没有编号，精确刷新无从下手。
+     */
+    private capture<T>(run: () => T, insideFragment = true): [T, string[]] {
         const saved = this.statements;
         const savedFragment = this.insideFragment;
         const inner: string[] = [];
 
         this.statements = inner;
-        this.insideFragment = true;
+        this.insideFragment = insideFragment;
 
         try {
             return [run(), inner];

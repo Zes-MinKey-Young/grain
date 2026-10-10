@@ -97,6 +97,15 @@ export interface ListEntry {
     update(next: unknown, index: number): void;
 }
 
+/**
+ * 内部记的一项：比 `ListEntry` 多了两项
+ *
+ * - `key`：`with key = ...` 算出来的身份
+ * - `item`：这一项**当前**是什么值。比对时值没变就不用调 `update` —— 否则光换个
+ *   顺序也会把每项的片段重跑一遍（行里写了 `Math.random()` 的话，数字就跳了）
+ */
+type Entry = ListEntry & { key?: unknown; item?: unknown };
+
 export interface ListOptions {
     /** 建一项。第一次调用后，同样的项靠 `update` 复用，不再重建 */
     render(item: unknown, index: number): ListEntry;
@@ -115,6 +124,13 @@ export interface ListOptions {
      * 这种列表追加时只拿到值，项得用 `entry` 拼出来（`[下标, 值]`），下标就是当前长度。
      */
     indexed?: boolean;
+    /**
+     * 交换时按**值**重排（行跟着值走，只刷下标）。
+     *
+     * 只影响这一个列表自己的 DOM —— 交换数组元素那件事是用户代码做的，所以同一个
+     * 数组喂几个 `for` 都不相干。
+     */
+    swapByValue?: boolean;
     /** 列表为空时渲染的分支 */
     fallback?: () => Node[];
     /**
@@ -136,8 +152,13 @@ export interface List extends Updater {
     el: Node;
     /** 落在这段里的节点（含末尾的锚点），父级搬动 / 移除时用 */
     nodes: Node[];
-    /** 按 key（或位置）比对，只更新变化的项。数组 / Map / Set / `entries()` 都行 */
-    sync(items: Iterable<unknown>): void;
+    /**
+     * 按 key（或位置）比对，只更新变化的项。数组 / Map / Set / `entries()` 都行。
+     *
+     * `force` 为真时每一项都重跑一遍 —— 用于"整个变量被重新赋值"（`items = [...]`）：
+     * 那种写法在语义上就是换了个数组，全量刷才对得上。
+     */
+    sync(items: Iterable<unknown>, force?: boolean): void;
     /** `push(...)`：追加，已有的不动 */
     push(...added: unknown[]): void;
     /** `shift()`：去掉第一项 */
@@ -178,7 +199,7 @@ export interface List extends Updater {
 class ListImpl {
     el!: Node;
     /** 当前存活的项，顺序跟列表一致 */
-    entries: Array<ListEntry & { key?: unknown }> = [];
+    entries: Entry[] = [];
     /** 空列表分支的节点（列表非空时要撤掉） */
     empty: Node[] = [];
     /** 当前列表的值：容器方法改完，靠它把剩下的项重新绑一遍 */
@@ -199,8 +220,14 @@ class ListImpl {
     }
 
     /** 作为 updater 被父级调用时：重新取一次列表再比对（没有 source 就什么都不做） */
+    /**
+     * 作为 updater 被父级调用：整块刷新。
+     *
+     * 走到这儿说明依赖变了（`items = [...]` 或读了这个变量的表达式变了），语义上就是
+     * 全量刷 —— 所以传 `force`，每一项都重跑一遍。
+     */
     invoke(): void {
-        if (this.options.source) this.sync(this.options.source());
+        if (this.options.source) this.sync(this.options.source(), true);
     }
 
     /** 落在这段里的节点（含末尾的锚点），父级搬动 / 移除时用 */
@@ -216,10 +243,12 @@ class ListImpl {
         for (const node of nodes) node.parentNode?.removeChild(node);
     }
 
-    private add(item: unknown, index: number, before: Node | null): ListEntry & { key?: unknown } {
-        const entry = this.options.render(item, index) as ListEntry & { key?: unknown };
+    private add(item: unknown, index: number, before: Node | null): Entry {
+        const entry = this.options.render(item, index) as Entry;
 
         entry.key = this.options.key?.(item, index);
+        // 记住这一项当前是什么值：下次比对时值没变就不用重跑它的片段
+        entry.item = item;
 
         this.place(entry.nodes, before);
 
@@ -241,10 +270,17 @@ class ListImpl {
 
     /** 从 `at` 起把项重绑到 `values` 上 —— 值或位置变了的那些才需要 */
     private rebindFrom(at: number): void {
-        for (let i = at; i < this.entries.length; i += 1) this.entries[i].update(this.values[i], i);
+        for (let i = at; i < this.entries.length; i += 1) {
+            const entry = this.entries[i];
+
+            if (entry.item === this.values[i]) continue;
+
+            entry.update(this.values[i], i);
+            entry.item = this.values[i];
+        }
     }
 
-    sync(items: Iterable<unknown>): void {
+    sync(items: Iterable<unknown>, force = false): void {
         // 只在这里展开一次：`entries()` 这类迭代器是一次性的，展开两遍第二遍就是空的
         const next = Array.from(items);
 
@@ -253,12 +289,12 @@ class ListImpl {
         this.setEmpty(next.length === 0);
 
         if (this.options.key) {
-            // keyed：按 key 匹配，能对上就复用（内容靠 update 换掉）
-            const oldByKey = new Map<unknown, ListEntry & { key?: unknown }>();
+            // keyed：按 key 匹配，能对上就复用
+            const oldByKey = new Map<unknown, Entry>();
 
             for (const entry of this.entries) oldByKey.set(entry.key, entry);
 
-            const kept: Array<ListEntry & { key?: unknown }> = [];
+            const kept: Entry[] = [];
 
             for (let i = 0; i < next.length; i += 1) {
                 const key = this.options.key(next[i], i);
@@ -266,7 +302,13 @@ class ListImpl {
 
                 if (found) {
                     oldByKey.delete(key);
-                    found.update(next[i], i);
+                    // 值没变就不用重跑片段 —— 换顺序时几乎总是这种情况。
+                    // 整个变量被重新赋值时（`force`）例外：那种语义就是全量刷。
+                    // 项带下标时总是要调 update：下标变了，由它自己决定刷哪一块
+                    // （值没换就只刷读了下标的那些片段）
+                    if (force || found.item !== next[i]) found.update(next[i], i);
+
+                    found.item = next[i];
                     kept.push(found);
                 } else {
                     kept.push(this.add(next[i], i, null));
@@ -282,8 +324,15 @@ class ListImpl {
         } else {
             // 没有 key：按位置复用，多出来的追加 / 删掉
             for (let i = 0; i < next.length; i += 1) {
-                if (i < this.entries.length) this.entries[i].update(next[i], i);
-                else this.entries.push(this.add(next[i], i, null));
+                if (i < this.entries.length) {
+                    const entry = this.entries[i];
+
+                    if (force || entry.item !== next[i]) entry.update(next[i], i);
+
+                    entry.item = next[i];
+                } else {
+                    this.entries.push(this.add(next[i], i, null));
+                }
             }
 
             while (this.entries.length > next.length) this.drop(this.entries.pop()!.nodes);
@@ -375,16 +424,63 @@ class ListImpl {
     setRows(pairs: Array<[number, unknown]>): void {
         if (pairs.length === 0) return;
 
-        for (const [at, value] of pairs) {
-            if (Number.isInteger(at) && at >= 0 && at < this.values.length) this.values[at] = value;
+        // 项带下标时（`entries()`）值是拼出来的：`[at, value]`，不能拿裸值去 update，
+        // 否则循环变量会被绑到值本身（`let [i, item] = { id: 2 }`）
+        const items = pairs.map(([at, value]) => [at, this.itemFor(at, value)] as [number, unknown]);
+
+        for (const [at, item] of items) {
+            if (Number.isInteger(at) && at >= 0 && at < this.values.length) this.values[at] = item;
+        }
+
+
+
+
+
+        // 项带下标（`entries()`）：行跟着**值**走。
+        //
+        // 按位置刷的话，交换会让每一行都变成"值也换了"，于是整行重跑；而行的身份
+        // 其实是值 —— 下标只是位置。所以这里按值把已有的行重新排一遍，值没换的行
+        // 只更新下标（由编译器生成的 update 判断），最后调一次 DOM 顺序。
+        if (this.options.swapByValue) {
+            const byValue = new Map<unknown, Entry>();
+
+            for (const entry of this.entries) {
+                byValue.set((entry.item as [number, unknown])?.[1], entry);
+            }
+
+            const kept: Entry[] = [];
+
+            for (let i = 0; i < this.values.length; i += 1) {
+                const item = this.values[i];
+                const found = byValue.get((item as [number, unknown])[1]);
+
+                if (found) {
+                    found.update(item, i);
+                    found.item = item;
+
+                    kept.push(found);
+                } else {
+                    kept.push(this.add(item, i, null));
+                }
+            }
+
+            for (const stale of this.entries) {
+                if (!kept.includes(stale)) this.drop(stale.nodes);
+            }
+
+            this.entries = kept;
+
+            this.reorderIfNeeded();
+
+            return;
         }
 
         // 有 key 时，只要有一项的身份变了，就地更新就不成立 —— 交给整体比对
         if (this.options.key) {
-            for (const [at, value] of pairs) {
+            for (const [at, item] of items) {
                 const entry = this.entries[at];
 
-                if (!entry || entry.key !== this.options.key(value, at)) {
+                if (!entry || entry.key !== this.options.key(item, at)) {
                     this.sync(this.values);
 
                     return;
@@ -392,7 +488,14 @@ class ListImpl {
             }
         }
 
-        for (const [at, value] of pairs) this.entries[at]?.update(value, at);
+        for (const [at, item] of items) {
+            const entry = this.entries[at];
+
+            if (!entry) continue;
+
+            entry.update(item, at);
+            entry.item = item;
+        }
 
         // 交换之后 DOM 的先后要跟着换
         this.reorderIfNeeded();
@@ -404,11 +507,14 @@ class ListImpl {
 
         if (!Number.isInteger(at) || at < 0 || at >= this.entries.length) return;
 
-        this.values[at] = value;
+        // 项带下标时（`entries()`）同样要拼成 `[at, value]`
+        const item = this.itemFor(at, value);
+
+        this.values[at] = item;
 
         // 有 key 且这一项的身份变了：它不再对应这个位置，只能重新比对
         if (this.options.key) {
-            const key = this.options.key(value, at);
+            const key = this.options.key(item, at);
 
             if (this.entries[at].key !== key) {
                 this.sync(this.values);
@@ -417,7 +523,8 @@ class ListImpl {
             }
         }
 
-        this.entries[at].update(value, at);
+        this.entries[at].update(item, at);
+        this.entries[at].item = item;
     }
 
     /**
@@ -445,6 +552,7 @@ class ListImpl {
         this.values[at] = item;
 
         this.entries[at].update(item, at);
+        this.entries[at].item = item;
     }
 
     /** `map.delete(k)` / `set.delete(v)`：删掉那一项，后面的内容跟着换 */
