@@ -49,6 +49,21 @@ tsconfig.json       内含 types: ["@graints/runtime"]
 
 安装 **`grain-ts.grain-vscode`** 扩展 (初始化项目后的 `.vscode/extensions.json` 会推荐它)， 用于 `.grain` 文件内的语法高亮、诊断、补全、跳转定义和组件属性提示。
 
+**悬停**给出的是类型，不只是声明源码，而且模板里也能用 —— 不限于 `<script>`：
+
+```grain
+<p>{title}</p>                 <!-- let title: string -->
+
+{#for item of items}
+    <p>{item.name}</p>         <!-- let item: { name: string; count: number } -->
+{/for}
+```
+
+`for` 里的表达式、以及循环变量本身（`{#for item of items}` 里的 `item`）都算。做法是把
+表达式包进一句真的 `for (let item of items) { ... }` 再去问 TypeScript 语言服务 —— 循环
+变量的类型由它自己推，不去手写推导，所以数组、`Map`、`Set`、`entries()`、解构绑定
+（`[i, item]`）全都对得上。
+
 ## 类型
 
 `$state`、 `$props`、 `$bindable` 及 `*.grain` 模块类型来自运行时包
@@ -512,6 +527,28 @@ picked.add('blue');      // -> list.set_key('blue', 'blue')  Set 的值就是它
     <p>{i}: {x}</p>
 {/for}
 ```
+
+### 只重跑变了的那几行
+
+一行只有**值**真的变了才会被重跑。换顺序是搬动已有的行、内容不动；整个数组重新
+赋值则每一行都重跑：
+
+```grain
+function flipInPlace() {
+    [items[0], items[1]] = [items[1], items[0]];   // 搬动行，什么都不重跑
+}
+
+function replace() {
+    items = [items[1], items[0]];                  // 换了个数组 —— 每一行都重跑
+}
+```
+
+第二种走全量刷是刻意的：`items = ...` 是把这个变量换掉，"重跑"就是这个写法本身的意思。
+差别在有副作用的表达式上 —— 行里写了 `{Math.random()}` 的话，`flipInPlace()` 之后那个数
+字不变，`replace()` 之后会换一个新的。
+
+`entries()` 的交换能这么便宜，靠的就是这条：一行的身份是它的**值**，下标只是位置。所以
+行跟着值走，只有 `{i}` 那一块重跑。
 
 ### 编译器看不见那次写入时
 

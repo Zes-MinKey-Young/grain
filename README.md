@@ -50,6 +50,23 @@ Install the **`grain-ts.grain-vscode`** extension (`.vscode/extensions.json` in 
 recommends it) for highlighting, diagnostics, completion, go-to-definition and component
 prop hints inside `.grain` files.
 
+**Hover** reports the type, not just the declaration, and it works in the template — not only
+in `<script>`:
+
+```grain
+<p>{title}</p>                 <!-- let title: string -->
+
+{#for item of items}
+    <p>{item.name}</p>         <!-- let item: { name: string; count: number } -->
+{/for}
+```
+
+That covers expressions inside a `for`, and the loop variable itself (`item` in
+`{#for item of items}`). The extension asks the TypeScript language service with the expression
+wrapped in a real `for (let item of items) { ... }`, so the loop variable's type is inferred by
+TS rather than reconstructed here — arrays, `Map`, `Set`, `entries()` and destructured bindings
+(`[i, item]`) all come out right.
+
 ## Types
 
 `$state`, `$props`, `$bindable` and the `*.grain` module type come from the runtime
@@ -567,6 +584,28 @@ fall back to a comparison:
     <p>{i}: {x}</p>
 {/for}
 ```
+
+### Only the rows that changed
+
+A row is re-run only when its **value** changed. Reordering moves the existing rows and leaves
+their contents alone; assigning a whole new array re-runs every row:
+
+```grain
+function flipInPlace() {
+    [items[0], items[1]] = [items[1], items[0]];   // rows move, nothing is re-run
+}
+
+function replace() {
+    items = [items[1], items[0]];                  // a new array — every row is re-run
+}
+```
+
+The second one is a full refresh on purpose: `items = ...` replaces the variable, and re-running
+is what that means. It shows up with impure expressions — a row containing `{Math.random()}`
+keeps its number after `flipInPlace()` and gets a new one after `replace()`.
+
+For `entries()` this is what makes a swap cheap: a row's identity is its **value**, the index is
+only a position. So the row follows the value and just the `{i}` part is re-run.
 
 ### When the compiler cannot see the write
 
