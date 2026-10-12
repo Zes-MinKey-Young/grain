@@ -191,6 +191,106 @@ function collectAll(source: string, script: Script | null): Map<string, Declarat
 }
 
 /**
+ * 覆盖这个偏移的那些 `for` 的循环头（**由外到内**），写成真的 TS `for` 语句。
+ *
+ * 为什么不自己推循环变量的类型：写一句 `for (let item of items) { ... }` 让 TS 推就好
+ * —— 数组、`Map`、`Set`、`entries()`、解构绑定（`[i, item]`）它全都认得，自己写类型
+ * 推导是在重造轮子，还容易漏。
+ *
+ * 循环头原文里可能没有 `let` / `const`（`{#for item of items}` 就没写），补一个 `let`。
+ */
+function loopHeadersAt(nodes: readonly unknown[], source: string, offset: number): string[] {
+    const headers: string[] = [];
+
+    const visit = (list: readonly unknown[]): void => {
+        for (const node of list) {
+            const current = node as Record<string, any>;
+
+            if (current?.type === 'ForBlock') {
+                const start = Number(current.start ?? 0);
+                const end = Number(current.end ?? 0);
+
+                if (offset >= start && offset <= end && typeof current.raw === 'string') {
+                    const parts = splitForHeader(current.raw);
+                    const binding = (parts?.binding ?? current.raw.split(/\s+of\s/)[0] ?? '').trim();
+                    const range = current.content?.right?.range as [number, number] | undefined;
+
+                    if (binding && range) {
+                        const declared = /^(let|const|var)\b/.test(binding) ? binding : `let ${binding}`;
+
+                        headers.push(`for (${declared} of ${source.slice(range[0], range[1])}) {`);
+                    }
+                }
+
+                // 嵌套的 for 照常进去：内层 hover 时要连外层的变量一起给
+                if (Array.isArray(current.children)) visit(current.children);
+                if (current.fallback) visit(current.fallback.children ?? []);
+            } else if (Array.isArray(current?.children)) {
+                visit(current.children);
+            }
+        }
+    };
+
+    visit(nodes);
+
+    return headers;
+}
+
+/** 光标下的标识符（`source` 里 offset 处那一个词） */
+function wordAt(source: string, offset: number): string | null {
+    const pattern = /[A-Za-z_$][\w$]*/g;
+
+    for (const match of source.matchAll(pattern)) {
+        const from = match.index ?? 0;
+
+        if (offset >= from && offset <= from + match[0].length) return match[0];
+    }
+
+    return null;
+}
+
+/**
+ * 光标是不是停在某个 `for` 的**绑定变量**上（`{#for item of items}` 里的 `item`）。
+ *
+ * 循环头不是表达式，`expressionAt` 找它不到，所以单独认一次 —— 悬停时给出
+ * 循环变量自己的类型。
+ */
+function loopBindingAt(nodes: readonly unknown[], source: string, offset: number): string | null {
+    let found: string | null = null;
+
+    const visit = (list: readonly unknown[]): void => {
+        for (const node of list) {
+            const current = node as Record<string, any>;
+
+            if (current?.type === 'ForBlock' && typeof current.raw === 'string') {
+                const parts = splitForHeader(current.raw);
+
+                if (parts) {
+                    const start = Number(current.contentStart ?? current.start ?? 0);
+                    const from = start + current.raw.indexOf(parts.binding);
+                    const to = from + parts.binding.length;
+
+                    if (offset >= from && offset <= to) {
+                        found = wordAt(source, offset) ?? null;
+
+                        return;
+                    }
+                }
+            }
+
+            if (Array.isArray(current?.children)) visit(current.children);
+            if (current?.fallback) visit(current.fallback.children ?? []);
+
+            if (found) return;
+        }
+    };
+
+    visit(nodes);
+
+    return found;
+}
+
+/**
  * `{for (const item of list)}` 里的循环变量。
  *
  * 循环头不铺进虚拟文件（它不是表达式），所以模板里一用 `item` 就"找不到名字"——
@@ -946,8 +1046,12 @@ export function analyze(source: string, filename: string): Analysis {
         }))
     ];
 
+    // 循环变量的占位声明（`any`）。hover 到 `for` 里的表达式时会把它换成带类型的版本，
+    // 所以留成单独一段，方便按原文替换
+    const loopDeclarations = loops.map((name) => `declare let ${name}: any;`);
+
     const tailLines: string[] = [
-        ...loops.map((name) => `declare let ${name}: any;`),
+        ...loopDeclarations,
         // `$node` 和内置宏（`$store` / `$read`）的声明在 GRAIN_TYPE_SOURCE 里，全局可见
 
         // 只补 bind:this **自己声明**的变量；script 里已有的不重复声明
@@ -1084,9 +1188,48 @@ export function analyze(source: string, filename: string): Analysis {
 
         // 虚拟文件与原文件 offset 一一对应，直接把光标偏移传进去就行
         quickInfo(offset: number): QuickInfo | null {
-            return scripts.some((script) => offset >= script.contentStart && offset <= script.contentEnd)
-                ? typescriptService.quickInfo(virtual, offset)
-                : null;
+            if (scripts.some((script) => offset >= script.contentStart && offset <= script.contentEnd))
+                return typescriptService.quickInfo(virtual, offset)
+            const expression = this.expressionAt(offset);
+
+            // 循环头不是表达式，`expressionAt` 找它不到 —— 单独认一次
+            const binding = root && !expression ? loopBindingAt(root.template.children, source, offset) : null;
+
+            if (!expression && !binding) return null;
+
+            // 把表达式塞进真的 `for` 循环里再问 TS —— 这样循环变量的类型是 TS 自己
+            // 推的，数组 / Map / Set / `entries()` / 解构绑定全都成立
+            const opens = root ? loopHeadersAt(root.template.children, source, offset) : [];
+            const open = opens.length > 0 ? `\n${opens.join('\n')}\n` : '\n';
+
+            /** 追加的文本，和悬停点在它里面的位置 */
+            let tail: string;
+            let at: number;
+
+            if (expression) {
+                const pref = 'var expr$$tmp$ = ';
+
+                tail = pref + expression.raw + ';' + '\n}'.repeat(opens.length);
+                at = virtualText.length + open.length + pref.length + (offset - expression.contentStart);
+            } else {
+                // 悬停的是循环变量本身：for 体留空，把点对准最里层那个 for 头里的名字
+                const before = opens.length > 1 ? `${opens.slice(0, -1).join('\n')}\n` : '';
+
+                tail = '}'.repeat(opens.length);
+                at =
+                    virtualText.length +
+                    1 +
+                    before.length +
+                    (opens[opens.length - 1] ?? '').indexOf(binding!);
+            }
+
+            typescriptService.update(virtual, virtualText + open + tail);
+            const info = typescriptService.quickInfo(virtual, at);
+
+            // 还原：临时声明只在这一次 hover 里有效，别留在语言服务里影响别的功能
+            typescriptService.update(virtual, virtualText);
+
+            return info;
         },
 
         semantic(): SemanticProblem[] {
