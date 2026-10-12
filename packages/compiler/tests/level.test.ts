@@ -114,6 +114,33 @@ it("a local taken out of a reactive array keeps its reactivity", async () => {
     expect(rows()).toEqual(["a", "B"]);
 });
 
+it("a local loses its reactivity when the root is also touched", async () => {
+    // 静态约束：同一个函数里既持有派生局部变量、又直接动根变量，就不给它响应性 ——
+    // 否则重新排列 / 删除之后，写那个局部变量会去刷新一个跟它无关的数组
+    const target = await mount(`<script>
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]);
+
+        function dropAndModify() {
+            const third = arr[2];
+            arr = [arr[0], arr[1]];
+            third.name = 'C';
+        }
+    </script>
+    {#for item of arr}
+        <span>{item.name}</span>
+    {/for}
+    <button onclick={dropAndModify}>go</button>`);
+
+    const rows = () => [...target.querySelectorAll("span")].map((node) => node.textContent);
+
+    expect(rows()).toEqual(["a", "b", "c"]);
+
+    target.querySelector("button")!.click();
+
+    // 数组本身变了（少了第三项），但写 third 不算写 arr —— 不会多刷一次
+    expect(rows()).toEqual(["a", "b"]);
+});
+
 it("a local taken out of a level-0 variable is not reactive", async () => {
     // 根不追踪内部时，从它取出来的局部变量也不该有响应性
     const target = await mount(`<script>

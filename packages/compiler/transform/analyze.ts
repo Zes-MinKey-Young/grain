@@ -270,9 +270,12 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
 
     // 第三遍：从响应式变量里取出来的局部变量（`const minkey = arr[2]`）。
     //
-    // 它继承根变量的响应性 —— 之后写它就等于写根上那个。编译器不需要真记住路径：
-    // 依赖本来就挂在根变量上，只要别漏刷新就行（所以这里是粗粒度的，改哪一属性
-    // 都会刷读这个变量的片段）。
+    // 它继承根变量的响应性 —— 之后写它就等于写根上那个。
+    //
+    // 但有个静态约束：这个函数里**不能同时直接动根变量**。一旦动了（重新排列、删元素、
+    // 追加……），那个局部变量可能已经指向一个不在数组里的东西，之后写它就会去刷新一个
+    // 跟它无关的数组 —— 编译期判断不了是哪一种，所以干脆不给它响应性。这是框架对使用
+    // 者的限制：要么只写局部变量，要么别持有它。
     for (const info of functions.values()) {
         simpleTraverse(info.node, {
             enter(child) {
@@ -292,6 +295,9 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
 
                 // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
                 if (!state || state.level < 1) return;
+
+                // 同一个函数里还直接动了根变量：这个局部变量随时可能失效，不给响应性
+                if (info.writes.has(root)) return;
 
                 states.set(child.id.name, {
                     name: child.id.name,

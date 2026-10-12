@@ -525,9 +525,25 @@ Two things to know:
 - it is **coarse**: any write through the local refreshes everything that reads the root
   variable. Use `items[i] = { ... }` (which becomes `list.set_at(i, ...)`) when you want
   just that row
-- there is no borrow checking. The docs elsewhere describe a local losing its reactivity when
-  an unrelated part of the root is modified; that is not implemented — the local simply stays
-  reactive, which errs towards refreshing
+- **the root must not be touched in the same function.** If the function also writes the root
+  variable — reordering, removing, appending — the local is not given reactivity at all. The
+  reason is that after a reorder or a removal the local may point at something that is no
+  longer in the array, and writing it would refresh an array it has nothing to do with. Which
+  of the two happened is not decidable at compile time, so the rule is static: either write
+  through the local, or do not hold one.
+
+```grain
+function ok() {
+    const minkey = arr[1];
+    minkey.name = 'Grain';        // fine — arr itself is untouched here
+}
+
+function notTracked() {
+    const third = arr[2];
+    arr = [arr[0], arr[1]];       // touching the root…
+    third.name = 'Grain';         // …so this does not schedule anything
+}
+```
 
 ## Reactive loops
 
