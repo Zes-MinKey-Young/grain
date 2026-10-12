@@ -147,9 +147,9 @@ function fileReference(from, to) {
 /**
  * vite.config 里怎么引到插件。
  *
- * 链到本地仓库时必须走**源码路径**：Vite 打包 config 时会把 nodeModules 里的依赖
+ * 链到本地仓库时必须走**源码路径**：Vite 打包 config 时会把 node_modules 里的依赖
  * 留在外部，之后 Node 去加载它就会撞上 "Stripping types is unsupported for files
- * under nodeModules"（`@grain/vite-plugin` 的入口是 index.ts）。
+ * under node_modules"（`@grain/vite-plugin` 的入口是 index.ts）。
  * 从源码路径引，它就跟着 config 一起被打进去了。
  */
 function pluginImport(target, repository) {

@@ -1,6 +1,8 @@
 node_modules
 svelte
 .tmp
+# 测试运行时把编译产物写成这种临时文件（happy-dom 里 import 用），别让它进版本库
+**/.tmp-*
 dist
 .vscode-test
 *.vsix

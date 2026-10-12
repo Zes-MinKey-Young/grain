@@ -8,7 +8,7 @@ import { join } from 'node:path';
  * （也就是 dist/），算出来的是 `dist/lib.dom.d.ts` 这种路径。不复制过去的话，
  * 连 `string`、DOM 这些内置类型都读不到 —— 语言服务会满屏"找不到名称"。
  */
-const from = join('nodeModules', 'typescript', 'lib');
+const from = join('node_modules', 'typescript', 'lib');
 const to = 'dist';
 
 mkdirSync(to, { recursive: true });

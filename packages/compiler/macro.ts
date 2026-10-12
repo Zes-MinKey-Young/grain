@@ -133,7 +133,7 @@ function resolveModule(from: string, specifier: string): string {
  * 编译期跑一个外部模块。
  *
  * 转 CommonJS 之后用 `new Function` 跑，拿到它的 exports——宏脚本只能 import
- * 相对路径，所以这条链是封闭的：不会碰到 nodeModules，也不会有原生模块。
+ * 相对路径，所以这条链是封闭的：不会碰到 node_modules，也不会有原生模块。
  */
 function runModule(path: string, cache: Map<string, unknown>): unknown {
     const cached = cache.get(path);
@@ -312,7 +312,7 @@ export class MacroScope {
     /**
      * 一条 import。
      *
-     * 只允许相对路径（nodeModules 里的东西编译期没法保证能跑），
+     * 只允许相对路径（node_modules 里的东西编译期没法保证能跑），
      * 而且**本地名必须带 `$`**——跟 runes 一致，一眼能看出是编译期的东西。
      */
     private readImport(node: TSESTree.ImportDeclaration, [start, end]: [number, number]): void {
@@ -320,7 +320,7 @@ export class MacroScope {
 
         if (typeof source !== 'string' || !source.startsWith('.')) {
             throw new ParseError(
-                `Macros can only import relative paths — \`${String(source)}\` is not one (it runs at compile time, so packages from nodeModules are not available)`,
+                `Macros can only import relative paths — \`${String(source)}\` is not one (it runs at compile time, so packages from node_modules are not available)`,
                 start,
                 end
             );
