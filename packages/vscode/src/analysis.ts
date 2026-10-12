@@ -15,7 +15,8 @@ import type {
     Root,
     RootStage,
     Script,
-    TemplateNode
+    TemplateNode,
+    TSProgram
 } from '../../compiler/index.js';
 import { log } from './log.js';
 import {
@@ -102,6 +103,12 @@ export interface Analysis {
     semantic(): SemanticProblem[];
     /** 光标下标识符的全部引用（含声明本身）：script / 模板表达式 / if / for 都算 */
     references(offset: number): Reference[];
+    /**
+     * 所有 `$state` 变量的引用（含声明本身）。
+     *
+     * 扩展用它给响应式变量画黄色下划线 —— 一眼能看出哪些变量是响应式的。
+     */
+    stateReferences(): Reference[];
     /** 光标下的标识符名（script / module / onmount / 模板表达式 都算） */
     nameAt(offset: number): string | null;
     /** 名字对应的 `bind:this`（变量形式才有） */
@@ -155,6 +162,99 @@ function collectDeclarations(source: string, script: Script | null): Map<string,
     }
 
     return declarations;
+}
+
+/** `$state` 声明的变量名在源码里的位置（`let x = $state(...)` 里的 `x`） */
+function stateNameRanges(program: TSProgram): Array<[number, number]> {
+    const found: Array<[number, number]> = [];
+
+    for (const statement of program.body) {
+        if (statement.type !== 'VariableDeclaration') continue;
+
+        for (const declarator of statement.declarations) {
+            if (declarator.id.type !== 'Identifier') continue;
+
+            const init = declarator.init;
+
+            if (
+                init?.type === 'CallExpression' &&
+                init.callee.type === 'Identifier' &&
+                init.callee.name === '$state'
+            ) {
+                found.push(declarator.id.range);
+            }
+        }
+    }
+
+    return found;
+}
+
+/**
+ * 所有 `$state` 变量的引用（含声明本身），位置是**源码**坐标。
+ *
+ * 自己扫而不问 TS：虚拟文件把 `$state(...)` 换成了裸值，长度跟源码不一样，TS 给的
+ * 位置映射回来会错位（实测装饰落到了分号后面）。
+ */
+function stateReferencesOf(
+    source: string,
+    scripts: Array<Script | null | undefined>,
+    expressions: ExpressionRegion[]
+): Reference[] {
+    /** 名字 -> 声明位置（`$state` 变量 + 从它们取出来的局部变量） */
+    const names = new Map<string, [number, number]>();
+
+    for (const script of scripts) {
+        if (!script) continue;
+
+        const analysis = analyzeScript(script.content, source);
+
+        for (const state of analysis.states.values()) {
+            if (state.nameRange) names.set(state.name, state.nameRange);
+        }
+    }
+
+    if (names.size === 0) return [];
+
+    const found: Reference[] = [];
+
+    // script / module / onmount 里：走 TS AST，属性名（`obj.count` 的 count）不算
+    for (const script of scripts) {
+        if (!script) continue;
+
+        // walk 只给节点，父子关系靠 `parent` 字段拿（estree 解析时带上了）
+        walk(script.content, (node) => {
+            if (node?.type !== 'Identifier' || !names.has(node.name)) return;
+
+            const parent = node.parent;
+
+            if (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
+            if (parent?.type === 'Property' && parent.key === node && !parent.computed) return;
+
+            const [start, end] = node.range;
+
+            found.push({ start, end });
+        });
+    }
+
+    // 模板表达式里：源码文本上找，同样不算属性名
+    for (const expression of expressions) {
+        for (const name of names.keys()) {
+            const pattern = new RegExp(`(^|[^\\w$.])${name}(?![\\w$])`, 'g');
+
+            for (const match of expression.raw.matchAll(pattern)) {
+                const at = match.index + match[0].length - name.length;
+
+                found.push({
+                    start: expression.contentStart + at,
+                    end: expression.contentStart + at + name.length
+                });
+            }
+        }
+    }
+
+    const unique = new Map(found.map((reference) => [reference.start, reference]));
+
+    return [...unique.values()].sort((a, b) => a.start - b.start);
 }
 
 /** 递归收集所有层级的声明，同名时保留最靠前的那个 */
@@ -1282,6 +1382,14 @@ export function analyze(source: string, filename: string): Analysis {
 
         references(offset: number): Reference[] {
             return typescriptService.references(virtual, offset);
+        },
+
+        stateReferences(): Reference[] {
+            return stateReferencesOf(
+                source,
+                [root?.script, root?.module, root?.onmount],
+                expressions as Expression[]
+            );
         },
 
         definition(offset: number): Definition[] {

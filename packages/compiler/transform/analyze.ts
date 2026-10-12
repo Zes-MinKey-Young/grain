@@ -13,6 +13,8 @@ export interface StateInfo {
     init: string;
     /** 整个 `$state(...)` 调用在 SFC 里的 range */
     range: [number, number];
+    /** 变量名自己的位置（`let x = ...` 里的 `x`）—— 派生局部变量也记 */
+    nameRange: [number, number];
     /**
      * 响应式级别。
      *
@@ -161,6 +163,44 @@ export function collectReads(node: TSESTree.Node): Set<string> {
     return names;
 }
 
+/**
+ * 这一个节点写了哪些 `$state` 根变量。
+ *
+ * 用来实现借用规则：写了根变量，之前从它取出来的局部变量就失效。
+ */
+function writtenRoots(node: TSESTree.Node): string[] {
+    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
+        const target = node.type === 'AssignmentExpression' ? node.left : node.argument;
+
+        return rootOf(target) ? [rootOf(target)!] : [];
+    }
+
+    if (node.type === 'CallExpression') {
+        const callee = node.callee;
+
+        if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
+            if (MUTATION_METHODS.has(callee.property.name)) {
+                const root = rootOf(callee.object);
+
+                return root ? [root] : [];
+            }
+        }
+    }
+
+    return [];
+}
+
+/**
+ * 声明语句里变量名的位置。
+ *
+ * `const minkey = arr[2]` 的 range 覆盖整句，名字要单独找 —— 在 `=` 前面那段里捞。
+ */
+function findNameRange(range: [number, number], name: string, source: string): [number, number] {
+    const at = source.indexOf(name, range[0]);
+
+    return at >= 0 && at < range[1] ? [at, at + name.length] : range;
+}
+
 /** `a.b.c` / `a[0].b` 这种路径最左边那个标识符 */
 function rootOf(node: TSESTree.Node): string | null {
     let current: TSESTree.Node = node;
@@ -233,6 +273,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                 name: declarator.id.name,
                 init: argument ? slice(source, argument.range) : 'undefined',
                 range: init.range,
+                nameRange: declarator.id.range,
                 level: levelOf(init)
             });
         }
@@ -272,42 +313,68 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     //
     // 它继承根变量的响应性 —— 之后写它就等于写根上那个。
     //
-    // 但有个静态约束：这个函数里**不能同时直接动根变量**。一旦动了（重新排列、删元素、
-    // 追加……），那个局部变量可能已经指向一个不在数组里的东西，之后写它就会去刷新一个
-    // 跟它无关的数组 —— 编译期判断不了是哪一种，所以干脆不给它响应性。这是框架对使用
-    // 者的限制：要么只写局部变量，要么别持有它。
+    // 借用规则（照 Rust 的精神）：对同一个根变量，**后一次取出让前一次的全部失效**；
+    // 写根变量也让之前取出的全部失效。原因是重新排列或者删除之后，先前取出的那个局部
+    // 变量可能已经指向一个不在数组里的东西，再写它就会去刷新一个跟它无关的数组 ——
+    // 而到底是哪一种情况，编译期判断不了，所以用这条静态规则一刀切。
     for (const info of functions.values()) {
+        /** 根变量 -> 它当前还"活着"的那个派生名 */
+        const alive = new Map<string, string>();
+
+        /** 这个函数里派生成功的局部变量（最后统一登记进 states） */
+        const borrowed: Array<{ name: string; root: string; init: string; range: [number, number] }> = [];
+
+        /** 让某个根上当前活着的派生失效 */
+        const kill = (root: string): void => {
+            alive.delete(root);
+        };
+
         simpleTraverse(info.node, {
             enter(child) {
-                if (child.type !== 'VariableDeclarator') return;
-                if (child.id.type !== 'Identifier' || !child.init) return;
-                if (states.has(child.id.name)) return;
+                // 取出：`const x = arr[i]` / `const x = arr.prop`
+                if (child.type === 'VariableDeclarator' && child.id.type === 'Identifier' && child.init) {
+                    if (child.init.type === 'MemberExpression') {
+                        const root = rootOf(child.init);
+                        const state = root ? states.get(root) : undefined;
 
-                // 只认"取属性 / 元素"。直接取整个变量（`const x = arr`）的，它自己
-                // 就是，不用派生；取原始值（`const x = arr[0].name`）的，写它也没意义
-                if (child.init.type !== 'MemberExpression') return;
+                        // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
+                        if (state && state.level >= 1) {
+                            // 同一个根上之前取过的那些，到这儿就失效了
+                            kill(root!);
 
-                const root = rootOf(child.init);
+                            alive.set(root!, child.id.name);
+                            borrowed.push({
+                                name: child.id.name,
+                                root: root!,
+                                init: slice(source, child.init.range),
+                                range: child.range
+                            });
+                        }
+                    }
 
-                if (!root) return;
+                    return;
+                }
 
-                const state = states.get(root);
-
-                // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
-                if (!state || state.level < 1) return;
-
-                // 同一个函数里还直接动了根变量：这个局部变量随时可能失效，不给响应性
-                if (info.writes.has(root)) return;
-
-                states.set(child.id.name, {
-                    name: child.id.name,
-                    init: slice(source, child.init.range),
-                    range: child.range,
-                    level: state.level,
-                    from: root
-                });
+                // 写根变量：之前取出的全部失效
+                for (const root of writtenRoots(child)) kill(root);
             }
         });
+
+        for (const item of borrowed) {
+            // 只有最后还活着的那些才真的有响应性
+            if (alive.get(item.root) !== item.name) continue;
+            if (states.has(item.name)) continue;
+
+            states.set(item.name, {
+                name: item.name,
+                init: item.init,
+                range: item.range,
+                // 名字在声明语句里的位置：`const minkey = arr[2]` 的 minkey
+                nameRange: findNameRange(item.range, item.name, source),
+                level: states.get(item.root)!.level,
+                from: item.root
+            });
+        }
     }
 
     return { states, functions };

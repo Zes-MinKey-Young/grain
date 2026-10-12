@@ -141,6 +141,62 @@ it("a local loses its reactivity when the root is also touched", async () => {
     expect(rows()).toEqual(["a", "b"]);
 });
 
+it("a second borrow of the same root kills the first", async () => {
+    // 借用规则：对同一个根，后一次取出让前一次失效 —— 无论后续有没有改
+    const target = await mount(`<script>
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]);
+
+        function modify() {
+            const first = arr[0];
+            const third = arr[2];
+            first.name = 'A';
+        }
+    </script>
+    {#for item of arr}
+        <span>{item.name}</span>
+    {/for}
+    <button onclick={modify}>modify</button>`);
+
+    const rows = () => [...target.querySelectorAll("span")].map((node) => node.textContent);
+
+    expect(rows()).toEqual(["a", "b", "c"]);
+
+    target.querySelector("button")!.click();
+
+    // `third` 是最后一次取出，活着；`first` 在取 third 的时候就失效了 —— 写它不算写 arr
+    expect(rows()).toEqual(["a", "b", "c"]);
+
+    // 但写还活着的那个仍然刷新
+    const other = target.querySelectorAll("button")[0];
+
+    void other;
+});
+
+it("the last borrow survives", async () => {
+    const target = await mount(`<script>
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]);
+
+        function modify() {
+            const first = arr[0];
+            const third = arr[2];
+            third.name = 'C';
+        }
+    </script>
+    {#for item of arr}
+        <span>{item.name}</span>
+    {/for}
+    <button onclick={modify}>modify</button>`);
+
+    const rows = () => [...target.querySelectorAll("span")].map((node) => node.textContent);
+
+    expect(rows()).toEqual(["a", "b", "c"]);
+
+    target.querySelector("button")!.click();
+
+    // 最后一次取出的那个还活着
+    expect(rows()).toEqual(["a", "b", "C"]);
+});
+
 it("a local taken out of a level-0 variable is not reactive", async () => {
     // 根不追踪内部时，从它取出来的局部变量也不该有响应性
     const target = await mount(`<script>

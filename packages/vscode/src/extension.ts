@@ -213,6 +213,54 @@ export function activate(context: vscode.ExtensionContext): void {
 
     context.subscriptions.push(statusItem);
 
+    // 响应式变量画黄色下划线 —— 一眼能看出哪些变量是响应式的。
+    // 用装饰而不是 diagnostic：后者会进「问题」面板，每个引用都挂一条太吵。
+    // 直线而不是波浪：波浪看着跟 warning 一样，分不清是提示还是报错
+    const reactive = vscode.window.createTextEditorDecorationType({
+        textDecoration: 'underline solid #d4af37'
+    });
+
+    context.subscriptions.push(reactive);
+
+    const paintReactive = (editor: vscode.TextEditor | undefined): void => {
+        if (!editor || !isGrain(editor.document)) return;
+
+        // 缓存那份可能不是当前版本（文档改过了）—— 位置错位就是这么来的，
+        // 所以版本不符就按眼前的文本重新分析
+        let cached = analyses.get(editor.document.uri.toString());
+
+        if (!cached || cached.version !== editor.document.version) {
+            cached = {
+                analysis: getAnalysisModule().analyze(editor.document.getText(), editor.document.uri.fsPath),
+                version: editor.document.version
+            };
+
+            analyses.set(editor.document.uri.toString(), cached);
+        }
+
+        editor.setDecorations(
+            reactive,
+            cached.analysis.stateReferences().map((reference) => {
+                const start = editor.document.positionAt(reference.start);
+                const end = editor.document.positionAt(reference.end);
+
+                return new vscode.Range(start, end);
+            })
+        );
+    };
+
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(paintReactive),
+        // 文档改过之后重新画：分析结果由 registerProviders 那边更新，这里只取最新的
+        vscode.workspace.onDidChangeTextDocument((event) => {
+            if (event.document.uri.toString() === vscode.window.activeTextEditor?.document.uri.toString()) {
+                paintReactive(vscode.window.activeTextEditor);
+            }
+        })
+    );
+
+    paintReactive(vscode.window.activeTextEditor);
+
     const syncDebug = () =>
         setDebug(vscode.workspace.getConfiguration('grain').get<boolean>('debug', false));
 
