@@ -13,6 +13,22 @@ export interface StateInfo {
     init: string;
     /** 整个 `$state(...)` 调用在 SFC 里的 range */
     range: [number, number];
+    /**
+     * 响应式级别。
+     *
+     * `0`：只追踪这个变量本身被重赋值。
+     * `1`：同时追踪它内部的变化（数组 / `Map` / `Set` 的默认值）。
+     *
+     * 原始值只能是 `0` —— 它们没有"内部"可言。
+     */
+    level: number;
+    /**
+     * 这个变量是从哪个响应式变量里取出来的（`const minkey = arr[2]` → `'arr'`）。
+     *
+     * 顶层 `$state` 没有这个字段。有的话，写它就等于写根上那个 —— 依赖是挂在
+     * 根上的，不认这条线就漏刷新。
+     */
+    from?: string;
 }
 
 export type FunctionLike =
@@ -77,20 +93,36 @@ function baseNames(node: TSESTree.Node): string[] {
     }
 }
 
-/** 收集一段代码写过的变量名 */
-export function collectWrites(node: TSESTree.Node): Set<string> {
+/**
+ * 收集一段代码写过的变量名。
+ *
+ * `shallow` 里是级别 0 的 `$state` 变量：改它们**内部**不算写（`obj.a = 1`），
+ * 只有把它们整个换掉才算（`obj = { ... }`）。
+ */
+export function collectWrites(node: TSESTree.Node, shallow?: Set<string>): Set<string> {
     const names = new Set<string>();
 
     simpleTraverse(node, {
         enter(child) {
             switch (child.type) {
                 case 'AssignmentExpression':
-                    for (const name of baseNames(child.left)) names.add(name);
-                    break;
+                case 'UpdateExpression': {
+                    const target =
+                        child.type === 'AssignmentExpression' ? child.left : child.argument;
 
-                case 'UpdateExpression':
-                    for (const name of baseNames(child.argument)) names.add(name);
+                    // 级别 0 的变量，改内部不算写它
+                    if (
+                        shallow?.size &&
+                        target.type === 'MemberExpression' &&
+                        target.object.type === 'Identifier' &&
+                        shallow.has(target.object.name)
+                    ) {
+                        break;
+                    }
+
+                    for (const name of baseNames(target)) names.add(name);
                     break;
+                }
 
                 case 'CallExpression': {
                     const callee = child.callee;
@@ -129,34 +161,101 @@ export function collectReads(node: TSESTree.Node): Set<string> {
     return names;
 }
 
+/** `a.b.c` / `a[0].b` 这种路径最左边那个标识符 */
+function rootOf(node: TSESTree.Node): string | null {
+    let current: TSESTree.Node = node;
+
+    while (current.type === 'MemberExpression') current = current.object;
+
+    return current.type === 'Identifier' ? current.name : null;
+}
+
+/** `$state(...)` 这个调用 */
+function isState(node: TSESTree.Node | null | undefined): node is TSESTree.CallExpression {
+    return (
+        !!node &&
+        node.type === 'CallExpression' &&
+        node.callee.type === 'Identifier' &&
+        node.callee.name === '$state'
+    );
+}
+
+/**
+ * 不写第二个参数时，哪些初始值默认"追踪内部"。
+ *
+ * 数组、`Map`、`Set` 默认 `1` —— 它们是容器，内部变化就是它们的内容；其他（对象、
+ * 类实例、函数）默认 `0`，要追踪内部得显式写出来。
+ */
+function defaultLevel(value: TSESTree.Expression | undefined): number {
+    if (!value) return 0;
+
+    if (value.type === 'ArrayExpression') return 1;
+
+    if (value.type === 'NewExpression') {
+        const name = value.callee.type === 'Identifier' ? value.callee.name : '';
+
+        return name === 'Map' || name === 'Set' ? 1 : 0;
+    }
+
+    return 0;
+}
+
+/** `$state(x, level)` 的 level —— 第二个参数，只认数字字面量 */
+function levelOf(call: TSESTree.CallExpression): number {
+    const given = call.arguments[1];
+
+    // `...args` 展开的说不清，按默认来
+    if (given && given.type === 'Literal' && typeof given.value === 'number') return given.value;
+
+    const first = call.arguments[0];
+
+    return defaultLevel(first && first.type !== 'SpreadElement' ? first : undefined);
+}
+
 /** 扫描 `<script>` 顶层：找出 `$state` 变量和顶层函数 */
 export function analyzeScript(program: TSProgram, source: string): ScriptAnalysis {
     const states = new Map<string, StateInfo>();
     const functions = new Map<string, FunctionInfo>();
 
+    // 第一遍：$state 变量。级别要先定下来 —— 第二遍收集写入时要用它判断
+    // "改内部算不算写这个变量"
+    for (const statement of program.body) {
+        if (statement.type !== 'VariableDeclaration') continue;
+
+        for (const declarator of statement.declarations) {
+            const init = declarator.init;
+
+            if (!isState(init) || declarator.id.type !== 'Identifier') continue;
+
+            const argument = init.arguments[0];
+
+            states.set(declarator.id.name, {
+                name: declarator.id.name,
+                init: argument ? slice(source, argument.range) : 'undefined',
+                range: init.range,
+                level: levelOf(init)
+            });
+        }
+    }
+
+    // 级别 0 的那些：改它们内部不算写（它们只追踪自己被重赋值）
+    const shallow = new Set(
+        [...states.values()].filter((state) => state.level === 0).map((state) => state.name)
+    );
+
     for (const statement of program.body) {
         if (statement.type === 'VariableDeclaration') {
             for (const declarator of statement.declarations) {
                 const init = declarator.init;
+
                 if (!init || declarator.id.type !== 'Identifier') continue;
+                if (isState(init)) continue;
 
-                if (
-                    init.type === 'CallExpression' &&
-                    init.callee.type === 'Identifier' &&
-                    init.callee.name === '$state'
-                ) {
-                    const argument = init.arguments[0];
-
-                    states.set(declarator.id.name, {
-                        name: declarator.id.name,
-                        init: argument ? slice(source, argument.range) : 'undefined',
-                        range: init.range
-                    });
-                } else if (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression') {
+                if (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression') {
                     functions.set(declarator.id.name, {
                         name: declarator.id.name,
                         node: init,
-                        writes: collectWrites(init)
+                        writes: collectWrites(init, shallow)
                     });
                 }
             }
@@ -164,9 +263,45 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
             functions.set(statement.id.name, {
                 name: statement.id.name,
                 node: statement,
-                writes: collectWrites(statement)
+                writes: collectWrites(statement, shallow)
             });
         }
+    }
+
+    // 第三遍：从响应式变量里取出来的局部变量（`const minkey = arr[2]`）。
+    //
+    // 它继承根变量的响应性 —— 之后写它就等于写根上那个。编译器不需要真记住路径：
+    // 依赖本来就挂在根变量上，只要别漏刷新就行（所以这里是粗粒度的，改哪一属性
+    // 都会刷读这个变量的片段）。
+    for (const info of functions.values()) {
+        simpleTraverse(info.node, {
+            enter(child) {
+                if (child.type !== 'VariableDeclarator') return;
+                if (child.id.type !== 'Identifier' || !child.init) return;
+                if (states.has(child.id.name)) return;
+
+                // 只认"取属性 / 元素"。直接取整个变量（`const x = arr`）的，它自己
+                // 就是，不用派生；取原始值（`const x = arr[0].name`）的，写它也没意义
+                if (child.init.type !== 'MemberExpression') return;
+
+                const root = rootOf(child.init);
+
+                if (!root) return;
+
+                const state = states.get(root);
+
+                // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
+                if (!state || state.level < 1) return;
+
+                states.set(child.id.name, {
+                    name: child.id.name,
+                    init: slice(source, child.init.range),
+                    range: child.range,
+                    level: state.level,
+                    from: root
+                });
+            }
+        });
     }
 
     return { states, functions };

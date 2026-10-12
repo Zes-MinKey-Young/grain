@@ -481,6 +481,54 @@ const upper = $node({ get: () => name.get().toUpperCase(), listen: (update) => n
 const pushed = $node({ listen: (update) => name.subscribe(update) });
 ```
 
+## Levels of `$state`
+
+`$state()` takes an optional second argument — the reactivity level:
+
+```grain
+let obj = $state({ a: 1 });        // level 0 (the default for objects)
+let deep = $state({ a: 1 }, 1);    // level 1
+```
+
+| Level | What is tracked |
+|---|---|
+| `0` | the variable being reassigned (`obj = { ... }`) |
+| `1` | that, **and** changes inside it (`obj.a = 2`) |
+
+Arrays, `Map` and `Set` default to `1` — they are containers, and their contents *are* what
+they hold. Everything else, **objects included**, defaults to `0`: tracking the inside has to
+be asked for. Primitives can only be `0`; they have no inside.
+
+Because the level is a compile-time decision, a level-0 object is cheaper: `obj.a = 2` does
+not schedule anything. Note that `{#for}` over an object still will not track its properties
+even at level 1 — that is what arrays, `Map` and `Set` are for.
+
+### Locals taken out of a reactive variable
+
+Assign a property or element of a level-1 variable to a local, and the local keeps the
+reactivity:
+
+```grain
+let arr = $state([{ name: 'qaqFei' }, { name: 'Minkey' }]);
+
+function modify() {
+    const minkey = arr[1];
+    minkey.name = 'Grain';        // counts as a write to arr
+}
+```
+
+The compiler knows `minkey` came out of `arr`, so writing through it schedules the same
+refreshes as writing `arr` itself — the loop above updates.
+
+Two things to know:
+
+- it is **coarse**: any write through the local refreshes everything that reads the root
+  variable. Use `items[i] = { ... }` (which becomes `list.set_at(i, ...)`) when you want
+  just that row
+- there is no borrow checking. The docs elsewhere describe a local losing its reactivity when
+  an unrelated part of the root is modified; that is not implemented — the local simply stays
+  reactive, which errs towards refreshing
+
 ## Reactive loops
 
 A loop is caught at one of two times, depending on whether the compiler can see it.

@@ -802,6 +802,10 @@ class Generator {
 
         // 2. `$state(...)` -> 初始值
         for (const state of this.analysis?.states.values() ?? []) {
+            // 派生局部变量（`const minkey = arr[2]`）没有 `$state(...)` 调用要替换，
+            // 它只是"写它等于写根上那个"的登记
+            if (state.from) continue;
+
             edits.push({ start: state.range[0], end: state.range[1], text: state.init });
         }
 
@@ -1051,7 +1055,11 @@ class Generator {
             const body = this.guardChanges(
                 reactive,
                 updates,
-                writesAreAssignments(node, new Set(reactive)),
+                // 用**原始**写入名判断，不是换成根名之后的：派生局部变量
+                // （`const minkey = arr[2]`）写的是 `minkey.name`，提到的是 `minkey`，
+                // 换成 `arr` 之后就查不到它了 —— 而那种改动引用不变、内容变了，
+                // 加上"新旧值比一比"的守卫就会把刷新挡掉
+                writesAreAssignments(node, info.writes),
                 inner
             );
 
@@ -1239,11 +1247,11 @@ class Generator {
                 // 去掉外层花括号，交给 guardChanges 重新包一层
                 const inner = this.bodySource(node.body.range).slice(1, -1);
 
-                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, new Set(reactive)), inner)} }`;
+                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
             } else {
                 const inner = this.bodySource(node.body.range);
 
-                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, new Set(reactive)), inner)} }`;
+                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
             }
 
             output.push(`const ${wrapper.name} = ${head} ${body};`);
@@ -1355,7 +1363,11 @@ class Generator {
         const states = this.analysis?.states;
         if (!states) return new Set();
 
-        return new Set([...writes].filter((name) => states.has(name)));
+        // 派生局部变量（`const minkey = arr[2]`）换成它根上的那个变量：
+        // 依赖是挂在根上的，认不出派生名就漏刷新
+        return new Set(
+            [...writes].filter((name) => states.has(name)).map((name) => states.get(name)!.from ?? name)
+        );
     }
 
     /**

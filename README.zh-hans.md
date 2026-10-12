@@ -163,6 +163,48 @@ const update$0 = creEle('button', { onclick: increment_$1 }, ["count is", () => 
 - 块能自由嵌套并可含有元素、组件、表达式和其他块。
 - 迭代一个 `$state` 数组能在数组变化时重渲染块的部分 (`push`, `splice`, …)。
 
+# 带级别的$state
+`$state()` 可以具有第二个参数，它指定变量的响应式级别。数组、ES6 集合和映射的默认级别是 `1`，即既追踪这个变量，也追踪变量内部发生的变化。其他的值默认级别是 `0`，即仅追踪该变量本身的重赋值。原始值类型不能拥有比 `0` 更高的级别。
+
+注意对象的默认级别也是 `0`，追踪其内部属性需要显式指定。例如 `let obj = $state({ a: 1}, 1);` 意味着当 `obj.a` 被改变时，引用了 `obj.a` 的地方会重新求值。但是，通过 `{#for}` 对 `obj` 进行迭代时并不能追踪 `obj.a` 的变化。这与追踪数组、ES6 集合和映射的行为不同。
+
+当将一个高级变量中的属性或元素绑定到一个局部变量，且该变量不是原始类型且层级不为 `0` 时，该局部变量也会获得响应性，并且编译器能够记住从根响应变量获得该变量的路径。例如：
+```grain
+<script>
+interface Person {
+    name: string,
+    language: string,
+}
+let arr: Person[] = $state([{ name: "qaqFei", language: "C++" }, { name: "MilkCOCO", language: "Rust" }, { name: "Minkey", language: "TypeScript" }]);
+
+function modify() {
+    const minkey = arr[2];
+    minkey.language = "Grain";
+}
+</script>
+
+{#for person of arr}
+    <div>
+        Name: {person.name}<br>
+        Language: {person.language}
+    </div>
+{/for}
+
+<button onclick="modify">Modify</button>
+```
+
+编译器知道 `minkey` 来自 `arr`，且路径是 `arr[2]`。当按钮被按下时，Minkey 的语言被修改为 Grain，这能够导致 `{#for}` 块的更新。
+
+有两点要注意：
+
+- 它是**粗粒度**的：只要通过这个局部变量写，所有读根变量的地方都会刷新。想只动某一行，
+  用 `items[i] = { ... }`（它会变成 `list.set_at(i, ...)`）。
+- **没有实现借用检查**。文档里描述的那种"局部变量响应式存续期间，不能修改根响应对象中
+  与该局部变量无关的部分，否则该局部变量会自动丧失响应性"并没有实现 —— 局部变量会一直
+  保持响应式。这偏的方向是多刷新，不会漏刷新。
+
+响应式变量在 VSCode 扩展中以黄色下划线标记。
+
 # bind
 `bind:` 用于双向绑定，可以把一个响应式变量绑到具有 `$bindable` 属性的子组件或者某些原生元素（比如 `<input>`）。
 ```grain
