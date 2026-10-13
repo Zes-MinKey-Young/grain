@@ -25,12 +25,12 @@ export interface StateInfo {
      */
     level: number;
     /**
-     * 这个变量是从哪个响应式变量里取出来的（`const minkey = arr[2]` → `'arr'`）。
+     * 这个变量是从哪条**路径**上取出来的（`const minkey = arr[2]` → `'arr[2]'`）。
      *
-     * 顶层 `$state` 没有这个字段。有的话，写它就等于写根上那个 —— 依赖是挂在
-     * 根上的，不认这条线就漏刷新。
+     * 顶层 `$state` 没有这个字段。有的话，写它就等于写那条路径 —— `minkey.name = 'x'`
+     * 解析成 `arr[2].name`，只有读它的片段才刷。
      */
-    from?: string;
+    fromPath?: string;
 }
 
 export type FunctionLike =
@@ -96,13 +96,122 @@ function baseNames(node: TSESTree.Node): string[] {
 }
 
 /**
- * 收集一段代码写过的变量名。
+ * 把一个引用表达式转成**路径**：`arr` / `arr[2]` / `arr[2].name`。
+ *
+ * 下标或键是动态的（`arr[i]`、`obj[k]`）时退化成根变量 —— 那种情况静态看不出改的是
+ * 哪一格，只能按整个容器算。
+ *
+ * `aliases` 是派生局部变量（`const minkey = arr[2]` 里的 `minkey`）：它的路径就是
+ * 右边那条，于是 `minkey.name` 会解析成 `arr[2].name`。
+ */
+export function pathOf(
+    node: TSESTree.Node,
+    aliases?: Map<string, string>
+): string | null {
+    if (node.type === 'Identifier') {
+        return aliases?.get(node.name) ?? node.name;
+    }
+
+    if (node.type !== 'MemberExpression') return null;
+
+    const base = pathOf(node.object, aliases);
+
+    if (!base) return null;
+
+    // `a.b`：静态属性名
+    if (!node.computed) {
+        if (node.property.type !== 'Identifier') return null;
+
+        return `${base}.${node.property.name}`;
+    }
+
+    // `a[2]`：字面量下标
+    if (node.property.type === 'Literal' && typeof node.property.value === 'number') {
+        return `${base}[${node.property.value}]`;
+    }
+
+    if (node.property.type === 'Literal' && typeof node.property.value === 'string') {
+        return `${base}.${node.property.value}`;
+    }
+
+    // 动态下标：说不清是哪一格，按整个容器算
+    return base;
+}
+
+/** 路径按 `.` / `[` 切开，用来做前缀比较 */
+function segmentsOf(path: string): string[] {
+    return path.replace(/\[(\d+)\]/g, '.$1').split('.');
+}
+
+/**
+ * 这两条路径有关系吗（一个是另一个的前缀）？
+ *
+ * 写了 `arr[2].name` 该刷：读 `arr[2].name` 的、读 `arr[2]` 的（整个对象换了）、读 `arr`
+ * 的（容器内部变了）。但不该刷读 `arr[0].name` 的 —— 那是另一项。
+ */
+export function touches(write: string, read: string): boolean {
+    if (write === read) return true;
+
+    const a = segmentsOf(write);
+    const b = segmentsOf(read);
+    const shared = Math.min(a.length, b.length);
+
+    for (let i = 0; i < shared; i += 1) {
+        if (a[i] !== b[i]) return false;
+    }
+
+    return true;
+}
+
+/**
+ * 收集一段代码读过的**路径**（属性名本身不算 —— `obj.count` 的 count 不是变量）。
+ */
+export function collectReads(node: TSESTree.Node, aliases?: Map<string, string>): Set<string> {
+    const paths = new Set<string>();
+
+    simpleTraverse(node, {
+        enter(child, parent) {
+            if (child.type !== 'Identifier') return;
+
+            // `obj.count` 的 count、`{ count: 1 }` 的 key 都不是变量引用
+            if (parent?.type === 'MemberExpression' && parent.property === child && !parent.computed) return;
+            if (parent?.type === 'Property' && parent.key === child && !parent.computed) return;
+
+            // 属性名由 pathOf 收，这里只收裸标识符（或派生变量的根）
+            if (parent?.type === 'MemberExpression' && parent.object === child) return;
+
+            const path = pathOf(child, aliases);
+
+            if (path) paths.add(path);
+        }
+    });
+
+    // `arr[2].name`： Identifier 只给了 `arr`，整条链要另外收
+    simpleTraverse(node, {
+        enter(child) {
+            if (child.type !== 'MemberExpression') return;
+
+            const path = pathOf(child, aliases);
+
+            if (path) paths.add(path);
+        }
+    });
+
+    return paths;
+}
+
+/**
+ * 收集一段代码写过的**路径**。
  *
  * `shallow` 里是级别 0 的 `$state` 变量：改它们**内部**不算写（`obj.a = 1`），
  * 只有把它们整个换掉才算（`obj = { ... }`）。
  */
-export function collectWrites(node: TSESTree.Node, shallow?: Set<string>): Set<string> {
-    const names = new Set<string>();
+export function collectWrites(
+    node: TSESTree.Node,
+    shallow?: Set<string>,
+    aliases?: Map<string, string>
+): Set<string> {
+    const paths = new Set<string>();
 
     simpleTraverse(node, {
         enter(child) {
@@ -122,7 +231,17 @@ export function collectWrites(node: TSESTree.Node, shallow?: Set<string>): Set<s
                         break;
                     }
 
-                    for (const name of baseNames(target)) names.add(name);
+                    // 解构赋值（`[a[0], a[1]] = [x, y]`）：每一项各自是一条路径
+                    const targets =
+                        target.type === 'ArrayPattern'
+                            ? target.elements.filter((element) => element !== null)
+                            : [target];
+
+                    for (const one of targets) {
+                        const path = pathOf(one, aliases);
+
+                        if (path) paths.add(path);
+                    }
                     break;
                 }
 
@@ -133,7 +252,10 @@ export function collectWrites(node: TSESTree.Node, shallow?: Set<string>): Set<s
                         callee.property.type === 'Identifier' &&
                         MUTATION_METHODS.has(callee.property.name)
                     ) {
-                        for (const name of baseNames(callee.object)) names.add(name);
+                        // 容器方法（`arr.push(...)`）改的是整个容器
+                        const path = pathOf(callee.object, aliases);
+
+                        if (path) paths.add(path);
                     }
                     break;
                 }
@@ -141,26 +263,7 @@ export function collectWrites(node: TSESTree.Node, shallow?: Set<string>): Set<s
         }
     });
 
-    return names;
-}
-
-/** 收集一段代码读过的变量名（属性名不算） */
-export function collectReads(node: TSESTree.Node): Set<string> {
-    const names = new Set<string>();
-
-    simpleTraverse(node, {
-        enter(child, parent) {
-            if (child.type !== 'Identifier') return;
-
-            // `obj.count` 的 count、`{ count: 1 }` 的 key 都不是变量引用
-            if (parent?.type === 'MemberExpression' && parent.property === child && !parent.computed) return;
-            if (parent?.type === 'Property' && parent.key === child && !parent.computed) return;
-
-            names.add(child.name);
-        }
-    });
-
-    return names;
+    return paths;
 }
 
 /**
@@ -311,7 +414,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
 
     // 第三遍：从响应式变量里取出来的局部变量（`const minkey = arr[2]`）。
     //
-    // 它继承根变量的响应性 —— 之后写它就等于写根上那个。
+    // 它继承根变量的响应性 —— 之后写它就等于写根上那一条路径。记的是**路径**而不是
+    // 根名：`minkey.name = 'x'` 要解析成 `arr[2].name`，才能只刷真正读它的那些片段。
     //
     // 借用规则（照 Rust 的精神）：对同一个根变量，**后一次取出让前一次的全部失效**；
     // 写根变量也让之前取出的全部失效。原因是重新排列或者删除之后，先前取出的那个局部
@@ -322,7 +426,13 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
         const alive = new Map<string, string>();
 
         /** 这个函数里派生成功的局部变量（最后统一登记进 states） */
-        const borrowed: Array<{ name: string; root: string; init: string; range: [number, number] }> = [];
+        const borrowed: Array<{
+            name: string;
+            root: string;
+            path: string;
+            init: string;
+            range: [number, number];
+        }> = [];
 
         /** 让某个根上当前活着的派生失效 */
         const kill = (root: string): void => {
@@ -339,6 +449,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
 
                         // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
                         if (state && state.level >= 1) {
+                            const path = pathOf(child.init) ?? root!;
+
                             // 同一个根上之前取过的那些，到这儿就失效了
                             kill(root!);
 
@@ -346,6 +458,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                             borrowed.push({
                                 name: child.id.name,
                                 root: root!,
+                                path,
                                 init: slice(source, child.init.range),
                                 range: child.range
                             });
@@ -372,7 +485,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                 // 名字在声明语句里的位置：`const minkey = arr[2]` 的 minkey
                 nameRange: findNameRange(item.range, item.name, source),
                 level: states.get(item.root)!.level,
-                from: item.root
+                // 它对应的路径：`minkey` -> `arr[2]`
+                fromPath: item.path
             });
         }
     }
@@ -380,7 +494,18 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     return { states, functions };
 }
 
-export function intersects(a: Set<string>, b: Set<string>): boolean {
-    for (const value of a) if (b.has(value)) return true;
+/**
+ * 这两组路径有交集吗？
+ *
+ * 用 `touches`（前缀匹配）而不是集合相交：写了 `arr[2].name` 该刷读 `arr[2].name` 的、
+ * 读 `arr[2]` 的、读 `arr` 的，但不该刷读 `arr[0].name` 的 —— 那是另一项。
+ */
+export function intersects(reads: Set<string>, writes: Set<string>): boolean {
+    for (const write of writes) {
+        for (const read of reads) {
+            if (touches(write, read)) return true;
+        }
+    }
+
     return false;
 }

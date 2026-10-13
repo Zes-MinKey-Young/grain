@@ -197,6 +197,65 @@ it("the last borrow survives", async () => {
     expect(rows()).toEqual(["a", "b", "C"]);
 });
 
+it("changing one element only refreshes what reads it", async () => {
+    // 路径级依赖：改 `arr[0]` 只刷读 `arr[0]` 的片段，读 `arr[1]` 的不能动
+    const target = await mount(`<script>
+        let arr = $state([{ v: 1 }, { v: 2 }]);
+
+        function changeFirst() {
+            arr[0].v = 10;
+        }
+
+        function changeSecond() {
+            arr[1].v = 20;
+        }
+    </script>
+    <span class="a">{arr[0].v}</span>
+    <span class="b">{arr[1].v}</span>
+    <button onclick={changeFirst}>first</button>
+    <button onclick={changeSecond}>second</button>`);
+
+    const first = () => target.querySelector(".a")!.textContent;
+    const second = () => target.querySelector(".b")!.textContent;
+
+    expect([first(), second()]).toEqual(["1", "2"]);
+
+    target.querySelectorAll("button")[0].click();
+
+    // 只有第一个变了
+    expect([first(), second()]).toEqual(["10", "2"]);
+
+    target.querySelectorAll("button")[1].click();
+
+    expect([first(), second()]).toEqual(["10", "20"]);
+});
+
+it("a local's write only refreshes the path it points at", async () => {
+    // 派生局部变量记的是路径：`minkey.name = ...` 解析成 `arr[2].name`，
+    // 不该刷读 arr[0] / arr[1] 的片段
+    const target = await mount(`<script>
+        let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+        function modify() {
+            const minkey = arr[2];
+            minkey.name = 'Grain';
+        }
+    </script>
+    <span class="zero">{arr[0].name}</span>
+    <span class="two">{arr[2].name}</span>
+    <button onclick={modify}>modify</button>`);
+
+    const zero = () => target.querySelector(".zero")!.textContent;
+    const two = () => target.querySelector(".two")!.textContent;
+
+    expect([zero(), two()]).toEqual(["a", "c"]);
+
+    target.querySelector("button")!.click();
+
+    // 只有下标 2 那个被刷了
+    expect([zero(), two()]).toEqual(["a", "Grain"]);
+});
+
 it("a local taken out of a level-0 variable is not reactive", async () => {
     // 根不追踪内部时，从它取出来的局部变量也不该有响应性
     const target = await mount(`<script>

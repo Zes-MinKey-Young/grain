@@ -804,7 +804,7 @@ class Generator {
         for (const state of this.analysis?.states.values() ?? []) {
             // 派生局部变量（`const minkey = arr[2]`）没有 `$state(...)` 调用要替换，
             // 它只是"写它等于写根上那个"的登记
-            if (state.from) continue;
+            if (state.fromPath) continue;
 
             edits.push({ start: state.range[0], end: state.range[1], text: state.init });
         }
@@ -1363,11 +1363,24 @@ class Generator {
         const states = this.analysis?.states;
         if (!states) return new Set();
 
-        // 派生局部变量（`const minkey = arr[2]`）换成它根上的那个变量：
-        // 依赖是挂在根上的，认不出派生名就漏刷新
-        return new Set(
-            [...writes].filter((name) => states.has(name)).map((name) => states.get(name)!.from ?? name)
-        );
+        const kept = new Set<string>();
+
+        for (const write of writes) {
+            const root = write.split(/[.\[]/)[0];
+            const state = states.get(root);
+
+            if (!state) continue;
+
+            // 派生局部变量：换成它对应的路径，剩下的属性接在后面 ——
+            // `minkey.name` 变成 `arr[2].name`，这样才能只刷读它的片段
+            if (state.fromPath) {
+                kept.add(`${state.fromPath}${write.slice(root.length)}`);
+            } else {
+                kept.add(write);
+            }
+        }
+
+        return kept;
     }
 
     /**

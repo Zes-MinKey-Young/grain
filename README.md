@@ -522,9 +522,11 @@ refreshes as writing `arr` itself — the loop above updates.
 
 Two things to know:
 
-- it is **coarse**: any write through the local refreshes everything that reads the root
-  variable. Use `items[i] = { ... }` (which becomes `list.set_at(i, ...)`) when you want
-  just that row
+- **dependencies are paths, not variables.** `{arr[0].v}` depends on `arr[0].v`, not on `arr`
+  — so changing `arr[1]` does not touch it. A write refreshes the paths it overlaps: writing
+  `arr[2].name` refreshes reads of `arr[2].name`, `arr[2]` and `arr`, but not `arr[0].name`.
+  A dynamic index (`arr[i]`) cannot be resolved statically and falls back to the whole
+  container.
 - **the root must not be touched in the same function.** If the function also writes the root
   variable — reordering, removing, appending — the local is not given reactivity at all. The
   reason is that after a reorder or a removal the local may point at something that is no
