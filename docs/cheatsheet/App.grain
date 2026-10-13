@@ -1,0 +1,30 @@
+<script>
+
+    import Highlight from "./Highlight.grain";
+    let text1 = "<div></div>";
+</script>
+
+<main>
+    <div>
+        <h2>bind:</h2>
+        <Highlight text={text1} />
+    </div>
+
+</main>
+
+<style>
+    main {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        grid-gap: 10px;
+        padding: 10px;
+    }
+    main > div {
+        border: 2px solid grey;
+        border-radius: 8px;
+        padding: 10px;
+    }
+    * {
+        font-family: 'Consolas';
+    }
+</style>

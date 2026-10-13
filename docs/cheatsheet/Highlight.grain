@@ -1,0 +1,13 @@
+<script>
+    import { parse } from "../../packages/compiler";
+    import Node from "./Node.grain";
+    
+    let { text } = $props<{ text: string }>();
+    
+    let result = parse(text);
+</script>
+<pre>
+{#for child of result.template.children}
+    <Node node={child} />
+{/for}
+</pre>

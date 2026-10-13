@@ -1,0 +1,4 @@
+<script>
+    import type { TemplateNode } from "../../packages/compiler";
+    let { node } = $props<{ node: TemplateNode}>();
+</script>
