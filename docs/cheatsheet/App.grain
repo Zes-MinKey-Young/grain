@@ -1,30 +1,47 @@
 <script>
+    import Code from "./Code.grain";
+    import { samples } from "./samples.ts";
 
-    import Highlight from "./Highlight.grain";
-    let text1 = "<div></div>";
+    let title = "Grain cheatsheet";
 </script>
 
 <main>
-    <div>
-        <h2>bind:</h2>
-        <Highlight text={text1} />
-    </div>
+    <h1>{title}</h1>
+    <p class="lead">一页看完 grain 的语法。代码在左，说的是哪件事在下面。</p>
 
+    {#for sample of samples}
+        <section>
+            <h2>{sample.title}</h2>
+            <Code code={sample.code} note={sample.note} />
+        </section>
+    {/for}
 </main>
 
 <style>
-    main {
-        display: grid;
-        grid-template-columns: 1fr 1fr;
-        grid-gap: 10px;
-        padding: 10px;
-    }
-    main > div {
-        border: 2px solid grey;
-        border-radius: 8px;
-        padding: 10px;
-    }
     * {
-        font-family: 'Consolas';
+        font-family: 'Consolas', monospace;
+    }
+    body {
+        margin: 0;
+        background: #fafafa;
+    }
+    main {
+        max-width: 900px;
+        margin: 0 auto;
+        padding: 20px 16px 60px;
+    }
+    h1 {
+        margin-bottom: 4px;
+    }
+    .lead {
+        margin-top: 0;
+        opacity: 0.7;
+    }
+    section {
+        margin-bottom: 24px;
+    }
+    h2 {
+        font-size: 1.05em;
+        margin-bottom: 6px;
     }
 </style>
