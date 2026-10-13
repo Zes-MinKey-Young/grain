@@ -95,6 +95,12 @@ export interface ListEntry {
     nodes: Node[];
     /** 复用这一项时调用：把循环变量重新绑到新值上，再刷依赖它的片段 */
     update(next: unknown, index: number): void;
+    /**
+     * 这一项里某个属性被改了（`items[i].prop = v`）：只刷读了它的那些片段。
+     *
+     * 编译器按属性名分组生成；没给的属性名就什么都不做（那一行没读它）。
+     */
+    updatePath?(prop: string): void;
 }
 
 /**
@@ -169,6 +175,14 @@ export interface List extends Updater {
     splice(at: number, remove: number, ...added: unknown[]): void;
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
     setAt(index: number, value: unknown): void;
+    /**
+     * `items[i].prop = v`：只刷那一行里**读了 `prop`** 的片段。
+     *
+     * 整项没换（还是同一个对象引用），所以按值比对的 `sync` 会跳过它 —— 但它的某个
+     * 属性确实变了，读那个属性的片段得重算。整行重跑的话，行里其它部分（比如
+     * `Math.random()`）也会被重算一遍。
+     */
+    setPath(index: number, prop: string): void;
     /**
      * 一次改多个位置 —— 解构赋值用（`[a[0], a[1]] = [a[1], a[0]]`）。
      *
@@ -499,6 +513,21 @@ class ListImpl {
 
         // 交换之后 DOM 的先后要跟着换
         this.reorderIfNeeded();
+    }
+
+    /**
+     * `items[i].prop = v`：只刷那一行里读了 `prop` 的片段。
+     *
+     * 整项没换（还是同一个对象引用），按值比对的 `sync` 会跳过它 —— 所以这里直接
+     * 问那一行要一个"属性级"的更新。没实现 `updatePath` 的行（老产物）就退回整行刷。
+     */
+    setPath(index: number, prop: string): void {
+        const entry = this.entries[Number(index)];
+
+        if (!entry) return;
+
+        if (entry.updatePath) entry.updatePath(prop);
+        else entry.update(entry.item, Number(index));
     }
 
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */

@@ -2132,6 +2132,45 @@ class Generator {
             .map(([updater, indices]) => `${updater}(${[...indices].sort((a, b) => a - b).join(', ')});`)
             .join(' ');
 
+        /**
+         * 块内读了的**项内属性** -> 该刷哪些片段（按 updater 分组）。
+         *
+         * `{person.language}` 的依赖是 `person.language`，去掉循环变量那段就是 `language`。
+         * `items[i].prop = v` 走 `setPath(i, 'prop')` 打到这里 —— 只刷读了那个属性的
+         * 片段，行里其它部分（`Math.random()`）不重算。
+         *
+         * 整个项（依赖就是循环变量本身）不进任何组：那种改动没有属性可指，只能整行刷。
+         */
+        const valueName = names.length === 2 ? names[1] : pattern;
+        const pathGroups = new Map<string, Map<string, number[]>>();
+
+        if (valueName) {
+            for (const slot of this.slots.slice(slotBase)) {
+                for (const dep of slot.deps) {
+                    if (dep === valueName || !dep.startsWith(`${valueName}.`)) continue;
+
+                    const prop = dep.slice(valueName.length + 1).split('.')[0];
+                    const byUpdater = pathGroups.get(prop) ?? new Map<string, number[]>();
+                    const indices = byUpdater.get(slot.update) ?? [];
+
+                    indices.push(slot.index);
+                    byUpdater.set(slot.update, indices);
+                    pathGroups.set(prop, byUpdater);
+                }
+            }
+        }
+
+        const pathRefresh = [...pathGroups]
+            .sort(([a], [b]) => a.localeCompare(b))
+            .map(([prop, byUpdater]) => {
+                const calls = [...byUpdater]
+                    .map(([updater, indices]) => `${updater}(${[...indices].sort((a, b) => a - b).join(', ')});`)
+                    .join(' ');
+
+                return `case '${prop}': ${calls} break;`;
+            })
+            .join(' ');
+
         this.needsList = true;
 
         this.statements.push(
@@ -2142,6 +2181,10 @@ class Generator {
             `  return {`,
             // 拿 fragment 里的真实节点：fragment 本身一插入就摊平了，不能拿它当节点
             `    nodes: Array.from(${row}.el.childNodes),`,
+            // `items[i].prop = v`：只刷这一行里读了 prop 的片段
+            pathRefresh
+                ? `    updatePath: (prop) => { switch (prop) { ${pathRefresh} } },`
+                : '',
             // 复用这一项时把循环变量重新绑到新值上，再刷依赖它的片段（DOM 不动）。
             //
             // 项带下标时（`entries()`）特殊处理：值没换、只是位置变了的话，只有下标
@@ -2219,6 +2262,50 @@ class Generator {
             this.reactiveContainers.has(name) ? [] : (this.forSources.get(name) ?? []);
 
         /**
+         * `items[i].prop` 里的"格"：哪个列表、哪个下标。
+         *
+         * 也认派生局部变量（`const minkey = arr[2]` → `minkey.prop`）：`analyze` 把它
+         * 记成了 `fromPath`，所以 `minkey.prop` 就是 `arr[2].prop`。下标字面量才有意义
+         * —— 动态下标（`arr[i].prop`）说不清是哪一格，返回 null，交给整体比对。
+         */
+        const cellOf = (
+            left: TSESTree.MemberExpression,
+            parent?: TSESTree.Node
+        ): { list: string; index: string } | null => {
+            // `items[i].prop`：下标是表达式，可能有副作用，提成临时变量
+            if (
+                left.object.type === 'MemberExpression' &&
+                left.object.computed &&
+                left.object.object.type === 'Identifier'
+            ) {
+                const lists = listsOf(left.object.object.name);
+
+                if (lists.length === 0) return null;
+
+                return {
+                    list: lists[0],
+                    index: reuse(this.slice(left.object.property.range), left.object.property.range, parent)
+                };
+            }
+
+            // `minkey.prop`（minkey 是派生局部变量）：它对应 `arr[2]`，下标是字面量
+            if (left.object.type === 'Identifier') {
+                const path = this.analysis?.states.get(left.object.name)?.fromPath;
+                const match = path ? /^(.*)\[(\d+)\]$/.exec(path) : null;
+
+                if (!match) return null;
+
+                const lists = listsOf(match[1]);
+
+                if (lists.length === 0) return null;
+
+                return { list: lists[0], index: match[2] };
+            }
+
+            return null;
+        };
+
+        /**
          * 值表达式在产物里会用到两次（原调用一次、精确调用一次）—— 不是简单表达式就先
          * 赋给一个局部变量，否则它会被求值两遍（`a.push({ ... })` 每次都是新对象）。
          *
@@ -2261,6 +2348,29 @@ class Generator {
                             value: this.slice(child.right.range),
                             at: child.right.range
                         });
+                    }
+
+                    // `items[i].prop = v`：整项没换（还是同一个对象引用），只是它内部
+                    // 某个属性变了 —— 只刷那一行里读了 prop 的片段。
+                    //
+                    // 也认派生局部变量那条：`const minkey = arr[2]; minkey.language = 'x'`
+                    // —— `minkey` 是标识符，但它对应 `arr[2]`（见 analyze 的 fromPath）
+                    const cell =
+                        left.type === 'MemberExpression' &&
+                        !left.computed &&
+                        left.property.type === 'Identifier'
+                            ? cellOf(left, parent)
+                            : null;
+
+                    if (cell && left.type === 'MemberExpression' && left.property.type === 'Identifier') {
+                        precise(
+                            cell.list,
+                            `setPath(${cell.index}, ${JSON.stringify(left.property.name)})`,
+                            child,
+                            parent
+                        );
+
+                        return;
                     }
 
                     // `[a[0], a[1]] = [x, y]` —— 一次调用改多个位置

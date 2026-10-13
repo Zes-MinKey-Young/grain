@@ -256,6 +256,42 @@ it("a local's write only refreshes the path it points at", async () => {
     expect([zero(), two()]).toEqual(["a", "Grain"]);
 });
 
+it("changing one item's property only refreshes what reads it", async () => {
+    // `arr[2].language = 'Grain'`（经派生局部变量）：整项没换，只是它内部一个属性变了 ——
+    // 只有那一行里读了 language 的片段该重跑，行里其它部分（Math.random()）不该
+    const target = await mount(`<script>
+        let arr = $state([{ name: 'a', language: 'C++' }, { name: 'b', language: 'Rust' }, { name: 'c', language: 'TS' }]);
+
+        function modify() {
+            const third = arr[2];
+            third.language = 'Grain';
+        }
+    </script>
+    {#for person of arr}
+        <div class="row">
+            <span class="name">{person.name}</span>
+            <span class="lang">{person.language}</span>
+            <span class="ident">{Math.random()}</span>
+        </div>
+    {/for}
+    <button onclick={modify}>modify</button>`);
+
+    const rows = () => [...target.querySelectorAll(".row")];
+    const cell = (at: number, cls: string) => rows()[at].querySelector(cls)!.textContent;
+
+    expect([0, 1, 2].map((at) => cell(at, ".lang"))).toEqual(["C++", "Rust", "TS"]);
+
+    const before = [0, 1, 2].map((at) => cell(at, ".ident"));
+
+    target.querySelector("button")!.click();
+
+    // 只有第三行的 language 变了
+    expect([0, 1, 2].map((at) => cell(at, ".lang"))).toEqual(["C++", "Rust", "Grain"]);
+
+    // 三行的随机数都没动（节点复用 + 只有 language 那一个片段被刷）
+    expect([0, 1, 2].map((at) => cell(at, ".ident"))).toEqual(before);
+});
+
 it("a local taken out of a level-0 variable is not reactive", async () => {
     // 根不追踪内部时，从它取出来的局部变量也不该有响应性
     const target = await mount(`<script>
