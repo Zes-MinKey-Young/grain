@@ -63,8 +63,14 @@ const BUILT_IN_RUNES = new Set(['$state', '$props', '$bindable']);
  * 内置宏：不用在 `<script macro>` 里定义，也不用 import。
  *
  * 参数跟用户宏一样，拿不到值，拿到的是那段表达式的**源码文本**。
+ *
+ * 用 `Object.create(null)` 建：普通对象字面量的原型是 `Object.prototype`，于是
+ * `'toString' in BUILT_IN_MACROS` 会是 true —— `toString` 就被当成内置宏了
+ * （`Math.random().toString()` 会报 "toString is a macro"）。
  */
-const BUILT_IN_MACROS: Record<string, (...args: unknown[]) => string> = {
+const BUILT_IN_MACROS: Record<string, (...args: unknown[]) => string> = Object.assign(
+    Object.create(null) as Record<string, (...args: unknown[]) => string>,
+    {
     /**
      * `$store(counter)`：把跨模块的 writable 接成一个绑定。
      *
@@ -93,7 +99,8 @@ const BUILT_IN_MACROS: Record<string, (...args: unknown[]) => string> = {
 
         return `listen: (update) => (${store}).subscribe(update)`;
     }
-};
+    }
+);
 
 /** 宏名（或导入进来的本地名）必须是 `$` 开头，且不能是内置 rune */
 function checkMacroName(name: string, start: number, end: number): void {
@@ -210,7 +217,12 @@ export class MacroScope {
     }
 
     has(name: string): boolean {
-        return name in BUILT_IN_MACROS || Object.prototype.hasOwnProperty.call(this.functions, name);
+        // 两个都要查**自己**的属性：`toString` / `valueOf` / `constructor` 这些
+        // `Object.prototype` 上的名字，用 `in` 会把它们误判成宏
+        return (
+            Object.prototype.hasOwnProperty.call(BUILT_IN_MACROS, name) ||
+            Object.prototype.hasOwnProperty.call(this.functions, name)
+        );
     }
 
     /**
