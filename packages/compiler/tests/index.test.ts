@@ -15,7 +15,7 @@ it("should update the template locally", () => {
     // 2. Only one row of the #for is updated, because only a[0] changed.
     // 3. The update is called with ?.() so it stays safe before the updater exists.
     const result = compile(`<script>
-        let a = $state([0]);
+        let a = $state([0, 114]);
 
         function fn1() {
             a[0] = 1;
@@ -23,6 +23,10 @@ it("should update the template locally", () => {
 
         function fn() {
             [a[0]] = [1];
+        }
+
+        function fn2() {
+            [a[0], a[1]] = [a[1], a[0]]
         }
 
         </script>
@@ -34,6 +38,11 @@ it("should update the template locally", () => {
     // (2) both writes turned into the precise "replace that one row" call,
     // not into a refresh of the whole block
     expect(result.js.match(/setAt\(0, 1\)/g)).toHaveLength(2);
+
+    // fn2 是**同时**写两个位置的交换：两个 setAt 顺序执行的话，第二个会读到第一个
+    // 已经覆盖掉的值。所以它得走批量调用（setRows），两个值也都得在赋值之前求好
+    expect(result.js).toMatch(/setRows\(\[\[0, __value\$\d+\], \[1, __value\$\d+\]\]\)/);
+    expect(result.js).toMatch(/const __value\$\d+ = a\[0\];\s*\n\s*const __value\$\d+ = a\[1\];/);
 
     // nothing refreshes the whole fragment — that would defeat the point
     expect(result.js).not.toMatch(/update\$\d+\?\.\(/);
