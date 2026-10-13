@@ -1,0 +1,34 @@
+<script>
+interface Person {
+    name: string,
+    language: string,
+}
+let arr: Person[] = $state([{ name: "qaqFei", language: "C++" }, { name: "MilkCOCO", language: "Rust" }, { name: "Minkey", language: "TypeScript" }]);
+
+
+
+function modify() {
+    const minkey = arr[2];
+    minkey.language = "Grain";
+}
+</script>
+
+{#for person of arr}
+    <div>
+        Name: {person.name}<br>
+        Language: {person.language}<br>
+        Ident: {Math.random().toString(16).substr(2, 8)}
+    </div>
+{/for}
+
+<button onclick={modify}>Modify</button>
+
+<style>
+    div {
+        background-color: lightgray;
+        border-radius: 5px;
+        padding: 5px;
+        width: fit-content;
+        margin: 5px;
+    }
+</style>

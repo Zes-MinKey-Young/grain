@@ -2,6 +2,7 @@
 import { beforeAll, it, expect } from "bun:test";
 import { Window } from "happy-dom";
 import type { Document } from "happy-dom";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { compile } from "..";
 
@@ -290,6 +291,71 @@ it("changing one item's property only refreshes what reads it", async () => {
 
     // 三行的随机数都没动（节点复用 + 只有 language 那一个片段被刷）
     expect([0, 1, 2].map((at) => cell(at, ".ident"))).toEqual(before);
+});
+
+it("a dynamic index still locates the row", async () => {
+    // 下标先赋给变量再取（`const at = 2; const minkey = arr[at]`）：动态下标在依赖侧
+    // 会保守退化成整个容器，但精确定位仍要能找到那一行
+    const target = await mount(`<script>
+        let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+        function modify() {
+            const at = 2;
+            const minkey = arr[at];
+            minkey.name = 'Grain';
+        }
+    </script>
+    {#for person of arr}
+        <div class="row">
+            <span class="name">{person.name}</span>
+            <span class="ident">{Math.random()}</span>
+        </div>
+    {/for}
+    <button onclick={modify}>modify</button>`);
+
+    const rows = () => [...target.querySelectorAll(".row")];
+    const cell = (at: number, cls: string) => rows()[at].querySelector(cls)!.textContent;
+
+    const before = [0, 1, 2].map((at) => cell(at, ".ident"));
+
+    target.querySelector("button")!.click();
+
+    // 第三行更新了
+    expect([0, 1, 2].map((at) => cell(at, ".name"))).toEqual(["a", "b", "Grain"]);
+
+    // 随机数都没动
+    expect([0, 1, 2].map((at) => cell(at, ".ident"))).toEqual(before);
+});
+
+it("the level example itself: only the row that changed is refreshed", async () => {
+    // 直接编译 examples/level —— 示例是活文档，它的行为也得有人守
+    const source = readFileSync(
+        join(import.meta.dir, "..", "..", "..", "examples", "level", "App.grain"),
+        "utf8"
+    );
+
+    const target = await mount(source);
+    const rows = () =>
+        [...target.querySelectorAll("div")].filter((node) => node.textContent!.includes("Name:"));
+
+    const ident = (at: number) => rows()[at].textContent!.match(/Ident: (\w+)/)![1];
+    // `C++` / `Rust` / `TypeScript`：语言名里可能带符号
+    const language = (at: number) => rows()[at].textContent!.match(/Language: ([^\s]+)/)![1];
+
+    expect(rows()).toHaveLength(3);
+    expect(language(2)).toBe("TypeScript");
+
+    const before = [0, 1, 2].map((at) => ident(at));
+
+    (target.querySelector("button") as HTMLElement).click();
+
+    // 只有第三行的 language 换了
+    expect(language(2)).toBe("Grain");
+    expect(language(0)).toBe("C++");
+    expect(language(1)).toBe("Rust");
+
+    // 三行的随机数一个都没动
+    expect([0, 1, 2].map((at) => ident(at))).toEqual(before);
 });
 
 it("a local taken out of a level-0 variable is not reactive", async () => {

@@ -2288,18 +2288,24 @@ class Generator {
                 };
             }
 
-            // `minkey.prop`（minkey 是派生局部变量）：它对应 `arr[2]`，下标是字面量
+            // `minkey.prop`（minkey 是派生局部变量）：它对应 `arr[i]`，下标在取出时
+            // 就定下来了（`fromIndex`）。先建临时变量再传给 setPath —— 下标表达式可能
+            // 有副作用（`arr[next()]`），求值两遍会出错
             if (left.object.type === 'Identifier') {
-                const path = this.analysis?.states.get(left.object.name)?.fromPath;
-                const match = path ? /^(.*)\[(\d+)\]$/.exec(path) : null;
+                const state = this.analysis?.states.get(left.object.name);
 
-                if (!match) return null;
+                if (!state?.fromPath || state.fromIndex === undefined) return null;
 
-                const lists = listsOf(match[1]);
+                // 根变量名：`arr[2]` / `arr`（动态下标时 fromPath 退化成根）
+                const name = state.fromPath.split('[')[0];
+                const lists = listsOf(name);
 
                 if (lists.length === 0) return null;
 
-                return { list: lists[0], index: match[2] };
+                return {
+                    list: lists[0],
+                    index: reuse(state.fromIndex, state.nameRange, parent)
+                };
             }
 
             return null;

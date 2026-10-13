@@ -29,8 +29,17 @@ export interface StateInfo {
      *
      * 顶层 `$state` 没有这个字段。有的话，写它就等于写那条路径 —— `minkey.name = 'x'`
      * 解析成 `arr[2].name`，只有读它的片段才刷。
+     *
+     * 下标是动态的（`arr[i]`）时这里是根变量名（`arr`）—— 依赖侧保守处理。
      */
     fromPath?: string;
+    /**
+     * 取出来时的**下标表达式**（`arr[2]` → `'2'`，`arr[i]` → `'i'`）。
+     *
+     * `setPath(i, prop)` 要用它定位是哪一行。跟 `fromPath` 分开记：依赖侧希望动态下标
+     * 保守（退回整个容器），而精确定位希望能找到具体那一行。
+     */
+    fromIndex?: string;
 }
 
 export type FunctionLike =
@@ -430,6 +439,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
             name: string;
             root: string;
             path: string;
+            index?: string;
             init: string;
             range: [number, number];
         }> = [];
@@ -450,6 +460,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                         // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
                         if (state && state.level >= 1) {
                             const path = pathOf(child.init) ?? root!;
+                            const cell = child.init as TSESTree.MemberExpression;
 
                             // 同一个根上之前取过的那些，到这儿就失效了
                             kill(root!);
@@ -459,6 +470,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                                 name: child.id.name,
                                 root: root!,
                                 path,
+                                // 下标表达式原样记下：动态的（`arr[i]`）也能定位到那一行
+                                index: cell.computed ? slice(source, cell.property.range) : undefined,
                                 init: slice(source, child.init.range),
                                 range: child.range
                             });
@@ -486,7 +499,9 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                 nameRange: findNameRange(item.range, item.name, source),
                 level: states.get(item.root)!.level,
                 // 它对应的路径：`minkey` -> `arr[2]`
-                fromPath: item.path
+                fromPath: item.path,
+                // 下标表达式：动态的（`arr[i]`）也记下，`setPath` 要靠它定位
+                fromIndex: item.index
             });
         }
     }
