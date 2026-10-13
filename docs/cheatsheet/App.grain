@@ -1,47 +1,66 @@
 <script>
     import Code from "./Code.grain";
     import { samples } from "./samples.ts";
-
-    let title = "Grain cheatsheet";
 </script>
 
 <main>
-    <h1>{title}</h1>
-    <p class="lead">一页看完 grain 的语法。代码在左，说的是哪件事在下面。</p>
+    <header>
+        <h1>Grain cheatsheet</h1>
+        <p>One page, all the syntax. Code on top, what it means below.</p>
+    </header>
 
-    {#for sample of samples}
-        <section>
-            <h2>{sample.title}</h2>
-            <Code code={sample.code} note={sample.note} />
-        </section>
-    {/for}
+    <div class="grid">
+        {#for sample of samples}
+            <section>
+                <h2>{sample.title}</h2>
+                <Code code={sample.code} note={sample.note} />
+            </section>
+        {/for}
+    </div>
 </main>
 
 <style>
     * {
+        box-sizing: border-box;
         font-family: 'Consolas', monospace;
     }
     body {
         margin: 0;
-        background: #fafafa;
+        background: #f6f6f6;
+        color: #222;
     }
     main {
-        max-width: 900px;
+        max-width: 1400px;
         margin: 0 auto;
-        padding: 20px 16px 60px;
+        padding: 14px;
+    }
+    header {
+        margin-bottom: 12px;
     }
     h1 {
-        margin-bottom: 4px;
+        margin: 0;
+        font-size: 1.3rem;
     }
-    .lead {
-        margin-top: 0;
-        opacity: 0.7;
+    header p {
+        margin: 2px 0 0;
+        font-size: 0.8rem;
+        opacity: 0.65;
+    }
+    .grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+        gap: 10px;
     }
     section {
-        margin-bottom: 24px;
+        background: #fff;
+        border: 1px solid #e2e2e2;
+        border-radius: 6px;
+        padding: 8px 10px;
+        min-width: 0;
     }
     h2 {
-        font-size: 1.05em;
-        margin-bottom: 6px;
+        margin: 0 0 5px;
+        font-size: 0.82rem;
+        letter-spacing: 0.02em;
     }
 </style>

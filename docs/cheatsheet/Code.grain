@@ -22,17 +22,19 @@
     }
     pre {
         margin: 0;
-        padding: 10px 12px;
+        padding: 8px 10px;
         background: #1e1e1e;
-        border-radius: 6px;
+        border-radius: 5px;
         overflow-x: auto;
-        line-height: 1.5;
+        font-size: 0.76rem;
+        line-height: 1.45;
         tab-size: 4;
     }
     figcaption {
-        margin-top: 4px;
-        font-size: 0.85em;
-        opacity: 0.7;
+        margin-top: 5px;
+        font-size: 0.74rem;
+        line-height: 1.35;
+        color: #555;
     }
     .comment { color: #6a9955; }
     .string { color: #ce9178; }

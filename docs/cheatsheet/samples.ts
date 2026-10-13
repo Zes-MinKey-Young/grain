@@ -1,9 +1,11 @@
 /**
- * cheatsheet 用的示例代码。
+ * Cheatsheet samples.
  *
- * 放在 `.ts` 里而不是直接写在模板里：模板里的 `<script>` 会被 grain 自己的解析器
- * 当成真的块（它只看模板文本，不解析 script 内部）。这些字符串从 `App.grain` 引用，
- * 模板上就只剩 `{code}` 了。
+ * Kept in `.ts` rather than inlined in the template: a literal `<script>` inside a grain
+ * template is picked up by grain's own parser (it only reads template text, never the
+ * inside of a `<script>`), which then reports "only allowed at the top level".
+ *
+ * `note` fields are plain text — no markdown, the component renders them as-is.
  */
 
 export interface Sample {
@@ -14,7 +16,7 @@ export interface Sample {
 
 export const samples: Sample[] = [
     {
-        title: '1 · 一个组件',
+        title: '1 · A component',
         code: `<script>
     let count = $state(0);
 <\/script>
@@ -24,40 +26,41 @@ export const samples: Sample[] = [
 <style>
     button { padding: 4px 8px; }
 <\/style>`,
-        note: '`<script>` 放状态、模板里写元素、`<style>` 是 scoped 的。'
+        note: 'State in script, markup in the template, styles are scoped.'
     },
     {
-        title: '2 · $state 和它的级别',
-        code: `let n    = $state(0);            // 级别 0：只追踪自己被重赋值
-let list = $state([1, 2]);       // 容器默认级别 1：内部变化也追踪
-let obj  = $state({ a: 1 }, 1);  // 对象默认 0，要追踪内部得写出来
+        title: '2 · $state and levels',
+        code: `let n    = $state(0);            // level 0: reassign only
+let list = $state([1, 2]);       // containers default to level 1
+let obj  = $state({ a: 1 }, 1);  // objects default to 0, opt in
 
 const third = list[2];
-third.name = 'x';                // 只刷那一行里读了这个属性的片段`,
-        note: '依赖是**路径**级的：改 `list[1]` 不会刷读 `list[0]` 的地方。从容器里取出来的局部变量按它那条路径定位，也一样精确。'
+third.name = 'x';                // touches only what reads it`,
+        note: 'Deps are paths, not variables. Locals taken out of a container keep that precision.'
     },
     {
-        title: '3 · 模板插值',
+        title: '3 · Interpolation',
         code: `<p>{count} / {count * 2} / {count > 3 ? 'big' : 'small'}</p>
 <input bind:value={name} />`,
-        note: '`{ ... }` 里是一句 TS 表达式。'
+        note: 'Anything inside braces is a TS expression.'
     },
     {
-        title: '4 · bind: 双向',
+        title: '4 · bind: (two-way)',
         code: `<MyInput bind:value={count} />
 
 <MyInput bind:value={{
     get: () => count,
     set: (value) => count = value
 }} />`,
-        note: '属性那边用 `$bindable()` 声明才能绑。'
+        note: 'The prop must be declared with $bindable.'
     },
     {
         title: '5 · $props / $bindable',
         code: `let { label, count = $bindable(0) } = $props<{
     label: string;
     count?: number;
-}>();`
+}>();`,
+        note: 'Destructure to declare. $bindable makes a prop writable.'
     },
     {
         title: '6 · {#if}',
@@ -67,7 +70,8 @@ third.name = 'x';                // 只刷那一行里读了这个属性的片�
     <p>small</p>
 {:else}
     <p>none</p>
-{/if}`
+{/if}`,
+        note: 'Branches swap the DOM, they do not re-run the parent.'
     },
     {
         title: '7 · {#for}',
@@ -80,59 +84,59 @@ third.name = 'x';                // 只刷那一行里读了这个属性的片�
 {#for [i, item] of items.entries() with key = i}
     <p>{i}: {item}</p>
 {/for}`,
-        note: '不写 key 就按位置复用；写了 key 就按身份，重排时搬节点而不是重写内容。'
+        note: 'No key: reuse by position. With key: reuse by identity, reorder moves nodes.'
     },
     {
-        title: '8 · $node 派生值',
+        title: '8 · $node (derived)',
         code: `const doubled = $node({ get: () => count * 2 });
 const tripled = $node(count * 3);
 const shown   = $node({
     get: () => name.get(),
     set: (v) => name.set(v)
 });`,
-        note: '有 `set` 就是双向，没有就是单向（写入单向是编译错误）。纯编译期：产物里不会留下那个对象。'
+        note: 'With set it is two-way. Compile-time only — no object survives in the output.'
     },
     {
-        title: '9 · 响应式容器',
+        title: '9 · Reactive containers',
         code: `let list = $state([{ id: 1 }]);
 
-list.push({ id: 2 });   // 只建新的那一行
-list[1] = { id: 9 };    // 只换那一项
-[list[0], list[1]] = [list[1], list[0]];   // 一次批量改两个位置`,
-        note: '编译期认得出这些写法，生成精确调用；认不出的（`sort` / `filter`）退回整块比对。'
+list.push({ id: 2 });   // builds just the new row
+list[1] = { id: 9 };    // replaces just that item
+[list[0], list[1]] = [list[1], list[0]];   // one batch call`,
+        note: 'Recognised writes become precise calls; unrecognised ones fall back to a diff.'
     },
     {
-        title: '10 · Store（跨模块的状态）',
+        title: '10 · Stores (cross-module)',
         code: `// counter.grain.ts
 export const counter = writable(0);
 
-// 用
+// usage
 {$read(counter)}
 <input bind:value={$store(counter)} />`,
-        note: '`writable` 来自 runtime；`$read` 单向、`$store` 双向。'
+        note: 'writable comes from the runtime. $read is one-way, $store is two-way.'
     },
     {
         title: '11 · bind:this',
         code: `let box;
 
 <div bind:this={box}></div>`,
-        note: '拿到元素本身；在 `<script onmount>` 里才保证已经赋上值。'
+        note: 'Gives you the element. Only guaranteed inside script onmount.'
     },
     {
-        title: '12 · <script onmount>',
+        title: '12 · script onmount',
         code: `<script onmount>
     greeting = 'after mount';
 <\/script>`,
-        note: 'DOM 已经就位的时候跑。在这里写 `$state` 也会触发刷新。'
+        note: 'Runs once the DOM is in place. Writing $state here refreshes too.'
     },
     {
-        title: '13 · 宏',
+        title: '13 · Macros',
         code: `<script macro>
-    // 编译期函数，参数拿到的是源码文本
+    // compile-time fn; args are source text
     function twice(x) { return \`(\${x}) * 2\`; }
 <\/script>
 
 <p>{twice(count)}</p>`,
-        note: '宏名得 `$` 开头。内置的有 `$store` / `$read`。'
+        note: 'Names start with $. $store and $read are built in.'
     }
 ];
