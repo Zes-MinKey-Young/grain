@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 
 import type { Plugin } from 'vite';
@@ -23,6 +23,87 @@ const STYLE_QUERY = 'grain-style.css';
 
 /** `App.grain?grain-ast` -> 解析结果，用来在页面上查看 AST */
 const AST_QUERY = 'grain-ast';
+
+/**
+ * `grain:routes` -> 路由表。
+ *
+ * 目录即路由：`src/routes` 下每个 `.grain` 是一个页面。
+ *
+ * ```
+ * src/routes/index.grain        ->  /
+ * src/routes/about.grain        ->  /about
+ * src/routes/post/[id].grain    ->  /post/:id
+ * src/routes/[...all].grain     ->  兜底（其余都归它）
+ * ```
+ *
+ * 页面是懒加载的（`() => import(...)`），构建时 Vite 会自动切块。
+ */
+const ROUTES_ID = 'grain:routes';
+
+/** `src/routes` 的默认位置（相对项目根） */
+const ROUTES_DIR = 'src/routes';
+
+/** 把文件路径翻译成路由模式：`post/[id].grain` -> `/post/:id` */
+function routePattern(root: string, file: string): string {
+    const relative = file.slice(root.length).replace(/\\/g, '/').replace(/^\/+/, '');
+    const withoutExt = relative.replace(/\.grain$/, '');
+
+    const segments = withoutExt
+        .split('/')
+        .map((segment) => {
+            // `index` 那一级不出现在路径里
+            if (segment === 'index') return '';
+
+            // `[id]` -> `:id`，`[...all]` -> `:all`（剩下的都归它）
+            if (segment.startsWith('[') && segment.endsWith(']')) {
+                const name = segment.slice(1, -1).replace(/^\.\.\./, '');
+
+                return segment.startsWith('[...') ? `:${name}*` : `:${name}`;
+            }
+
+            return segment;
+        })
+        .filter((segment) => segment !== '');
+
+    return `/${segments.join('/')}`;
+}
+
+/** 目录扫一遍，生成 `grain:routes` 的模块代码 */
+function routesModule(root: string): string {
+    const dir = resolve(root, ROUTES_DIR);
+
+    let files: string[] = [];
+
+    try {
+        files = readdirSync(dir, { recursive: true, encoding: 'utf8' })
+            .filter((name) => name.endsWith('.grain'))
+            .sort();
+    } catch {
+        // 没有 src/routes 这个目录：给个空表，别让构建挂掉
+        return 'export default [];';
+    }
+
+    const routes = files.map((name) => {
+        const file = resolve(dir, name);
+        const pattern = routePattern(dir, file);
+
+        // 兜底段（`[...all]`）放最后，其余按路径排
+        return { pattern, file, catchAll: pattern.includes(':*') };
+    });
+
+    routes.sort((a, b) => {
+        if (a.catchAll !== b.catchAll) return a.catchAll ? 1 : -1;
+
+        return a.pattern.localeCompare(b.pattern);
+    });
+
+    const lines = routes.map(
+        ({ pattern, file }) =>
+            `  { path: ${JSON.stringify(pattern)}, page: () => import(${JSON.stringify(file)}) },`
+    );
+
+    return `export default [\n${lines.join('\n')}\n];\n`;
+}
 
 /** AST 里有 loc / range 之外的引用关系，序列化时截断一下避免炸掉 */
 function toJson(root: Root): string {
@@ -87,6 +168,8 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
     let isDev = false;
     /** tsconfig 的 `paths`；Vite 自己那套认不了 `.grain`，这里补上 */
     let paths: PathConfig | null = null;
+    /** 项目根：`grain:routes` 要扫它下面的 `src/routes` */
+    let projectRoot: string | null = null;
 
     const isGrain = (file: string) => extensions.some((extension) => file.endsWith(extension));
 
@@ -130,6 +213,8 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         configResolved(config) {
             isDev = config.command === 'serve';
 
+            projectRoot = config.root;
+
             const tsconfig = nearestTsconfig(config.root);
 
             paths = tsconfig ? readPaths(tsconfig) : null;
@@ -137,6 +222,9 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
 
         // 虚拟模块
         load(id) {
+            // `grain:routes` -> 目录即路由的表（项目根在 configResolved 时就定下来了）
+            if (id === ROUTES_ID) return routesModule(projectRoot ?? process.cwd());
+
             const { file, queries } = splitId(id);
             if (!isGrain(file)) return null;
 
@@ -154,6 +242,9 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         },
 
         resolveId(id, importer) {
+            // 虚拟模块：不要 Vite 去文件系统里找
+            if (id === ROUTES_ID) return id;
+
             const { file, queries } = splitId(id);
 
             // 虚拟模块不需要 Vite 去文件系统里找

@@ -1,0 +1,25 @@
+<script>
+    import { navigate } from "@graints/runtime";
+
+    let posts = [
+        { id: 1, title: 'Hello' },
+        { id: 2, title: 'Routing' }
+    ];
+</script>
+
+<h1>Home</h1>
+
+<ul>
+    {#for post of posts}
+        <li><a href={`/post/${post.id}`}>{post.title}</a></li>
+    {/for}
+</ul>
+
+<p><a href="/about">About</a></p>
+
+<button onclick={() => navigate('/about')}>go to about (js)</button>
+
+<style>
+    h1 { margin-top: 0; }
+    a { color: #2b6cb0; }
+</style>

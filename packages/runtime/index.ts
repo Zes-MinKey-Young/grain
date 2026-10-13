@@ -1224,6 +1224,21 @@ class UpdaterImpl {
     }
 }
 
+export {
+    createRouter,
+    link,
+    navigate,
+    normalize,
+    route
+} from './router.js';
+
+export type {
+    Page,
+    Route,
+    RouteDef,
+    Router
+} from './router.js';
+
 const UPDATER_HANDLER: ProxyHandler<UpdaterImpl> = {
     apply: (target, _this, args) => target.invoke(...(args as number[])),
     get: (target, key) => Reflect.get(target, key),
