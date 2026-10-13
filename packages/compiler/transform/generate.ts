@@ -2255,7 +2255,9 @@ class Generator {
                     if (left.type === 'MemberExpression' && left.computed && left.object.type === 'Identifier') {
                         targets.push({
                             name: left.object.name,
-                            index: this.slice(left.property.range),
+                            // 下标也可能有副作用（`items[next()] = v` / `items[i++] = v`）——
+                            // 提成临时变量，让它只求值一次，且用的是赋值那一刻的值
+                            index: reuse(this.slice(left.property.range), left.property.range, parent),
                             value: this.slice(child.right.range),
                             at: child.right.range
                         });
@@ -2292,7 +2294,9 @@ class Generator {
                                 const group = rows.get(name) ?? [];
 
                                 group.push({
-                                    index: this.slice(target.property.range),
+                                    // 下标同样提成临时变量：解构赋值里多个下标会依次求值，
+                                    // 有副作用的话（`items[next()] = v`）不能求值多遍
+                                    index: reuse(this.slice(target.property.range), target.property.range, parent),
                                     value: reuse(this.slice(value.range), value.range, parent)
                                 });
 

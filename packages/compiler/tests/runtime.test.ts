@@ -206,6 +206,38 @@ it("entries loop: a swap only re-runs the index", async () => {
     expect(randoms()).toEqual([before[1], before[0]]);
 });
 
+it("evaluates a dynamic index only once", async () => {
+    // `items[next()] = v`：下标有副作用，原语句和精确调用各求值一次的话 next() 就被调了
+    // 两遍 —— 提成临时变量，只求值一次，用的是赋值那一刻的值
+    const target = await mount(`<script>
+        let items = $state([{ id: 1 }, { id: 2 }, { id: 3 }]);
+        let at = 0;
+        let pick_at = 9;
+
+        function pick(id) {
+            items[at++] = { id };
+        }
+    </script>
+    {#for it of items}
+        <div>{it.id}</div>
+    {/for}
+    <button onclick={() => pick(pick_at++)}>pick</button>`);
+
+    const rows = () => [...target.querySelectorAll("div")].map((node) => node.textContent);
+
+    expect(rows()).toEqual(["1", "2", "3"]);
+
+    target.querySelector("button")!.click();
+
+    // 第一次写下标 0（值 9）
+    expect(rows()).toEqual(["9", "2", "3"]);
+
+    target.querySelector("button")!.click();
+
+    // 第二次写下标 1（值 10）—— 如果 `at++` 被求值了两遍，这里会变成下标 2
+    expect(rows()).toEqual(["9", "10", "3"]);
+});
+
 it("keeps existing rows when appending", async () => {
     const target = await mount(`<script>
         let a = $state([1]);
