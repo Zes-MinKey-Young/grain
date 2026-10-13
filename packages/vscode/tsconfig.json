@@ -12,5 +12,6 @@
         "sourceMap": true,
         "types": ["node", "vscode"]
     },
-    "include": ["src/**/*.ts", "../compiler/**/*.ts"]
+    "include": ["src/**/*.ts", "../compiler/**/*.ts"],
+    "exclude": ["../compiler/**/*.test.ts"]
 }
