@@ -1,7 +1,7 @@
-// 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
-// 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
-import { parse as parseTs, simpleTraverse } from '@typescript-eslint/typescript-estree';
-import type { TSESTree } from '@typescript-eslint/typescript-estree';
+// 解析走 babel（能在浏览器里跑），类型仍从 typescript-estree 拿 —— 类型是编译期的，
+// 打包时会擦掉
+import { parse as parseTs, simpleTraverse } from './ast.js';
+import type { TSESTree } from './ast.js';
 
 import { ParseError } from './errors.js';
 import type { MacroReparse } from './macro.js';

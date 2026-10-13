@@ -1,4 +1,7 @@
-import type { AST as TSAst, TSESTree } from '@typescript-eslint/typescript-estree';
+// 类型从 typescript-estree 拿（`import type` 会被擦掉，不进 bundle）；
+// 运行时的 parse / simpleTraverse 走 ./ast.js（babel，浏览器里能跑）
+import type { AST as TSAst } from '@typescript-eslint/typescript-estree';
+import type { TSESTree } from './ast.js';
 import type { StyleSheet as StyleSheetNode } from 'css-tree';
 
 /**
