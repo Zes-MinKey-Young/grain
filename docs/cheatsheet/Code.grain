@@ -1,7 +1,7 @@
 <script>
-    import { highlight } from "./highlight.ts";
+    import { highlight } from "./highlight";
 
-    let { code, note } = $props<{ code: string; note?: string }>();
+    let { code, note, cross } = $props<{ code: string; note?: string, cross?: boolean }>();
 
     // 去掉首尾的空行和公共缩进，这样模板字符串里怎么排版都行
     const trimmed = code.replace(/^\n+|\n+$/g, "");
@@ -9,7 +9,7 @@
     let pieces = highlight(trimmed);
 </script>
 
-<figure>
+<figure class={cross ? "cross" : ""}>
     <pre>{#for piece of pieces}<span class={piece.kind}>{piece.text}</span>{/for}</pre>
     {#if note}
         <figcaption>{note}</figcaption>
@@ -20,6 +20,11 @@
     figure {
         margin: 0;
     }
+    figure.cross {
+        text-decoration: line-through;
+        text-decoration-color: red;
+        text-decoration-thickness: 2px;
+    }
     pre {
         margin: 0;
         padding: 8px 10px;
@@ -29,6 +34,7 @@
         font-size: 0.76rem;
         line-height: 1.45;
         tab-size: 4;
+        font-family: 'Consolas';
     }
     figcaption {
         margin-top: 5px;

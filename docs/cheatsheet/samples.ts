@@ -51,6 +51,7 @@ third.name = 'x';                // touches only what reads it`,
 <MyInput bind:value={{
     get: () => count,
     set: (value) => count = value
+    listen: (u) => bus.on('valchange', u)
 }} />`,
         note: 'The prop must be declared with $bindable.'
     },
@@ -117,9 +118,9 @@ export const counter = writable(0);
     },
     {
         title: '11 · bind:this',
-        code: `let box;
-
-<div bind:this={box}></div>`,
+        code: `
+<div bind:this={box}></div>
+<script onmount>box.style.background = 'red';</script>`,
         note: 'Gives you the element. Only guaranteed inside script onmount.'
     },
     {

@@ -54,7 +54,7 @@ const COMMENT = /^(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)/;
 const NUMBER = /^\d+(?:\.\d+)?/;
 
 /** 标签：`<div` `</div` `<Foo.Bar` —— 只吃标签名，属性另外匹配 */
-const TAG = /^<\/?[A-Za-z][\w.]*/;
+const TAG = /(^<\/?)([A-Za-z]+)([\w.]*)/;
 
 /**
  * 属性名：`bind:value` `onclick` —— 必须**紧跟着** `=`，中间不能有空格。
@@ -136,7 +136,9 @@ export function highlight(source: string): Piece[] {
         if (!matched) {
             const tag = TAG.exec(rest);
             if (tag) {
-                push(tag[0], 'tag');
+                push(tag[1], 'punct');
+                push(tag[2], 'tag');
+                push(tag[3], 'plain');
                 matched = true;
             }
         }
