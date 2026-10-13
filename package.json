@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "test": "bun test",
-  "example": "node scripts/example.mjs",
+    "example": "node scripts/example.mjs",
     "create-grain": "node packages/create-grain/index.mjs",
     "packages:build": "pnpm --filter @graints/runtime build && pnpm --filter @graints/vite-plugin build",
     "vscode:build": "pnpm --filter grain-vscode build",
@@ -22,6 +22,8 @@
     "@types/css-tree": "^3.2.0",
     "@types/node": "^26.6.4",
     "happy-dom": "^20.14.5",
-    "vite": "^8.3.2"
+    "vite": "^8.3.2",
+    "vscode-oniguruma": "^2.0.1",
+    "vscode-textmate": "^9.3.2"
   }
 }
