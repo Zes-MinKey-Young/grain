@@ -1,18 +1,51 @@
 /**
  * 客户端路由。
  *
- * 一个 SPA 的无预渲染路由：路径 -> 页面组件的默认导出（编译产物里的 `mount(target)`）。
- *
- * 设计上刻意只做三件事：
+ * 一个 SPA 的无预渲染路由。路由表是**编译期生成**的（`grain:routes`，插件扫 `src/routes`
+ * 得到），这里只做三件运行时的活：
  *
  * - **匹配**：`/post/:id` 这种带参数的模式，匹配上就把参数挑出来
  * - **渲染**：清空容器，把页面挂上去。页面之间不复用 —— 那是列表（{#for}）的活
  * - **导航**：`navigate()` 改 history 并渲染；浏览器前进 / 后退走 `popstate`
  *
- * 当前路由是个 `writable`，所以模板里 `{$read(route)}` 就能跟着变。
+ * 刻意**不**从 `./index.js` 导入 `writable`：index 会 re-export 这里的东西，反过来 import
+ * 就成环了（ESM 求值顺序是本文件先，那时 index 还没跑完）。路由状态用一个形状相同的极简
+ * 订阅（见 `tiny`），模板里 `{$read(route)}` 照样能用。
  */
-import { writable } from './index.js';
 import type { Writable } from './index.js';
+
+/**
+ * 一个极简的可订阅值 —— 形状跟 `writable` 一样，所以能直接喂给 `$read` / `$store`。
+ */
+function tiny<T>(initial: T): Writable<T> {
+    let value = initial;
+
+    const listeners = new Set<(next: T) => void>();
+
+    return {
+        get: () => value,
+
+        set(next: T): T {
+            if (next === value) return value;
+
+            value = next;
+
+            for (const listener of [...listeners]) listener(value);
+
+            return value;
+        },
+
+        subscribe(listener: (next: T) => void): () => void {
+            listeners.add(listener);
+
+            listener(value);
+
+            return () => {
+                listeners.delete(listener);
+            };
+        }
+    } as Writable<T>;
+}
 
 /** 一个页面：编译产物里的默认导出 */
 export type Page = (target: Element) => void;
@@ -111,7 +144,7 @@ export function navigate(to: string, options?: { replace?: boolean }): void {
 }
 
 /** 当前路由（响应式）；还没 start 时是个占位 */
-export const route = writable<Route>({ path: '/', pattern: '', params: {} });
+export const route = tiny<Route>({ path: '/', pattern: '', params: {} });
 
 export function createRouter(options: {
     routes: RouteDef[];
@@ -147,10 +180,17 @@ export function createRouter(options: {
         }
 
         const given = found.def.page;
-        // 同步组件直接用；`() => import(...)` 这种先取出来
-        const page = typeof given === 'function' && given.length === 0 && !('prototype' in given && (given as { prototype?: unknown }).prototype)
+        // 同步组件直接用；`() => import(...)` 这种先取出来 —— 它拿到的是**模块命名空间**，
+        // 页面在 `.default` 上
+        const loaded = typeof given === 'function' && !('prototype' in given && (given as { prototype?: unknown }).prototype)
             ? await (given as () => Page | Promise<Page>)()
-            : (given as Page);
+            : given;
+
+        const page = (
+            typeof loaded === 'function' ? loaded : (loaded as { default?: Page }).default
+        ) as Page | undefined;
+
+        if (!page) return;
 
         const result = page(target) as unknown;
 

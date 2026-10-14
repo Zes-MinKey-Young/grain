@@ -1280,6 +1280,10 @@ class UpdaterImpl {
                         host.appendChild(childEl);
                     }
 
+                    // 这一项的参照节点：后面进来的元素要靠它定位插在哪。
+                    // 用**第一个**节点（"插在这一项前面"的意思）—— 块可能有好几个节点
+                    this.anchors[index] = host.childNodes[before] as Node | undefined;
+
                     this.nested.push(child as Updater);
 
                     // 自管理的块（`{#for ...}`）：也登记成片段，精确刷新才叫得到它。
