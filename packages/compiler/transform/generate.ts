@@ -1575,8 +1575,11 @@ class Generator {
     /**
      * 生成 `bind:this`：把元素交给一个变量或者回调。
      *
-     * - `bind:this={x}` —— x 由 bind:this 自己声明（`let x;`），不用在 `<script>` 里先写；
-     *   只有 `<script onmount>` 能看见它
+     * - `bind:this={x}` —— 由 bind:this 自己声明（`let x;`），不用在 `<script>` 里先写；
+     *   赋值发生在建树那一刻，所以事件监听器里能用，模板别处读得到（但可能是 undefined）
+     * - `<script>` 里已经声明过 `x` 就只赋值，不另起一个 —— 这是给"模板里别的地方
+     *   （箭头函数、`bind:` 的 get/set）也要用"留的路：写 `let box: HTMLDivElement;`
+     *   让 TS 知道类型，赋值交给 bind:this
      * - `bind:this={(el) => ...}` —— 不声明变量，元素挂上时把它当参数传进去跑
      */
     private thisAttribute(binding: BindingValue): { code: string; slot: boolean } {
