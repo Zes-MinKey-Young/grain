@@ -151,6 +151,68 @@ it('onmount runs as plain statements, not a hook', () => {
     expect(js).toMatch(/let grabbed = 1;/);
 });
 
+it('a row-inner fragment reading an outer state updates on write', async () => {
+    // 行的 class 依赖外部的 `selected`。行的 updater（`update$19`）是 `render$X` 的
+    // 局部变量，**顶层函数够不到** —— 以前编译器会在事件处理器里生成一句
+    // `update$19?.(5)`，运行时 ReferenceError，而事件监听器里的异常被浏览器吞掉，
+    // 表现就是"什么都不更新、也没有报错"。
+    //
+    // 现在顶层的刷新只留"刷那个 list"（`update$N?.(1)`），由 list 重跑每一行，
+    // 行的 update 里再按需刷行内片段。
+    const module = await build(`<script>
+    let items = $state(['a', 'b', 'c']);
+    let selected = $state(0);
+
+    function next() {
+        selected += 1;
+    }
+</script>
+{#for [i, item] of items.entries()}
+    <div class={selected === i ? 'on' : 'off'}>{item}</div>
+{/for}
+<button onclick={next}>next</button>`, 'row-inner.ts');
+
+    const target = document.createElement('div');
+
+    document.body.appendChild(target);
+    module.default(target);
+
+    const classes = () => [...target.querySelectorAll('div')].map((el) => el.className);
+
+    expect(classes()).toEqual(['on', 'off', 'off']);
+
+    target.querySelector('button')!.click();
+
+    // 走到下一首：第 1 行才是选中的
+    expect(classes()).toEqual(['off', 'on', 'off']);
+});
+
+it('the top-level refresh never calls into a row updater', () => {
+    // 行内的 `update$N` 只在 render 作用域内存在，顶层不该出现对它的调用
+    const js = compile(`<script>
+    let items = $state([1, 2]);
+    let selected = $state(0);
+
+    function next() {
+        selected += 1;
+    }
+</script>
+{#for [i, item] of items.entries()}
+    <div class={selected === i ? 'on' : 'off'}>{item}</div>
+{/for}
+<button onclick={next}>next</button>`, { filename: 'App.grain' }).js;
+
+    // 找出行内 updater 的名字（`render$X` 里定义的那个）
+    const inner = js.match(/var (update\$\d+) = creEle\("div", \{ "class"/)?.[1];
+
+    expect(inner).toBeTruthy();
+
+    // 它在 `const next = function next()` 里不该被调用
+    const handler = js.slice(js.indexOf('const next ='), js.indexOf('/* template */'));
+
+    expect(handler).not.toContain(`${inner}?.(`);
+});
+
 it('nested elements are created with an insert position, not inside children', () => {
     // 父只收文本和插值；嵌套元素单独建，带 `{ parent, index }`
     const js = compile(`<script>

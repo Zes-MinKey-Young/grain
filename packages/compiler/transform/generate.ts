@@ -58,6 +58,17 @@ interface Slot {
     update: string;
     index: number;
     deps: Set<string>;
+    /**
+     * 片段在 `{#for}` 的行里。
+     *
+     * 那些 `update$N` 是 `render$X` 的局部变量 —— 行的 update / updatePath 里能用
+     * （同一作用域），但**顶层函数够不到**。所以 `updateCalls` 得跳过它们，否则会生成
+     * 一句 `update$19?.(5)`，运行时 ReferenceError（事件监听器里的异常被浏览器吞掉，
+     * 表现就是"什么都不更新、也没有报错"）。
+     *
+     * 行内片段依赖外部 state 时，靠"刷整个 list"（list 会重跑每一行）覆盖。
+     */
+    inner?: boolean;
 }
 
 interface PendingWrapper {
@@ -1424,6 +1435,8 @@ class Generator {
         const grouped = new Map<string, number[]>();
 
         for (const slot of this.slots) {
+            // 行内的片段够不到（它是 render$X 的局部变量）—— 见 `Slot.inner`
+            if (slot.inner) continue;
             if (skip?.has(`${slot.update}#${slot.index}`)) continue;
             if (!intersects(slot.deps, writes)) continue;
 
@@ -2147,6 +2160,10 @@ class Generator {
         const slotBase = this.slots.length;
 
         const [inner, innerStatements] = this.capture(() => this.children(node.children, row), false);
+
+        // 块内注册的都标上：它们的 updater 是 `render$X` 的局部变量，顶层的刷新
+        // 调用够不到（见 `Slot.inner`）
+        for (const slot of this.slots.slice(slotBase)) slot.inner = true;
 
         let fallback = 'null';
 
