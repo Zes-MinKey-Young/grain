@@ -960,6 +960,17 @@ export function writable<T>(initial: T): Writable<T> {
 
 type Props = Record<string, unknown>;
 
+/**
+ * 插入点：建好节点就插到 `parent` 里 `before` 之前。
+ *
+ * 传了它，节点一创建就在文档里（top-down 挂载）；不传就还是装进 DocumentFragment、
+ * 由调用方整体插（旧行为）。
+ */
+export interface Mount {
+    parent: Node;
+    before: Node | null;
+}
+
 const FRAGMENT_NODE = 11;
 
 /** 活着的组件外壳，`hotReplace` 遍历它找要重建的实例 */
@@ -1066,6 +1077,13 @@ function renderSlot(slot: Slot): void {
  */
 class UpdaterImpl {
     el!: Node;
+    /**
+     * children 的插入目标。
+     *
+     * 元素就是它自己；组件根（fragment）没有自己的元素，插到调用方给的位置上。
+     * 不给 `at` 时两者相同（都装进一个 DocumentFragment），也就是旧行为。
+     */
+    host!: Node;
     /** children 里的动态片段，按 children 下标编号 */
     slots: Array<Slot | null> = [];
     /** 属性里的动态片段，接着往下编号 */
@@ -1073,8 +1091,14 @@ class UpdaterImpl {
     /** 嵌套的子元素，用于无参全量刷新时的递归 */
     nested: Updater[] = [];
 
-    init(tag: string | null, props: Props, children: unknown[]): void {
+    init(tag: string | null, props: Props, children: unknown[], at?: Mount): void {
         this.el = tag === null ? document.createDocumentFragment() : document.createElement(tag);
+
+        // 给了插入点就立刻插进去：建树完成时它已经在文档里了（onmount 因此不用是个钩子）
+        if (at && tag !== null) at.parent.insertBefore(this.el, at.before);
+
+        // 组件根没有自己的元素，children 直接插到调用方指定的位置
+        this.host = at && tag === null ? at.parent : this.el;
         this.slots = new Array(children.length).fill(null);
         this.propSlots = [];
         this.nested = [];
@@ -1153,7 +1177,7 @@ class UpdaterImpl {
     }
 
     private buildChildren(children: unknown[]): void {
-        const el = this.el;
+        const host = this.host;
 
         children.forEach((child, index) => {
             if (typeof child === 'function') {
@@ -1173,16 +1197,19 @@ class UpdaterImpl {
                 const childEl = (child as Partial<Updater>).el;
 
                 if (childEl) {
-                    const before = el.childNodes.length;
+                    const before = host.childNodes.length;
 
-                    // 块（`{#for ...}` 之类）已经自己渲染过了：它在没挂载时就把节点攒在
-                    // `nodes` 里，所以挂载要走这些节点，而不是只有那个锚点
+                    // 块（`{#for ...}` 之类）自己管节点：没挂载时它就把节点攒在 `nodes` 里，
+                    // 所以挂载要走这些节点，而不是只有那个锚点
                     const managed = (child as Partial<List>).nodes;
 
-                    if (managed && managed.length > 0) {
-                        for (const node of managed) el.appendChild(node);
+                    if (managed) {
+                        // top-down 时块已经自己插进 host 了（见 `inserted`），不用再搬
+                        if (!(child as Partial<ListImpl>).inserted) {
+                            for (const node of managed) host.appendChild(node);
+                        }
                     } else {
-                        el.appendChild(childEl);
+                        host.appendChild(childEl);
                     }
 
                     this.nested.push(child as Updater);
@@ -1193,11 +1220,10 @@ class UpdaterImpl {
                         this.slots[index] = { anchor: null, render: child as () => unknown, nodes: [] };
                     }
 
-                    // 组件根是 fragment，appendChild 之后它自己就空了 ——
                     // 记下真正落进去的节点，HMR 换实例时才知道要替换哪一段
                     const meta = (child as Partial<ComponentShell>).__grain;
 
-                    if (meta) meta.nodes = [...el.childNodes].slice(before);
+                    if (meta) meta.nodes = [...host.childNodes].slice(before);
 
                     // 子组件挂上了（根组件由生成出来的 mount 负责）
                     (child as Partial<Updater>).onmount?.();
@@ -1207,7 +1233,7 @@ class UpdaterImpl {
 
                 const anchor = document.createComment('');
 
-                el.appendChild(anchor);
+                host.appendChild(anchor);
 
                 const render = child as Bound;
                 const slot: Slot = { anchor, render, nodes: [] };
@@ -1218,7 +1244,7 @@ class UpdaterImpl {
                 // 模板插值也可以是单向绑定：`{$read(store)}`
                 render.listen?.(() => renderSlot(slot));
             } else {
-                for (const node of toNodes(child)) el.appendChild(node);
+                for (const node of toNodes(child)) host.appendChild(node);
             }
         });
     }
@@ -1245,24 +1271,30 @@ const UPDATER_HANDLER: ProxyHandler<UpdaterImpl> = {
     has: (target, key) => Reflect.has(target, key)
 };
 
-function create(tag: string | null, props: Props, children: unknown[]): Updater {
+function create(tag: string | null, props: Props, children: unknown[], at?: Mount): Updater {
     // 载体是个空函数（这样 `update$0(0)` 能直接调），原型指向 UpdaterImpl
     const self = function () {} as unknown as UpdaterImpl;
 
     Object.setPrototypeOf(self, UpdaterImpl.prototype);
 
-    self.init(tag, props, children);
+    self.init(tag, props, children, at);
 
     return new Proxy(self, UPDATER_HANDLER) as unknown as Updater;
 }
 
-export function creEle(tag: string, props?: Props, children?: unknown[]): Updater {
-    return create(tag, props ?? {}, children ?? []);
+/**
+ * 建一个元素。
+ *
+ * `at` 给了插入点：元素一创建就插进去（top-down 挂载，建树完成时已在文档里）。
+ * 不给就装进调用方后续统一插的 DocumentFragment（旧行为）。
+ */
+export function creEle(tag: string, props?: Props, children?: unknown[], at?: Mount): Updater {
+    return create(tag, props ?? {}, children ?? [], at);
 }
 
 /** 组件根：不产生真实元素，内容直接挂到挂载点上 */
-export function creFragment(children?: unknown[]): Updater {
-    return create(null, {}, children ?? []);
+export function creFragment(children?: unknown[], at?: Mount): Updater {
+    return create(null, {}, children ?? [], at);
 }
 
 /**
