@@ -1029,17 +1029,38 @@ class Generator {
      * 名字不变，所以调用处一个字都不用改 —— 无论谁调用它（事件、箭头函数、onmount、
      * 定时器）都会刷新。之前只有直接挂在事件属性上的函数才带刷新。
      */
+    /**
+     * 写了 state 的顶层函数：包一层，末尾追加刷新调用。
+     *
+     * 两种形状都管：
+     *
+     * - `function f() {...}` —— 整句换成 `const f = function f(...) {...}`
+     * - `const f = () => {...}` —— 只换箭头函数那段，`const f =` 留着
+     *
+     * 第二种以前漏了：只有 `FunctionDeclaration` 才包装，于是顶层箭头函数里写
+     * `currentSongIndex++` 不生成任何刷新，UI 不更新。
+     */
     private functionWrappers(block: Script): Edit[] {
         const edits: Edit[] = [];
 
         for (const [name, info] of this.analysis?.functions ?? []) {
             const node = info.node;
 
-            if (node.type !== 'FunctionDeclaration' || !node.id) continue;
-            if (node.range[0] < block.contentStart || node.range[1] > block.contentEnd) continue;
+            if (info.declaration[0] < block.contentStart || info.declaration[1] > block.contentEnd) continue;
 
             const reactive = [...this.reactiveWrites(info.writes)];
             if (reactive.length === 0) continue;
+
+            // 跟宏替换重叠就跳过：宏展开会把 `$flip('name')` 换成另一段文本，而 AST 的
+            // range 是基于替换**后**的源码算的，跟 this.source（原始 + 末尾追加）基准不同。
+            // 两个 edit 一起交给 applyEdits 会互相切坏（实测产物出现 `ame = name ...`）。
+            // 宏 + 顶层箭头函数的组合因此仍不刷新 —— 但总比产出坏代码好。
+            const clashes = this.root.replacements.some(
+                (item) =>
+                    item.start < info.declaration[1] && item.end > info.declaration[0]
+            );
+
+            if (clashes) continue;
 
             // 容器方法（`items.push(x)` / `items[i] = v`）换成列表自己的精确调用，
             // 并顶掉整块比对。这些插入紧跟原语句，所以先登记再取函数体
@@ -1065,10 +1086,17 @@ class Generator {
                 inner
             );
 
+            // `function f() {}` 要连声明一起换（箭头函数没有名字，得借 function 表达式补上）；
+            // `const f = () => {}` 只换函数那段，前面的 `const f =` 原样留着
+            const replacement =
+                info.keyword === 'function'
+                    ? `const ${name} = function ${name}(${params}) {${body}}`
+                    : `function ${name}(${params}) {${body}}`;
+
             edits.push({
-                start: node.range[0],
-                end: node.range[1],
-                text: `const ${name} = function ${name}(${params}) {${body}}`
+                start: info.declaration[0],
+                end: info.declaration[1],
+                text: replacement
             });
 
             this.wrappedFunctions.add(name);

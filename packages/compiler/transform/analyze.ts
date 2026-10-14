@@ -50,6 +50,15 @@ export type FunctionLike =
 export interface FunctionInfo {
     name: string;
     node: FunctionLike;
+    /**
+     * 整个声明在源码里的范围 —— 包装时要替换的就是这一段。
+     *
+     * `function f() {}` 就是 `node.range`；`const f = () => {}` 是**整个声明语句**
+     * （含 `const f =` 和分号），因为包装后要写成 `const f = function f() {...}`。
+     */
+    declaration: [number, number];
+    /** 声明关键字：`const` / `let` / `var` / `function`。包装时原样带上 */
+    keyword: string;
     /** 这个函数写了哪些 state（含它内部嵌套函数写的） */
     writes: Set<string>;
 }
@@ -408,6 +417,10 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                     functions.set(declarator.id.name, {
                         name: declarator.id.name,
                         node: init,
+                        // 换掉整个声明语句（`const f = () => {...};`），
+                        // 包装后才写得出 `const f = function f(...) {...}`
+                        declaration: statement.range,
+                        keyword: statement.kind,
                         writes: collectWrites(init, shallow)
                     });
                 }
@@ -416,6 +429,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
             functions.set(statement.id.name, {
                 name: statement.id.name,
                 node: statement,
+                declaration: statement.range,
+                keyword: 'function',
                 writes: collectWrites(statement, shallow)
             });
         }
