@@ -741,10 +741,12 @@ class Generator {
         // 套一层稳定的外壳：HMR 换实例时只换里面，父组件持有的引用不动
         instance.push('', `return component(${rootName}, create, props, children);`);
 
+        // 建一个组件实例。父组件通过 `Foo.create(props, children)` 调用。
+        // `at` 是插入点：给了就把内容直接建在它里面，建树完成时已经在文档里了
         output.push(
             '',
-            '/** 建一个组件实例。父组件通过 `Foo.create(props, children)` 调用 */',
-            'export function create(props = {}, children = null) {',
+            // `__at` 而不是 `at`：用户代码里可能有叫 at 的变量（实测撞过 `let at = 0`）
+            'export function create(props = {}, children = null, __at) {',
             ...instance.map((line) => (line ? `  ${line}` : '')),
             '}'
         );
@@ -754,11 +756,8 @@ class Generator {
             '/** 挂到页面上。`mount.target` 留给 HMR 重新挂载用 */',
             'export default function mount(target) {',
             '  mount.target = target;',
-            '  const update = create();',
-            '  target.appendChild(update.el);',
-            // 子组件那一份由运行时在挂上时调（见 runtime 的 create）
-            '  update.onmount?.();',
-            '  return update;',
+            // 把 target 当插入点传进去：内容直接建在它里面，建树完成时就已经挂载好了
+            '  return create({}, null, { parent: target, before: null });',
             '}',
             'mount.create = create;'
         );
@@ -1449,12 +1448,15 @@ class Generator {
 
     // ------------------------------------------------------------ 模板
 
-    private fragment(children: TemplateNode[], name: string): string {
+    private fragment(children: TemplateNode[], name: string, at = '__at'): string {
         const items = this.children(children, name);
 
         // `var`：刷新函数要在 `<script>` 之前就能被引用到（值为 undefined，
         // 配合调用处的 `?.()` 就是安全的），否则顶层代码会踩到 TDZ
-        this.statements.push(`var ${name} = creFragment([${items.join(', ')}]);`);
+        //
+        // `at` 是 create() 收进来的插入点：组件根没有自己的元素，内容直接建在它那里，
+        // 于是建树完成时整棵树已经在文档里了（onmount 因此不用是个钩子）
+        this.statements.push(`var ${name} = creFragment([${items.join(', ')}], ${at});`);
 
         return name;
     }
