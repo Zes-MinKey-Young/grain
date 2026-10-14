@@ -66,8 +66,6 @@ it('a child component mounts inside the document', async () => {
     seen = document.body.contains(document.querySelector('i')) ? 'in document' : 'NOT in document';
 </script>`, childName);
 
-    // 注意：子组件要是**根的直接子节点**。再深一层（`<main><Child /></main>`）就不行了 ——
-    // 中间那层普通元素还是 bottom-up 建的，它的 el 此刻还在 fragment 里
     const parent = await build(`<script>
     import Child from './${childName}';
 </script>
@@ -83,14 +81,44 @@ it('a child component mounts inside the document', async () => {
     expect(target.querySelector('i')?.textContent).toBe('in document');
 });
 
-it('the child factory is recognised, not treated as a slot', async () => {
-    // 产物里 `<Child />` 是个带 grain 标记的工厂；buildChildren 认得它，
-    // 不会当成动态片段（那种会建锚点、调 renderSlot）
-    const js = compile(`<script>
-    import Child from './Child.grain';
-</script>
-<main><Child /></main>`, { filename: 'App.grain' }).js;
+it('a child component nested two levels deep mounts inside the document', async () => {
+    const childName = `DeepChild-${Math.random().toString(36).slice(2)}.ts`;
+    const parentName = `DeepParent-${Math.random().toString(36).slice(2)}.ts`;
 
-    expect(js).toMatch(/\(at\) => Child\.create\(/);
-    expect(js).toMatch(/\.grain = true;/);
+    await build(`<script>
+    let seen = $state('not set');
+</script>
+<i>{seen}</i>
+
+<script onmount>
+    seen = document.body.contains(document.querySelector('i')) ? 'in document' : 'NOT in document';
+</script>`, childName);
+
+    // 埋两层：中间那两层普通元素现在也带插入点了，所以子组件建好时就在文档里
+    const parent = await build(`<script>
+    import Child from './${childName}';
+</script>
+<main><section><Child /></section></main>`, parentName);
+
+    const target = document.createElement('div');
+
+    document.body.appendChild(target);
+
+    parent.default(target);
+
+    expect(target.querySelector('i')?.textContent).toBe('in document');
+});
+
+it('nested elements are created with an insert position, not inside children', () => {
+    // 父只收文本和插值；嵌套元素单独建，带 `{ parent, index }`
+    const js = compile(`<script>
+    let count = $state(0);
+</script>
+<main>text <span>{count}</span> more</main>`, { filename: 'App.grain' }).js;
+
+    // main 的 children 里只有两个文本 —— span 不在里面
+    expect(js).toMatch(/creEle\("main", \{[^}]*\}, \["text ", " more"\]/);
+
+    // span 带着插入位置：插在 main 的第 1 个内容节点（" more"）前面
+    expect(js).toMatch(/creEle\("span", \{\}, \[[^\]]*\], \{ parent: update\$\d+, index: 1 \}\)/);
 });

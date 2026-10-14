@@ -1487,6 +1487,11 @@ export function component(
 
     self.init(instance, create, props, children);
 
+    // 内容已经建好、并且在目标位置了（`at` 是 create() 一路传下来的），
+    // 所以 onmount 在这里跑 —— 子组件以前靠父的 buildChildren 调，现在它不在
+    // 父的 children 数组里（有自己的插入位置），那边碰不到它
+    (instance as Partial<Updater>).onmount?.();
+
     const shell = new Proxy(self, SHELL_HANDLER) as unknown as ComponentShell;
 
     components.add(shell);
@@ -1538,9 +1543,7 @@ export function hotReplace(
         // 记下新的 create，下一次 HMR 才匹配得上
         meta.create = nextCreate;
 
-        // 重建出来的实例 DOM 已经就位，onmount 现在就能跑
-        fresh.onmount?.();
-
+        // onmount 由 component() 跑（重建走的是同一个 create），这里不再调一次
         replaced += 1;
     }
 

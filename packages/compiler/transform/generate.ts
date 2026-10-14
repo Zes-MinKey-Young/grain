@@ -487,6 +487,15 @@ function mentions(node: TSESTree.Node, names: Set<string>): boolean {
  * 但 `arr.push(v)` 改的是引用里面的内容，变量本身一直相等 ——
  * 有这种写法就别加比较，老老实实刷新，否则列表永远不会更新。
  */
+/**
+ * children 里的元素：不进 `children()` 的返回数组，等父建好再单独创建 ——
+ * 那时候才知道插入位置（父的第 N 个内容节点前，`-1` 是末尾）。
+ */
+interface Deferred {
+    node: Element;
+    index: number;
+}
+
 function writesAreAssignments(node: TSESTree.Node, names: Set<string>): boolean {
     if (names.size === 0) return false;
 
@@ -1449,7 +1458,8 @@ class Generator {
     // ------------------------------------------------------------ 模板
 
     private fragment(children: TemplateNode[], name: string, at = '__at'): string {
-        const items = this.children(children, name);
+        const deferred: Deferred[] = [];
+        const items = this.children(children, name, deferred);
 
         // `var`：刷新函数要在 `<script>` 之前就能被引用到（值为 undefined，
         // 配合调用处的 `?.()` 就是安全的），否则顶层代码会踩到 TDZ
@@ -1457,6 +1467,9 @@ class Generator {
         // `at` 是 create() 收进来的插入点：组件根没有自己的元素，内容直接建在它那里，
         // 于是建树完成时整棵树已经在文档里了（onmount 因此不用是个钩子）
         this.statements.push(`var ${name} = creFragment([${items.join(', ')}], ${at});`);
+
+        // 根的直接子元素：插入位置是"根的第 N 个内容节点前"
+        this.flushDeferred(deferred, name);
 
         return name;
     }
@@ -1484,10 +1497,10 @@ class Generator {
         return { ...attributes, class: [...chunks, ` ${scope}`] };
     }
 
-    private element(node: Element, owner: string | null, index: number): string | string[] {
+    private element(node: Element, owner: string | null, index: number, at?: string): string | string[] {
         return isComponentName(node.name)
-            ? this.component(node, owner, index)
-            : this.plainElement(node);
+            ? this.component(node, owner, index, at)
+            : this.plainElement(node, at);
     }
 
     /**
@@ -1496,7 +1509,7 @@ class Generator {
      * 只 `create()` 一次。依赖的 state 变化时推新 props 给它（`setProps`），
      * 不重新 create —— 重建会把子组件自己的 state 一起丢掉。
      */
-    private component(node: Element, owner: string | null, index: number): string[] {
+    private component(node: Element, owner: string | null, index: number, at?: string): string[] {
         const parts: string[] = [];
         const deps = new Set<string>();
 
@@ -1548,12 +1561,12 @@ class Generator {
 
         const name = `update$${this.counter++}`;
 
-        // 延迟成工厂：在父元素建好、插入点确定的时候才调 —— 这样子组件的内容直接
-        // 建在目标位置，它的 onmount 也因此是在文档里跑的（以前是在父的 fragment 里）
+        // 直接创建并指定插入位置：内容建在目标位置，onmount 也就在文档里跑
+        // （以前是父的 buildChildren 里调，那时父还在 fragment 里）
         this.statements.push(
-            `const ${name} = (at) => ${node.name}.create(${propsCode}, ${slotCode}, at);`,
-            // 标记：buildChildren 靠它区分"组件工厂"和"动态片段"（都是没带 .el 的函数）
-            `${name}.grain = true;`
+            `const ${name} = ${node.name}.create(${propsCode}, ${slotCode}${
+                at ? `, ${at}` : ''
+            });`
         );
 
         // 没有依赖（或不在能注册片段的上下文里）：建一次就完事
@@ -1888,9 +1901,13 @@ class Generator {
         });
     }
 
-    private plainElement(node: Element): string {
+    /**
+     * @param at 插入点 `{ parent, index }` 的源码；不给就由父 appendChild 进去
+     */
+    private plainElement(node: Element, at?: string): string {
         const name = `update$${this.counter++}`;
-        const items = this.children(node.children, this.insideFragment ? null : name);
+        const deferred: Deferred[] = [];
+        const items = this.children(node.children, this.insideFragment ? null : name, deferred);
 
         const props: string[] = [];
         let propIndex = 0;
@@ -1902,10 +1919,22 @@ class Generator {
         }
 
         this.statements.push(
-            `var ${name} = creEle(${JSON.stringify(node.name)}, {${props.join(', ')}}, [${items.join(', ')}]);`
+            `var ${name} = creEle(${JSON.stringify(node.name)}, {${props.join(', ')}}, [${items.join(', ')}]${
+                at ? `, ${at}` : ''
+            });`
         );
 
+        // 嵌套元素：父已经建好，现在能算插入位置了
+        this.flushDeferred(deferred, name);
+
         return name;
+    }
+
+    /** 父建好之后，把它的嵌套元素逐个创建出来（带插入位置） */
+    private flushDeferred(deferred: Deferred[], parent: string): void {
+        for (const item of deferred) {
+            this.element(item.node, parent, item.index, `{ parent: ${parent}, index: ${item.index} }`);
+        }
     }
 
     /**
@@ -1989,10 +2018,21 @@ class Generator {
         return expression.raw;
     }
 
-    private children(nodes: TemplateNode[], owner: string | null): string[] {
+    /**
+     * @param deferred 给了就把元素移出返回数组、记到这里（调用方在父建好后逐个创建）。
+     *                 不给就照旧 —— 元素留在数组里，由父 appendChild 进去。
+     */
+    private children(nodes: TemplateNode[], owner: string | null, deferred?: Deferred[]): string[] {
         const items: string[] = [];
 
         for (const node of nodes) {
+            // 元素（普通标签 / 组件）单独建：它要一个插入位置，而位置只有父建好才知道
+            if (deferred && 'type' in node && node.type === 'element') {
+                deferred.push({ node: node as Element, index: items.length });
+
+                continue;
+            }
+
             const code = this.child(node, items.length, owner);
             if (code === null) continue;
 
