@@ -101,8 +101,8 @@
         "build": "tsc -p . --ignoreDeprecations 6.0",
         "watch": "tsc -p . --ignoreDeprecations 6.0 --watch",
         "libs": "node scripts/copy-ts-lib.mjs",
-        "bundle": "esbuild dist/vscode/src/extension.js --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.js && pnpm libs",
-        "package": "pnpm build && pnpm bundle && vsce package --no-dependencies --allow-missing-repository --no-git-tag-version",
+        "bundle": "bun build ./src/extension.ts --target=node --format=cjs --external vscode --outfile=dist/extension.js && pnpm libs",
+        "package": "pnpm bundle && vsce package --no-dependencies --allow-missing-repository --no-git-tag-version",
         "publish:marketplace": "pnpm build && pnpm bundle && vsce publish --no-dependencies --allow-missing-repository --no-git-tag-version"
     },
     "dependencies": {
@@ -114,6 +114,7 @@
         "@types/vscode": "^1.140.0",
         "@vscode/vsce": "^3.7.1",
         "esbuild": "^0.27.0",
-        "typescript": "6.0.3"
+        "typescript": "6.0.3",
+        "vscode": "file:./tests/fake-vscode"
     }
 }

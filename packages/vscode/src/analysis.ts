@@ -519,11 +519,12 @@ function collectThisBindings(
                 // 标识符、且它不是个函数 —— 变量形式；其余一律当回调
                 const name = identifier && !functions.has(identifier) ? identifier : null;
                 const tag = String(current.name ?? '');
+                
 
                 found.push({
                     name,
                     declared: name !== null && !declared.has(name),
-                    type: ELEMENT_TYPES[tag] ?? 'HTMLElement',
+                    type: ELEMENT_TYPES[tag] ?? `HTMLElementTagNameMap["${tag}"]`,
                     raw: expression.raw,
                     start: expression.contentStart ?? 0,
                     end: expression.contentEnd ?? 0
@@ -1179,7 +1180,19 @@ export function analyze(source: string, filename: string): Analysis {
         cursor = to;
     }
 
-    const virtualText = buildVirtual(source, scripts, regions, tailLines.join('\n'));
+    // script 里已经声明过的 `bind:this` 变量：在它后面插一句初始化。
+    //
+    // 不插的话 TS 会报 "used before being assigned" —— 虚拟文件里 `bind:this={box}`
+    // 被铺成 `(box);`（读取），而 script 里那句 `let box: HTMLInputElement;` 没有
+    // 初始化器，TS 的 definite assignment 是流敏感的，末尾那句赋值救不了前面的读取。
+    //
+    // 插在 script 里那句**之后**：同一作用域，之后的读取就都过了。这只是虚拟文件里
+    // 的事，产物不受影响（产物里赋值由 `"this": ($el) => { box = $el; }` 负责）。
+    const seed = thisBindings
+        .filter((item) => !item.declared)
+        .map((item) => `${item.name} = null as any as ${item.type};`);
+
+    const virtualText = buildVirtual(source, scripts, regions, tailLines.join('\n'), seed);
 
     typescriptService.update(virtual, virtualText);
 

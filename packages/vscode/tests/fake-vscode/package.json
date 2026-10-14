@@ -1,0 +1,7 @@
+{
+    "name": "vscode",
+    "version": "0.0.0-stub",
+    "description": "Stand-in for the real `vscode` module, which only exists inside the extension host. Lets the extension's code run under plain node/bun so it can be tested.",
+    "main": "./index.js",
+    "module": "./index.js"
+}

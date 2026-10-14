@@ -88,6 +88,9 @@ importers:
       esbuild:
         specifier: ^0.27.0
         version: 0.27.7
+      vscode:
+        specifier: file:./tests/fake-vscode
+        version: file:packages/vscode/tests/fake-vscode
 
 packages:
 
@@ -1783,6 +1786,9 @@ packages:
 
   vscode-textmate@9.3.2:
     resolution: {integrity: sha512-n2uGbUcrjhUEBH16uGA0TvUfhWwliFZ1e3+pTjrkim1Mt7ydB41lV08aUvsi70OlzDWp6X7Bx3w/x3fAXIsN0Q==}
+
+  vscode@file:packages/vscode/tests/fake-vscode:
+    resolution: {directory: packages/vscode/tests/fake-vscode, type: directory}
 
   whatwg-encoding@3.1.1:
     resolution: {integrity: sha512-6qN4hJdMwfYBtE3YBTTHhoeuUrDBPZmbQaxWAqSALV/MeEnR5z1xd8UKud2RAkFoPkmB+hli1TZSnyi84xz1vQ==}
@@ -3499,6 +3505,8 @@ snapshots:
   vscode-oniguruma@2.0.1: {}
 
   vscode-textmate@9.3.2: {}
+
+  vscode@file:packages/vscode/tests/fake-vscode: {}
 
   whatwg-encoding@3.1.1:
     dependencies:
