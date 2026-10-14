@@ -729,7 +729,8 @@ class Generator {
         const setProps = this.propsStatements();
         if (setProps.length > 0) instance.push('', ...setProps);
 
-        // 挂上之后才跑：这时候 bind:this 的变量已经被赋上元素了
+        // 直接在这跑：内容建好时就已经在文档里了（top-down），不需要延迟。
+        // 也正因为不是函数，它跟 `<script>` 是同一层作用域 —— 双向都能看见对方的变量
         if (onmount && onmount.body) {
             // onmount 里的顶层写 $state 也算数据流动 —— 挂载完立刻安排一次刷新。
             // （里面定义的**函数**本来就有刷新，走的是 wrapper 那条路）
@@ -737,14 +738,7 @@ class Generator {
             const reactive = [...this.reactiveWrites(writes)];
             const updates = this.updateCalls(new Set(reactive));
 
-            instance.push(
-                '',
-                '/* <script onmount> */',
-                `${rootName}.onmount = () => {`,
-                onmount.body,
-                updates ? ` ${updates}` : '',
-                '};'
-            );
+            instance.push('', '/* <script onmount> */', onmount.body, updates ? ` ${updates}` : '');
         }
 
         // 套一层稳定的外壳：HMR 换实例时只换里面，父组件持有的引用不动

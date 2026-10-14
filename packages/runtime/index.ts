@@ -20,8 +20,6 @@ export interface Updater {
     (...indices: number[]): void;
     el: Node;
     setProps?: (props: Props, children?: (() => unknown) | null) => void;
-    /** `<script onmount>`：元素挂上之后跑。根组件由生成出来的 mount 调，子组件由这里调 */
-    onmount?: () => void;
 }
 
 /**
@@ -1260,9 +1258,6 @@ class UpdaterImpl {
 
                     if (meta) meta.nodes = [...host.childNodes].slice(before);
 
-                    // 它已经建在 host 里了 —— host 在文档里，所以 onmount 现在跑是对的
-                    (made as Partial<Updater>).onmount?.();
-
                     return;
                 }
 
@@ -1297,9 +1292,6 @@ class UpdaterImpl {
                     const meta = (child as Partial<ComponentShell>).__grain;
 
                     if (meta) meta.nodes = [...host.childNodes].slice(before);
-
-                    // 子组件挂上了（根组件由生成出来的 mount 负责）
-                    (child as Partial<Updater>).onmount?.();
 
                     return;
                 }
@@ -1464,9 +1456,6 @@ class ShellImpl {
         this.current.setProps?.(nextProps, nextChildren as (() => unknown) | null);
     }
 
-    onmount(): void {
-        this.current.onmount?.();
-    }
 }
 
 const SHELL_HANDLER: ProxyHandler<ShellImpl> = {
@@ -1487,11 +1476,8 @@ export function component(
 
     self.init(instance, create, props, children);
 
-    // 内容已经建好、并且在目标位置了（`at` 是 create() 一路传下来的），
-    // 所以 onmount 在这里跑 —— 子组件以前靠父的 buildChildren 调，现在它不在
-    // 父的 children 数组里（有自己的插入位置），那边碰不到它
-    (instance as Partial<Updater>).onmount?.();
-
+    // onmount 不再是钩子：产物里它是一段普通代码，建完树直接跑（见 generate 的
+    // `<script onmount>` 处理）—— 那时内容已经在目标位置了，跟 `<script>` 同一作用域
     const shell = new Proxy(self, SHELL_HANDLER) as unknown as ComponentShell;
 
     components.add(shell);
@@ -1543,7 +1529,7 @@ export function hotReplace(
         // 记下新的 create，下一次 HMR 才匹配得上
         meta.create = nextCreate;
 
-        // onmount 由 component() 跑（重建走的是同一个 create），这里不再调一次
+        // onmount 不再是钩子：产物里是一段普通代码，重建时随 create 一起跑
         replaced += 1;
     }
 

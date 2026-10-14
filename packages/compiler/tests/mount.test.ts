@@ -109,6 +109,48 @@ it('a child component nested two levels deep mounts inside the document', async 
     expect(target.querySelector('i')?.textContent).toBe('in document');
 });
 
+it('<script> and <script onmount> share one scope', async () => {
+    // onmount 不再是钩子（不是函数），跟 <script> 同一层 —— script 里也能读它声明的变量。
+    // 以前扩展侧认为可以、运行时却是 ReferenceError
+    const module = await build(`<script>
+    let shown = $state('?');
+
+    function peek() {
+        shown = grabbed;
+    }
+</script>
+<p>{shown}</p>
+<button onclick={peek}>peek</button>
+
+<script onmount>
+    let grabbed = 'from onmount';
+</script>`, 'scope.ts');
+
+    const target = document.createElement('div');
+
+    document.body.appendChild(target);
+    module.default(target);
+
+    expect(target.querySelector('p')?.textContent).toBe('?');
+
+    // 点击发生在 onmount 之后，那时 grabbed 已经初始化了
+    target.querySelector('button')!.click();
+
+    expect(target.querySelector('p')?.textContent).toBe('from onmount');
+});
+
+it('onmount runs as plain statements, not a hook', () => {
+    const js = compile(`<div>x</div>
+
+<script onmount>
+    let grabbed = 1;
+</script>`, { filename: 'App.grain' }).js;
+
+    // 不是 `update$0.onmount = () => {...}`
+    expect(js).not.toMatch(/\.onmount\s*=/);
+    expect(js).toMatch(/let grabbed = 1;/);
+});
+
 it('nested elements are created with an insert position, not inside children', () => {
     // 父只收文本和插值；嵌套元素单独建，带 `{ parent, index }`
     const js = compile(`<script>
