@@ -961,14 +961,37 @@ export function writable<T>(initial: T): Writable<T> {
 type Props = Record<string, unknown>;
 
 /**
- * 插入点：建好节点就插到 `parent` 里 `before` 之前。
+ * 插入点：建好节点就插进去 —— 节点一创建就在文档里（top-down 挂载）。
+ * 不传就还是装进 DocumentFragment、由调用方整体插（旧行为，逐步淘汰）。
  *
- * 传了它，节点一创建就在文档里（top-down 挂载）；不传就还是装进 DocumentFragment、
- * 由调用方整体插（旧行为）。
+ * 两种形态：
+ *
+ * - `{ parent, before }` —— 容器和参照节点都已知（根组件：容器就是挂载目标）
+ * - `{ parent, index }` —— 子元素用的：`index` 是"插在父的第几个内容节点前面"，
+ *   `-1` 是末尾。父的内容节点映射在 `UpdaterImpl.anchors` 里，运行时才解得出来，
+ *   所以这里只能传序号
  */
-export interface Mount {
-    parent: Node;
-    before: Node | null;
+export type Mount =
+    | { parent: Node; before: Node | null; index?: never }
+    | { parent: Updater; index: number; before?: never };
+
+/** 从 `Mount` 里解出容器和参照节点 */
+function resolveMount(at: Mount | undefined, self?: UpdaterImpl): { parent: Node; before: Node | null } | null {
+    if (!at) return null;
+
+    // 子元素形态：序号 -> 父的第 N 个内容节点
+    if (typeof at.index === 'number') {
+        const owner = (at.parent as unknown as UpdaterImpl) ?? null;
+        const host = owner?.host ?? owner?.el ?? null;
+
+        if (!host) return null;
+
+        const before = at.index >= 0 ? (owner?.anchors ?? [])[at.index] ?? null : null;
+
+        return { parent: host, before };
+    }
+
+    return { parent: at.parent as Node, before: at.before ?? null };
 }
 
 /**
@@ -1104,18 +1127,36 @@ class UpdaterImpl {
     propSlots: Array<() => void> = [];
     /** 嵌套的子元素，用于无参全量刷新时的递归 */
     nested: Updater[] = [];
+    /**
+     * children 里每一项的"参照节点" —— 子元素靠它定位插在哪。
+     *
+     * 只记文本节点和插值的锚点（子元素自己不进来）：
+     * - 文本是静态的，刷新时不动
+     * - 插值用它的锚点 comment，不用内容节点 —— 内容节点每次刷新都会换掉
+     */
+    anchors: Array<Node | undefined> = [];
 
     init(tag: string | null, props: Props, children: unknown[], at?: Mount): void {
         this.el = tag === null ? document.createDocumentFragment() : document.createElement(tag);
 
+        const spot = resolveMount(at, this);
+
         // 给了插入点就立刻插进去：建树完成时它已经在文档里了（onmount 因此不用是个钩子）
-        if (at && tag !== null) at.parent.insertBefore(this.el, at.before);
+        if (spot && tag !== null) spot.parent.insertBefore(this.el, spot.before);
 
         // 组件根没有自己的元素，children 直接插到调用方指定的位置
-        this.host = at && tag === null ? at.parent : this.el;
+        this.host = spot && tag === null ? spot.parent : this.el;
         this.slots = new Array(children.length).fill(null);
         this.propSlots = [];
         this.nested = [];
+        this.anchors = new Array(children.length).fill(undefined);
+
+        // 子元素形态：把自己登记到父，父做无参全量刷新时才递归得到
+        if (at && typeof at.index === 'number') {
+            const owner = at.parent as unknown as UpdaterImpl;
+
+            owner?.nested.push(this as unknown as Updater);
+        }
 
         this.buildProps(props);
         this.buildChildren(children);
@@ -1271,12 +1312,24 @@ class UpdaterImpl {
                 const slot: Slot = { anchor, render, nodes: [] };
 
                 this.slots[index] = slot;
+                // 参照用锚点：内容节点每次刷新都会换掉，锚点不动
+                this.anchors[index] = anchor;
+
                 renderSlot(slot);
 
                 // 模板插值也可以是单向绑定：`{$read(store)}`
                 render.listen?.(() => renderSlot(slot));
             } else {
-                for (const node of toNodes(child)) host.appendChild(node);
+                let last: Node | undefined;
+
+                for (const node of toNodes(child)) {
+                    host.appendChild(node);
+
+                    last = node;
+                }
+
+                // 文本是静态的：拿它当参照安全
+                this.anchors[index] = last;
             }
         });
     }
