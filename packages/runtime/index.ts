@@ -971,6 +971,20 @@ export interface Mount {
     before: Node | null;
 }
 
+/**
+ * 子组件的工厂：产物里每个 `<Child />` 都生成这么一个。
+ *
+ * 为什么不是直接调 `Child.create(props, children)`：那样子组件会在父元素建好**之前**
+ * 就建完，内容落在父的 fragment 里 —— 子组件的 onmount 也就跟着在文档外跑。延迟到
+ * 插入点确定时再调，它就直接建在目标位置。
+ *
+ * `grain` 标记用来跟"动态片段"区分 —— 两边都是没带 `.el` 的函数。
+ */
+export interface ComponentFactory {
+    (at: Mount): Updater;
+    grain: true;
+}
+
 const FRAGMENT_NODE = 11;
 
 /** 活着的组件外壳，`hotReplace` 遍历它找要重建的实例 */
@@ -1189,6 +1203,24 @@ class UpdaterImpl {
                         nodes: [],
                         props: true
                     };
+
+                    return;
+                }
+
+                // 子组件工厂：此时插入点已经确定，调它 —— 内容直接建在 host 里
+                if ((child as Partial<ComponentFactory>).grain === true) {
+                    const before = host.childNodes.length;
+                    const made = (child as ComponentFactory)({ parent: host, before: null });
+
+                    this.nested.push(made);
+
+                    // 记下它落进去的节点，HMR 换实例时才知道要替换哪一段
+                    const meta = (made as Partial<ComponentShell>).__grain;
+
+                    if (meta) meta.nodes = [...host.childNodes].slice(before);
+
+                    // 它已经建在 host 里了 —— host 在文档里，所以 onmount 现在跑是对的
+                    (made as Partial<Updater>).onmount?.();
 
                     return;
                 }

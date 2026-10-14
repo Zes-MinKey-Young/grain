@@ -1547,7 +1547,14 @@ class Generator {
         }
 
         const name = `update$${this.counter++}`;
-        this.statements.push(`const ${name} = ${node.name}.create(${propsCode}, ${slotCode});`);
+
+        // 延迟成工厂：在父元素建好、插入点确定的时候才调 —— 这样子组件的内容直接
+        // 建在目标位置，它的 onmount 也因此是在文档里跑的（以前是在父的 fragment 里）
+        this.statements.push(
+            `const ${name} = (at) => ${node.name}.create(${propsCode}, ${slotCode}, at);`,
+            // 标记：buildChildren 靠它区分"组件工厂"和"动态片段"（都是没带 .el 的函数）
+            `${name}.grain = true;`
+        );
 
         // 没有依赖（或不在能注册片段的上下文里）：建一次就完事
         if (deps.size === 0 || !owner) return [name];
