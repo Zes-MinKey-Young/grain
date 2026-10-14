@@ -1,13 +1,6 @@
 <script>
     import routes from "grain:routes";
-    import { createRouter, normalize } from "@graints/runtime";
-
-    let outlet;
-
-    // 路由表是插件扫 `src/routes` 生成的；页面懒加载
-    const router = createRouter({ routes, target: outlet });
-
-    router.start();
+    import { createRouter } from "@graints/runtime";
 </script>
 
 <nav>
@@ -15,7 +8,14 @@
     <a href="/about">about</a>
 </nav>
 
-<main bind:this={outlet}></main>
+<main id="outlet"></main>
+
+<script onmount>
+    // 路由表是插件扫 src/routes 生成的（编译期），页面懒加载
+    const outlet = document.getElementById("outlet");
+
+    createRouter({ routes, target: outlet }).start();
+</script>
 
 <style>
     nav {
