@@ -75,6 +75,24 @@ interface PendingWrapper {
     name: string;
     node: FunctionLike;
     writes: Set<string>;
+    /**
+     * 所在 `{#for}` 行的编号（不在行里就是 undefined）。
+     *
+     * 行里的处理器**必须定义在 `render$X` 内部** —— 它要访问循环变量
+     * （`{#for item of items}` 里 onclick 用 `item`）。定义在顶层的话那个名字
+     * 不在作用域里，运行时 ReferenceError。
+     *
+     * 定义内容仍要等到最后才算得出来（`updateCalls` 得等所有片段收集完），
+     * 所以先在 `render$X` 里放个占位符，`wrapperStatements()` 再填回去。
+     */
+    row?: number;
+}
+
+/** `render$X` 里给"行内事件处理器"留的位置，最后替换成真正的定义 */
+const ROW_PLACEHOLDER = /\/\*@row:(\d+)\*\//;
+
+function rowPlaceholder(id: number): string {
+    return `/*@row:${id}*/`;
 }
 
 function addAll(target: Set<string>, source: Set<string>): void {
@@ -598,6 +616,16 @@ class Generator {
     private forSources = new Map<string, string[]>();
     /** 每个 for 在父级里的片段坐标：精确调用顶掉它之后，就别再让它 sync 一遍 */
     private forSlots = new Map<string, { update: string; index: number }>();
+
+    /**
+     * 当前正在生成的 `{#for}` 行编号（不在行里就是 null）。
+     *
+     * 行里的事件处理器要定义在 `render$X` 内部才能访问循环变量 —— 靠这个字段
+     * 标记它们属于哪一行（见 `PendingWrapper.row`）。
+     */
+    private currentRow: number | null = null;
+    /** 行编号自增用 */
+    private rowCounter = 0;
     /** 哪些列表写了 `with key = ...`：只有它们能按键定位（Map / Set 的方法要靠这个） */
     private forKeyed = new Set<string>();
     /**
@@ -1265,42 +1293,81 @@ class Generator {
 
     private wrapperStatements(): string[] {
         const output: string[] = [];
+        /** 行内的那些（`{#for}` 里的事件处理器）—— 按行号分组，稍后填回 render 里 */
+        const byRow = new Map<number, string[]>();
 
         for (const wrapper of this.wrappers) {
-            const node = wrapper.node;
-            const params = node.params.map((param) => this.slice(param.range)).join(', ');
-            const reactive = [...this.reactiveWrites(wrapper.writes)];
+            const code = this.wrapperCode(wrapper);
 
-            // 直接改容器（`items.push(x)`）的话，用列表自己的精确调用顶掉整块比对。
-            // 这些插入紧跟原调用（见 mutationCalls），所以先登记再取函数体
-            const mutations = this.mutationCalls(node);
+            if (wrapper.row === undefined) output.push(code);
+            else {
+                const group = byRow.get(wrapper.row) ?? [];
 
-            this.mutationEdits = mutations.edits;
-
-            const updates = this.updateCalls(new Set(reactive), mutations.skip);
-
-            const head =
-                node.type === 'ArrowFunctionExpression'
-                    ? `(${params}) =>`
-                    : `function ${node.id?.name ?? ''}(${params})`;
-
-            let body: string;
-
-            if (node.body.type === 'BlockStatement') {
-                // 去掉外层花括号，交给 guardChanges 重新包一层
-                const inner = this.bodySource(node.body.range).slice(1, -1);
-
-                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
-            } else {
-                const inner = this.bodySource(node.body.range);
-
-                body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
+                group.push(code.trimStart());
+                byRow.set(wrapper.row, group);
             }
-
-            output.push(`const ${wrapper.name} = ${head} ${body};`);
         }
 
+        if (byRow.size > 0) this.fillRowWrappers(byRow);
+
         return output;
+    }
+
+    /**
+     * 把行内事件处理器的定义填回 `render$X` 里的占位。
+     *
+     * 之所以绕这一圈：定义内容要等**所有**片段收集完才算得出刷新调用
+     * （`updateCalls`），而 `render$X` 是在收集过程中生成的 —— 只能先占位。
+     * 好在 `this.statements` 这时候还没进 `instance`，就地改还来得及。
+     */
+    private fillRowWrappers(byRow: Map<number, string[]>): void {
+        for (let index = 0; index < this.statements.length; index += 1) {
+            const line = this.statements[index];
+
+            if (!ROW_PLACEHOLDER.test(line)) continue;
+
+            this.statements[index] = line.replace(ROW_PLACEHOLDER, (_whole, id: string) => {
+                const group = byRow.get(Number(id));
+
+                // 缩进跟着 render 体内那一层（每个定义一行，防止一行太长）
+                return group ? group.join('\n  ') : '';
+            });
+        }
+    }
+
+    /** 一个包装（事件处理器 / 写了 state 的函数）的定义语句 */
+    private wrapperCode(wrapper: PendingWrapper): string {
+        const node = wrapper.node;
+        const params = node.params.map((param) => this.slice(param.range)).join(', ');
+        const reactive = [...this.reactiveWrites(wrapper.writes)];
+
+        // 直接改容器（`items.push(x)`）的话，用列表自己的精确调用顶掉整块比对。
+        // 这些插入紧跟原调用（见 mutationCalls），所以先登记再取函数体
+        const mutations = this.mutationCalls(node);
+
+        this.mutationEdits = mutations.edits;
+
+        const updates = this.updateCalls(new Set(reactive), mutations.skip);
+
+        const head =
+            node.type === 'ArrowFunctionExpression'
+                ? `(${params}) =>`
+                : `function ${node.id?.name ?? ''}(${params})`;
+
+        let body: string;
+
+        if (node.body.type === 'BlockStatement') {
+            // 去掉外层花括号，交给 guardChanges 重新包一层
+            const inner = this.bodySource(node.body.range).slice(1, -1);
+
+            body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
+        } else {
+            const inner = this.bodySource(node.body.range);
+
+            body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
+        }
+
+        return `const ${wrapper.name} = ${head} ${body};`;
     }
 
     /** `bind:` 的 setter：赋值 + 刷新受影响的片段（延迟到这里才能算全片段） */
@@ -2009,7 +2076,7 @@ class Generator {
                 if ([...this.reactiveWrites(info.writes)].length > 0) return node.name;
 
                 const name = `${node.name}_$${++this.wrapperCounter}`;
-                this.wrappers.push({ name, node: info.node, writes: info.writes });
+                this.wrappers.push({ name, node: info.node, writes: info.writes, row: this.currentRow ?? undefined });
                 return name;
             }
         }
@@ -2017,7 +2084,7 @@ class Generator {
         if (node.type === 'ArrowFunctionExpression' || node.type === 'FunctionExpression') {
             const name = `__handler$${this.counter++}`;
 
-            this.wrappers.push({ name, node, writes: collectWrites(node) });
+            this.wrappers.push({ name, node, writes: collectWrites(node), row: this.currentRow ?? undefined });
 
             return name;
         }
@@ -2159,7 +2226,21 @@ class Generator {
         // 记下起点，后面只挑"块内"的
         const slotBase = this.slots.length;
 
-        const [inner, innerStatements] = this.capture(() => this.children(node.children, row), false);
+        // 行里的事件处理器要定义在 render 内部（才能访问循环变量）—— 打个行号，
+        // 生成 render 时在那里留占位，最后填回去
+        const rowId = ++this.rowCounter;
+        const savedRow = this.currentRow;
+
+        this.currentRow = rowId;
+
+        let inner: string[];
+        let innerStatements: string[];
+
+        try {
+            [inner, innerStatements] = this.capture(() => this.children(node.children, row), false);
+        } finally {
+            this.currentRow = savedRow;
+        }
 
         // 块内注册的都标上：它们的 updater 是 `render$X` 的局部变量，顶层的刷新
         // 调用够不到（见 `Slot.inner`）
@@ -2269,6 +2350,10 @@ class Generator {
         this.statements.push(
             `const ${render} = (${iter}) => {`,
             `  ${binding}`,
+            // 行里的事件处理器定义最后填进来。位置必须在**元素创建之前** ——
+            // `creEle(..., { onclick: __handler$4 })` 会当场引用它，而 `const` 有 TDZ。
+            // 内容也要等所有片段收集完才算得出刷新调用，所以只能先占位
+            rowPlaceholder(rowId),
             ...innerStatements.map((line) => `  ${line}`),
             `  const ${row} = creFragment([${inner.join(', ')}]);`,
             `  return {`,
