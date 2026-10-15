@@ -2,7 +2,7 @@
     "name": "grain-vscode",
     "displayName": "Grain.ts",
     "description": "Grain.ts language support: syntax highlighting, diagnostics, go-to-definition, hover, completion and component prop hints",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "publisher": "grain-ts",
     "license": "MIT",
     "icon": "images/icon.png",

@@ -553,6 +553,36 @@ function collectLoopNames(nodes: readonly unknown[]): string[] {
     return [...names];
 }
 
+/**
+ * script 里**顶层**声明的名字。
+ *
+ * 只用来判断"循环变量要不要补声明"：`collectAll` 会把函数里的局部声明也收进来，
+ * 于是 `{#for [i, song] of ...}` 的 `song` 会因为某个函数里恰好有个 `let song`
+ * 而被认为"已经有了"、不补 —— 模板那边就报 "Cannot find name 'song'"。
+ * 函数内的声明跟模板里的循环变量不是一回事。
+ */
+function topLevelNames(program: TSProgram | null | undefined): Set<string> {
+    const names = new Set<string>();
+
+    for (const statement of (program as unknown as { body?: any[] })?.body ?? []) {
+        if (statement.type === 'VariableDeclaration') {
+            for (const declarator of statement.declarations ?? []) {
+                if (declarator.id?.type === 'Identifier') names.add(declarator.id.name);
+            }
+        } else if (
+            (statement.type === 'FunctionDeclaration' ||
+                statement.type === 'ClassDeclaration' ||
+                statement.type === 'TSTypeAliasDeclaration' ||
+                statement.type === 'TSInterfaceDeclaration') &&
+            statement.id?.name
+        ) {
+            names.add(statement.id.name);
+        }
+    }
+
+    return names;
+}
+
 /** 常见标签 -> DOM 类型，给 `bind:this` 声明的变量用（认不出的退成 HTMLElement） */
 const ELEMENT_TYPES: Record<string, string> = {
     a: 'HTMLAnchorElement',
@@ -870,6 +900,20 @@ const REGEX_IMPLICIT_ANY = /implicitly has an 'any' type/;
  * 赋值只能拼在文件末尾，TS 会报"用了还没赋值"——那是虚拟文件的拼法带来的，不是用户的错
  */
 const REGEX_MACRO_PLACEHOLDER = /Variable '_macro\$\d+' is used before being assigned/;
+
+/**
+ * 针对 `bind:this` 变量的、**不成立**的诊断。
+ *
+ * 那次赋值是运行时做的（`"this": ($el) => { box = $el; }`），虚拟文件里体现不出来。
+ * 所以：
+ *
+ * - `let box: HTMLCanvasElement;` + `bind:this={box}` → TS 说"使用前未赋值"
+ * - `let box;` + `bind:this={box}` → TS 说"隐式 any"
+ *
+ * 两个都不该报 —— 元素建好就赋上了。
+ */
+const REGEX_THIS_ASSIGNS =
+    /Variable '(\w+)' (?:is used before being assigned|implicitly has .*'any')/;
 
 /**
  * 模板里的表达式 / 绑定项：只要区间和原文。
@@ -1254,6 +1298,16 @@ export function analyze(source: string, filename: string): Analysis {
     const thisBindings = root
         ? collectThisBindings(root.template.children, scriptFunctions, new Set(all.keys()))
         : [];
+
+    /**
+     * `bind:this` 绑的变量名（script 里自己声明过的也算）。
+     *
+     * 用它过滤掉针对这些变量的"使用前未赋值"/"隐式 any"—— 那次赋值是运行时做的，
+     * 虚拟文件里体现不出来。
+     */
+    const thisNames = new Set(
+        thisBindings.map((item) => item.name).filter((name): name is string => name !== null)
+    );
     // 模板里子组件的名字要按类型上色
     const componentSpans = stage ? componentSpansOf(stage.template.children, source) : [];
 
@@ -1286,9 +1340,18 @@ export function analyze(source: string, filename: string): Analysis {
               : fallbackScripts(source);
     const virtual = virtualName(filename);
 
-    // 循环变量在虚拟文件里没有声明，补上（script 里已经声明过同名的就不补）
+    // 循环变量在虚拟文件里没有声明，补上。
+    //
+    // 只在 script **顶层**声明过同名时才不补：函数里的局部声明（`function f() { let song }`）
+    // 跟模板里的循环变量不是一回事，拿它当"已经有了"会让模板报 "Cannot find name"
+    const declaredTopLevel = new Set<string>();
+
+    for (const script of [root?.script, root?.module, root?.onmount]) {
+        for (const name of topLevelNames(script?.content)) declaredTopLevel.add(name);
+    }
+
     const loops = stage
-        ? collectLoopNames(stage.template.children).filter((name) => !all.has(name))
+        ? collectLoopNames(stage.template.children).filter((name) => !declaredTopLevel.has(name))
         : [];
 
     // 拼在虚拟文件末尾的东西（偏移超出源码长度）：
@@ -1511,6 +1574,12 @@ export function analyze(source: string, filename: string): Analysis {
 
             for (const problem of typescriptService.semanticProblems(virtual)) {
                 if (REGEX_MACRO_PLACEHOLDER.test(problem.message)) continue;
+
+                // `bind:this` 会给变量赋值 —— 所以"使用前未赋值"和"隐式 any"都不成立。
+                // 虚拟文件里体现不出那次赋值（它是运行时做的），过滤掉
+                const assigned = REGEX_THIS_ASSIGNS.exec(problem.message);
+
+                if (assigned && thisNames.has(assigned[1])) continue;
 
                 // 拼在末尾的 `bind:this` 类型检查：位置挪回模板里那一处
                 const span = tailSpans.find(
