@@ -181,12 +181,123 @@ function stateNameRanges(program: TSProgram): Array<[number, number]> {
                 init.callee.type === 'Identifier' &&
                 init.callee.name === '$state'
             ) {
-                found.push(declarator.id.range);
+                // 只取名字那一段：`let typed: Foo = $state(...)` 的 `id.range`
+                // 连类型注解一起包了（`typed: Foo`），拿它做装饰会多画一截
+                const [from] = declarator.id.range;
+
+                found.push([from, from + declarator.id.name.length]);
             }
         }
     }
 
     return found;
+}
+
+/** `at` 之前最近的、不是空白的那个字符（没有就给空串） */
+function sourceLastNonSpace(source: string, at: number): string {
+    for (let i = at - 1; i >= 0; i -= 1) {
+        if (!/\s/.test(source[i])) return source[i];
+    }
+
+    return '';
+}
+
+/** `at` 之后最近的、不是空白的那个字符 */
+function sourceFirstNonSpace(source: string, at: number): string {
+    for (let i = at; i < source.length; i += 1) {
+        if (!/\s/.test(source[i])) return source[i];
+    }
+
+    return '';
+}
+
+/** 三种函数节点 */
+function isFunction(node: { type?: string } | null | undefined): boolean {
+    return (
+        node?.type === 'FunctionDeclaration' ||
+        node?.type === 'FunctionExpression' ||
+        node?.type === 'ArrowFunctionExpression'
+    );
+}
+
+/** 参数里绑定的名字（`(count)` / `({ a })` / `([x])` / `(n = 1)`） */
+function paramNames(params: readonly any[]): string[] {
+    const found: string[] = [];
+
+    const walkPattern = (pattern: any): void => {
+        if (!pattern || typeof pattern !== 'object') return;
+
+        if (pattern.type === 'Identifier') found.push(pattern.name);
+        else if (pattern.type === 'AssignmentPattern') walkPattern(pattern.left);
+        else if (pattern.type === 'RestElement') walkPattern(pattern.argument);
+        else if (pattern.type === 'ObjectPattern') for (const p of pattern.properties ?? []) walkPattern(p.value ?? p);
+        else if (pattern.type === 'ArrayPattern') for (const p of pattern.elements ?? []) walkPattern(p);
+    };
+
+    for (const param of params) walkPattern(param);
+
+    return found;
+}
+
+/**
+ * 哪些区间里的 `name` 是**内层同名绑定**（函数参数、块里的 let/const）。
+ *
+ * `stateReferencesOf` 只按名字扫（不走 TS —— 虚拟文件的偏移对不上），所以得自己
+ * 判断作用域：`let count = $state(0)` 之后写 `function show(count) { return count }`，
+ * 那两个 `count` 跟外面的响应式变量没关系，不该画下划线。
+ *
+ * 用区间而不是 `parent` 链：解析出来的节点上**没有** `parent` 字段（试过，链是空的）。
+ *
+ * 遮蔽范围取**整个函数 / 整个块** —— 参数和块内声明本身也落在里面，就一起排掉了。
+ */
+function shadowedRanges(program: TSProgram, names: ReadonlySet<string>): Array<[string, number, number]> {
+    const found: Array<[string, number, number]> = [];
+
+    walk(program, (node) => {
+        if (!node || typeof node !== 'object') return;
+
+        // 函数：参数遮蔽整个函数（连同参数列表本身）
+        if (isFunction(node)) {
+            const [from, to] = node.range as [number, number];
+
+            for (const name of paramNames(node.params ?? [])) {
+                if (names.has(name)) found.push([name, from, to]);
+            }
+        }
+
+        // 块 / for：里面声明的同名变量遮蔽到这个节点结束
+        if (
+            node.type === 'BlockStatement' ||
+            node.type === 'ForStatement' ||
+            node.type === 'ForOfStatement' ||
+            node.type === 'ForInStatement'
+        ) {
+            const [from, to] = node.range as [number, number];
+            const holders =
+                node.type === 'BlockStatement' ? (node.body ?? []) : [node.init ?? node.left];
+
+            for (const holder of holders) {
+                if (holder?.type !== 'VariableDeclaration') continue;
+
+                for (const declarator of holder.declarations ?? []) {
+                    if (declarator.id?.type === 'Identifier' && names.has(declarator.id.name)) {
+                        found.push([declarator.id.name, from, to]);
+                    }
+                }
+            }
+        }
+    });
+
+    return found;
+}
+
+/** 引用是不是落在某个遮蔽区间里 */
+function isShadowedAt(
+    blinded: ReadonlyArray<[string, number, number]>,
+    name: string,
+    at: number
+): boolean {
+    return blinded.some(([blind, from, to]) => blind === name && at >= from && at <= to);
 }
 
 /**
@@ -203,6 +314,14 @@ function stateReferencesOf(
     /** 名字 -> 声明位置（`$state` 变量 + 从它们取出来的局部变量） */
     const names = new Map<string, [number, number]>();
 
+    /**
+     * 其中哪些是**顶层** `$state` 变量。
+     *
+     * 只有它们才做"被内层同名绑定遮蔽"的判断：派生局部变量（`const second = arr[1]`）
+     * 本身就是写在函数/块里的，拿遮蔽规则去套会把它们自己排掉。
+     */
+    const topLevel = new Set<string>();
+
     for (const script of scripts) {
         if (!script) continue;
 
@@ -210,6 +329,7 @@ function stateReferencesOf(
 
         for (const state of analysis.states.values()) {
             if (state.nameRange) names.set(state.name, state.nameRange);
+            if (!state.fromPath) topLevel.add(state.name);
         }
     }
 
@@ -221,18 +341,22 @@ function stateReferencesOf(
     for (const script of scripts) {
         if (!script) continue;
 
-        // walk 只给节点，父子关系靠 `parent` 字段拿（estree 解析时带上了）
+        // 先把"内层同名绑定"的区间扫出来，下面按位置排掉（只对顶层 $state 变量）
+        const blinded = shadowedRanges(script.content, topLevel);
+
+        // walk 只给节点，没有 parent —— 属性名（`obj.count` 的 count）看前一个字符排掉
         walk(script.content, (node) => {
             if (node?.type !== 'Identifier' || !names.has(node.name)) return;
 
-            const parent = node.parent;
-
-            if (parent?.type === 'MemberExpression' && parent.property === node && !parent.computed) return;
-            if (parent?.type === 'Property' && parent.key === node && !parent.computed) return;
-
             const [start, end] = node.range;
 
-            found.push({ start, end });
+            if (isShadowedAt(blinded, node.name, start)) return;
+            if (sourceLastNonSpace(source, start) === '.') return;
+            // `{ count: 1 }` 里的键：后面紧跟冒号
+            if (sourceFirstNonSpace(source, end) === ':') return;
+
+            // oxc 的 Identifier range 会连类型注解一起包（`a: Foo`）—— 只留名字那一段
+            found.push({ start, end: start + node.name.length });
         });
     }
 
@@ -665,11 +789,34 @@ function hasDefaultExport(scripts: VirtualScript[]): boolean {
     return scripts.some((script) => /export\s+default\b/.test(script.raw));
 }
 
+/** script / 模板里所有函数节点的区间（含参数列表） */
+function functionRanges(root: Root | null, expressions: Expression[]): Array<[number, number]> {
+    const found: Array<[number, number]> = [];
+
+    const collect = (program: unknown): void => {
+        walk(program, (node) => {
+            if (isFunction(node)) found.push(node.range as [number, number]);
+        });
+    };
+
+    for (const script of [root?.script, root?.module, root?.onmount]) if (script) collect(script.content);
+    for (const expression of expressions) collect(expression.content);
+
+    return found;
+}
+
 /**
- * `bind:this` 声明的变量只在 `<script onmount>` 里有效，别处引用就该报错。
+ * `bind:this` 自己声明的变量：只在挂载之后才有值，所以在**挂载前就会跑**的地方
+ * 引用它是错的。
  *
- * TS 那边没法用作用域表达（变量是编译期才声明的，虚拟文件里只能全局声明），
- * 所以自己扫一遍：不在 onmount 里、也不是声明处本身的引用都报出来。
+ * 允许两个地方：
+ *
+ * - `<script onmount>` 里（那时候已经挂上了）
+ * - 任何**函数体**里 —— 事件监听器、回调、定时器……这些基本不会在挂载前触发。
+ *   函数定义写在顶层没问题，跑起来的时候元素早就在了
+ *
+ * TS 那边没法表达这个作用域（变量是编译期才声明的，虚拟文件里只能全局声明），
+ * 所以自己扫一遍。
  */
 function thisLeaks(
     root: Root | null,
@@ -682,6 +829,7 @@ function thisLeaks(
 
     const wanted = new Map(named.map((item) => [item.name as string, item]));
     const onmount = root.onmount;
+    const functions = functionRanges(root, expressions);
     const problems: SemanticProblem[] = [];
 
     const check = (node: any): void => {
@@ -695,13 +843,16 @@ function thisLeaks(
         // 声明处本身（`bind:this={box}` 里的 box）不算
         if (start >= item.start && start <= item.end) return;
 
-        // onmount 里可以用
+        // onmount 里可以用（那时候已经挂上了）
         if (onmount && start >= onmount.contentStart && start <= onmount.contentEnd) return;
+
+        // 函数体里也可以用：事件监听器之类的不会在挂载前触发
+        if (functions.some(([from, to]) => start >= from && start <= to)) return;
 
         problems.push({
             start,
             end,
-            message: `\`${node.name}\` is declared by \`bind:this\` and can only be used inside \`<script onmount>\``
+            message: `\`${node.name}\` is declared by \`bind:this\` — use it inside a function or \`<script onmount>\`（挂载之后才有值）`
         });
     };
 
@@ -734,7 +885,17 @@ export interface ExpressionRegion {
     kind?: 'expression' | 'get' | 'set' | 'listen';
 }
 
-function collectExpressions(nodes: readonly unknown[], source: string): ExpressionRegion[] {
+function collectExpressions(
+    nodes: readonly unknown[],
+    source: string,
+    /**
+     * 收 `bind:this` 的表达式吗。
+     *
+     * 铺虚拟文件时要跳过（它是赋值目标，铺进去变成一次读取）；而 hover / 补全要用，
+     * 所以那边照收。
+     */
+    includeThis = true
+): ExpressionRegion[] {
     const expressions: ExpressionRegion[] = [];
 
     const push = (value: unknown): void => {
@@ -753,8 +914,14 @@ function collectExpressions(nodes: readonly unknown[], source: string): Expressi
                 break;
 
             case 'element':
-                for (const value of Object.values((current.attributes ?? {}) as Record<string, unknown>)) {
+                for (const [key, value] of Object.entries((current.attributes ?? {}) as Record<string, unknown>)) {
                     if (value === true || typeof value === 'string') continue;
+
+                    // `bind:this={box}` 不铺：它是个**赋值目标**，铺进虚拟文件就变成一次
+                    // 读取（`(box);`）—— 而 `let box: HTMLInputElement;` 没有初始化器，
+                    // TS 会报 "used before being assigned"。那个赋值是运行时做的，不该
+                    // 在虚拟文件里体现。类型检查由 thisChecks 另外生成
+                    if (key === 'bind:this' && !includeThis) continue;
 
                     for (const chunk of Array.isArray(value) ? value : [value]) {
                         if (typeof chunk === 'string') continue;
@@ -1070,7 +1237,8 @@ export function analyze(source: string, filename: string): Analysis {
 
     // 两份：铺虚拟文件 / 判断光标位置用区间那份（解析失败时也有）；
     // 模板里 hover 找声明要 TS AST，只有完整解析成功才有
-    const regions = stage ? collectExpressions(stage.template.children, source) : [];
+    // 给虚拟文件用：跳过 `bind:this`（它是赋值目标，铺进去会变成读取）
+    const regions = stage ? collectExpressions(stage.template.children, source, false) : [];
     const expressions = (root ? collectExpressions(root.template.children, source) : []) as Expression[];
     const components = importedComponents(root?.script ?? null, filename);
 
@@ -1180,19 +1348,12 @@ export function analyze(source: string, filename: string): Analysis {
         cursor = to;
     }
 
-    // script 里已经声明过的 `bind:this` 变量：在它后面插一句初始化。
-    //
-    // 不插的话 TS 会报 "used before being assigned" —— 虚拟文件里 `bind:this={box}`
-    // 被铺成 `(box);`（读取），而 script 里那句 `let box: HTMLInputElement;` 没有
-    // 初始化器，TS 的 definite assignment 是流敏感的，末尾那句赋值救不了前面的读取。
-    //
-    // 插在 script 里那句**之后**：同一作用域，之后的读取就都过了。这只是虚拟文件里
-    // 的事，产物不受影响（产物里赋值由 `"this": ($el) => { box = $el; }` 负责）。
-    const seed = thisBindings
-        .filter((item) => !item.declared)
-        .map((item) => `${item.name} = null as any as ${item.type};`);
-
-    const virtualText = buildVirtual(source, scripts, regions, tailLines.join('\n'), seed);
+    // 虚拟文件必须跟源码**等长**（位置一一对应，TS 报的偏移不用换算）。
+    // 早先为了消掉 `bind:this` 那句 "used before being assigned"，在 script 后面插过
+    // 一句初始化 —— 那会让后面所有内容后移，语义高亮整体错位（`</script>` 上出现
+    // JS 的着色）。现在改成不把 `bind:this` 的表达式铺进虚拟文件（见 collectExpressions），
+    // 那个报错的前提就没了
+    const virtualText = buildVirtual(source, scripts, regions, tailLines.join('\n'));
 
     typescriptService.update(virtual, virtualText);
 

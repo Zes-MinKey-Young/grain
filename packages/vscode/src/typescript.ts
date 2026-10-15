@@ -295,26 +295,16 @@ export function buildVirtual(
     scripts: VirtualScript[],
     expressions: VirtualExpression[],
     /** 追加在文件末尾的声明（循环变量之类）；放在末尾是为了不影响任何已有偏移 */
-    tail = '',
-    /**
-     * 跟在每个 script 内容之后的语句（`bind:this` 变量的初始化）。
-     *
-     * 插在这儿而不是末尾：TS 的 definite assignment 是流敏感的，末尾的赋值救不了
-     * 前面的读取。每个 script 后面都跟一份 —— 分不清哪个 script 声明了那个变量，
-     * 而重复赋值无害（都是 null）。
-     */
-    afterScript: string[] = []
+    tail = ''
 ): string {
     let virtual = source.replace(/[^\n\r]/g, ' ');
 
     for (const script of scripts) {
         if (!script) continue;
 
-        virtual =
-            virtual.slice(0, script.contentStart) +
-            script.raw +
-            (afterScript.length > 0 ? `\n${afterScript.join('\n')}` : '') +
-            virtual.slice(script.contentEnd);
+        // 就地换掉 script 的内容 —— 必须**等长**，虚拟文件的位置才跟源码一一对应。
+        // 别在这里往后插东西（插过 `bind:this` 的初始化，结果语义高亮整体错位）
+        virtual = virtual.slice(0, script.contentStart) + script.raw + virtual.slice(script.contentEnd);
     }
 
     // 模板里的表达式也铺进来：语义高亮是 TS 给的，模板区域原来是纯空白，

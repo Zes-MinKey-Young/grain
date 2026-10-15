@@ -66,7 +66,8 @@ it('a bind:this that declares its own variable still works', () => {
     expect(analyze(source, 'App.grain').semantic()).toEqual([]);
 });
 
-it('using a self-declared variable outside onmount is reported', () => {
+it('a function may use a self-declared bind:this variable', () => {
+    // 事件监听器基本不会在挂载前触发 —— 函数体里用是允许的
     const source = `<script>
     function peek() {
         return box;
@@ -75,8 +76,24 @@ it('using a self-declared variable outside onmount is reported', () => {
 <div bind:this={box}></div>
 <button onclick={peek}>peek</button>`;
 
+    expect(analyze(source, 'App.grain').semantic()).toEqual([]);
+});
+
+it('an inline handler may use it too', () => {
+    const source = `<div bind:this={box}></div>
+<button onclick={() => box.focus()}>go</button>`;
+
+    expect(analyze(source, 'App.grain').semantic()).toEqual([]);
+});
+
+it('using it at the top level (before the element exists) is reported', () => {
+    const source = `<script>
+    box.focus();
+</script>
+<div bind:this={box}></div>`;
+
     const problems = analyze(source, 'App.grain').semantic();
 
     expect(problems).toHaveLength(1);
-    expect(problems[0].message).toContain('can only be used inside');
+    expect(problems[0].message).toContain('bind:this');
 });

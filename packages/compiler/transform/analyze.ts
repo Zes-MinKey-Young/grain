@@ -394,7 +394,9 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                 name: declarator.id.name,
                 init: argument ? slice(source, argument.range) : 'undefined',
                 range: init.range,
-                nameRange: declarator.id.range,
+                // 名字那一段：`let typed: Foo = $state(...)` 的 `id.range` 连类型注解
+                // 一起包了（`typed: Foo`），拿它做下划线会多画一截
+                nameRange: findNameRange(declarator.id.range, declarator.id.name, source),
                 level: levelOf(init)
             });
         }
