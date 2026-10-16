@@ -137,6 +137,125 @@ it('nothing is flagged while the borrow is still alive', () => {
     ).toEqual([]);
 });
 
+// ---------------------------------------------------------------------------
+// 根变量修改的**位置**四种：之前 / 中间 / 之后 / 不修改。
+//
+// 借用是从"取出那句"开始的，所以根在那之前动过不影响；根在取出与写入之间动过，
+// 借用就断了 —— 那次写入不再刷根变量。
+// ---------------------------------------------------------------------------
+
+const ROWS = `{#for item of arr}
+    <span>{item.name}</span>
+{/for}
+<button onclick={f}>go</button>`;
+
+const names = (target: Element): string[] =>
+    [...target.querySelectorAll('span')].map((node) => node.textContent);
+
+it('④ the root untouched: the borrowed write refreshes', async () => {
+    const target = await mount(`<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+    function f() {
+        const second = arr[1];
+
+        second.name = 'B';
+    }
+</script>
+${ROWS}`);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    expect(names(target)).toEqual(['a', 'B', 'c']);
+});
+
+it('① the root reassigned before the borrow: still refreshes', async () => {
+    // 根先整个换成 [x, y]，再取出第二项 —— 借用从取出那句才开始，不受之前影响
+    const target = await mount(`<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+    function f() {
+        arr = [{ name: 'x' }, { name: 'y' }];
+        const second = arr[1];
+
+        second.name = 'B';
+    }
+</script>
+${ROWS}`);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    expect(names(target)).toEqual(['x', 'B']);
+});
+
+it('② the root displaced in between: no refresh, and it is flagged', async () => {
+    // 取出 -> 根被改（借用断）-> 再写。那次写入不再刷根变量。
+    //
+    // 这里用 `splice` 而不是整体重赋值：splice 走精确调用（不整块比对），所以 DOM
+    // 上真能看出差别。整体重赋值会整块比对，那一次写入的结果会被顺带刷出来 ——
+    // 对象确实被改了，只是没人通知 DOM
+    const target = await mount(`<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+    function f() {
+        const second = arr[1];
+
+        arr.splice(0, 1);
+        second.name = 'B';
+    }
+</script>
+${ROWS}`);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    // 第一项删掉了；第二项显示的是**旧值** —— 那次写入没通知 DOM。
+    // （借用还活着的话这里会是 ['B', 'c']）
+    expect(names(target)).toEqual(['b', 'c']);
+
+    const js = compile(`<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+    function f() {
+        const second = arr[1];
+
+        arr.splice(0, 1);
+        second.name = 'B';
+    }
+</script>
+${ROWS}`, { filename: 'App.grain' }).js;
+
+    // 失效了就不该有精确的 setPath
+    expect(js).not.toMatch(/setPath\(1, "name"\)/);
+});
+
+it('③ the root reassigned after the write: the write already happened', async () => {
+    // 取出 -> 写入（借用还活着，刷新）-> 根再换掉。写入排在之前，照样算数
+    const target = await mount(`<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+    function f() {
+        const second = arr[1];
+
+        second.name = 'B';
+        arr = [arr[2], arr[1], arr[0]];
+    }
+</script>
+${ROWS}`);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    // 重排 + 那次写入（b 已经在重排前变成 B 了）
+    expect(names(target)).toEqual(['c', 'B', 'a']);
+});
+
 it('a write before the root is touched still refreshes', async () => {
     // 位置敏感的核心：失效点之前写它，照样刷新
     const target = await mount(`<script>

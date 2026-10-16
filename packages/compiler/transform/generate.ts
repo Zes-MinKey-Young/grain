@@ -537,6 +537,33 @@ interface Deferred {
 }
 
 /**
+ * 这个函数里有没有**整体重赋值**（`arr = [...]`）。
+ *
+ * 只有它算：容器方法（`arr.push(x)` / `map.set(k, v)`）本身就被精确处理了
+ * （`push` / `setKey`），整块比对省掉没问题。而整体重赋值**没有**精确处理这条路 ——
+ * 它改变列表的长度和内容，只能靠整块比对。省掉就没人刷（实测
+ * `arr[1].name = 'B'; arr = [...]` 里数组根本不更新）。
+ *
+ * 路径写入（`arr[1].name = 'B'`）也不算 —— 那是 `setPath` 的活。
+ */
+function hasBulkChange(node: TSESTree.Node, sources: ReadonlySet<string>): boolean {
+    let found = false;
+
+    simpleTraverse(node, {
+        enter(child) {
+            if (child.type !== 'AssignmentExpression' && child.type !== 'UpdateExpression') return;
+
+            const target = child.type === 'AssignmentExpression' ? child.left : child.argument;
+
+            // 目标**就是**变量本身（`arr`）才算；`arr[1].name` 是路径写入
+            if (target.type === 'Identifier' && sources.has(target.name)) found = true;
+        }
+    });
+
+    return found;
+}
+
+/**
  * 这个位置上，这个派生局部变量还算响应式吗。
  *
  * 借用是有**有效期**的（`analyzeBorrows` 算的）：过了失效点它就不再指向根上那条
@@ -2453,15 +2480,28 @@ class Generator {
         const edits: Edit[] = [];
         const skip = new Set<string>();
 
-        /** 记下这次改动：紧跟原语句插一句精确调用，并顶掉整块比对 */
+        /**
+         * 记下这次改动：紧跟原语句插一句精确调用，并（多半）顶掉整块比对
+         */
         const precise = (list: string, call: string, node: TSESTree.Node, parent?: TSESTree.Node): void => {
             const statement = parent?.type === 'ExpressionStatement' ? parent : node;
 
             edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}?.${call};` });
 
             const slot = this.forSlots.get(list);
-            if (slot) skip.add(`${slot.update}#${slot.index}`);
+
+            if (slot && !bulk) skip.add(`${slot.update}#${slot.index}`);
         };
+
+        /**
+         * 这个函数里有没有**整块级别**的改动（整体重赋值、容器方法）。
+         *
+         * 有的话整块比对就不能省：`arr = [...]` / `arr.push(x)` 会改变列表的长度或
+         * 顺序，而精确的 `setPath(i, prop)` 只管某一格的内容，管不了这些 —— 省掉就
+         * 没人刷了（实测：`arr[1].name = 'B'; arr = [...]` 里数组根本不更新）。
+         */
+        const sources = new Set(this.forSources.keys());
+        const bulk = hasBulkChange(node, sources);
 
         /**
          * 容器变量 -> 以它为源的**所有**列表。

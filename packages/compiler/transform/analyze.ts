@@ -247,8 +247,15 @@ function analyzeBorrows(
                 return;
             }
 
-            // 写根变量 / 根变量逃逸：之前取出的全部失效
-            for (const root of writtenRoots(child)) kill(root, child.range[0]);
+            // 会移动 / 删除已有项的操作，以及根变量逃逸 —— 之前取出的全部失效。
+            //
+            // 这里刻意**不是**"写了根变量就失效"：`arr.push(x)` 也写根，但它只追加，
+            // 已有项的位置和引用都不变，之前取出的 `arr[2]` 还指着同一项。
+            // 判死了会错杀 `const minkey = arr[2]; arr.push(...); minkey.language = ...`
+            // 这种写法（level 示例就是）
+            const disrupted = disruptsBorrow(child);
+
+            if (disrupted && states.has(disrupted)) kill(disrupted, child.range[0]);
             for (const root of escapedRoots(child, states)) kill(root, child.range[0]);
 
             const name = writtenName(child);
@@ -295,7 +302,7 @@ interface DerivedLocal {
  * `list.setKey(...)`，`{#for [k, v] of scores}` 那块不刷新。只有被模板**直接**引用的
  * 函数能靠 `handler()` 那条路侥幸 work，包在箭头函数里调的就彻底不刷。
  */
-const MUTATION_METHODS = new Set([
+export const MUTATION_METHODS = new Set([
     'add',
     'clear',
     'copyWithin',
@@ -310,6 +317,60 @@ const MUTATION_METHODS = new Set([
     'splice',
     'unshift'
 ]);
+
+/**
+ * 这些方法会**移动 / 删除已有**的项 —— 之前从容器里取出来的引用就可能指错地方了，
+ * 借用得失效。
+ *
+ * 刻意不含 `push` / `set` / `add` / `delete`：
+ *
+ * - `push` 只追加，已有项的位置和引用都不变 —— `arr.push(x)` 之后 `arr[2]` 还是
+ *   原来那一项（level 示例正是这个用法：取出 `minkey` 再 push，接着改 `minkey`）
+ * - `map.set(k, v)` / `set.add(v)` 只动那一项；`delete` 删掉的那一项已经被
+ *   `removeKey` 处理，别的项没动
+ *
+ * 保守该"一律失效"，但那会把上面这些正常用法也判死，而它们在语义上确实安全。
+ */
+const DISPLACING_METHODS = new Set([
+    'clear',
+    'copyWithin',
+    'fill',
+    'pop',
+    'reverse',
+    'shift',
+    'sort',
+    'splice',
+    'unshift'
+]);
+
+/**
+ * 这类操作会让借用失效吗 —— 用于借用规则，不是用来记"写了什么"。
+ *
+ * 跟 `MUTATION_METHODS` 两回事：后者是"这个调用动了容器"（用来决定要不要刷新），
+ * 这个是"这个操作让之前取出的引用靠不住了"。
+ */
+export function disruptsBorrow(node: TSESTree.Node): string | null {
+    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
+        const target = node.type === 'AssignmentExpression' ? node.left : node.argument;
+
+        // 整体重赋值（`arr = [...]`）会换掉整个容器；`arr[1] = ...` 不会
+        return target.type === 'Identifier' ? target.name : null;
+    }
+
+    if (node.type === 'CallExpression' && node.callee.type === 'MemberExpression') {
+        const method = node.callee.property;
+
+        if (method.type !== 'Identifier' || !DISPLACING_METHODS.has(method.name)) return null;
+
+        let base: TSESTree.Node = node.callee.object;
+
+        while (base.type === 'MemberExpression') base = base.object;
+
+        return base.type === 'Identifier' ? base.name : null;
+    }
+
+    return null;
+}
 
 function slice(source: string, range: [number, number]): string {
     return source.slice(range[0], range[1]);
@@ -538,32 +599,7 @@ export function collectWrites(
     return paths;
 }
 
-/**
- * 这一个节点写了哪些 `$state` 根变量。
- *
- * 用来实现借用规则：写了根变量，之前从它取出来的局部变量就失效。
- */
-function writtenRoots(node: TSESTree.Node): string[] {
-    if (node.type === 'AssignmentExpression' || node.type === 'UpdateExpression') {
-        const target = node.type === 'AssignmentExpression' ? node.left : node.argument;
 
-        return rootOf(target) ? [rootOf(target)!] : [];
-    }
-
-    if (node.type === 'CallExpression') {
-        const callee = node.callee;
-
-        if (callee.type === 'MemberExpression' && callee.property.type === 'Identifier') {
-            if (MUTATION_METHODS.has(callee.property.name)) {
-                const root = rootOf(callee.object);
-
-                return root ? [root] : [];
-            }
-        }
-    }
-
-    return [];
-}
 
 /**
  * 声明语句里变量名的位置。
