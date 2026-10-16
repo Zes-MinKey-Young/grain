@@ -40,6 +40,15 @@ export interface StateInfo {
      * 保守（退回整个容器），而精确定位希望能找到具体那一行。
      */
     fromIndex?: string;
+    /**
+     * 派生局部变量的有效期（`[from, to)`）—— 只有派生才有。
+     *
+     * 过了 `to` 写它就不再刷根变量了（借用已经结束）。语言服务拿它判断某个位置
+     * 还该不该画响应式下划线。
+     */
+    aliveFrom?: number;
+    /** `Infinity` 表示活到函数末尾 */
+    aliveTo?: number;
 }
 
 export type FunctionLike =
@@ -63,9 +72,219 @@ export interface FunctionInfo {
     writes: Set<string>;
 }
 
+/**
+ * 借用规则给出的一条提示（不是错误：产物照样能跑，只是那一下不会刷新）。
+ */
+export interface BorrowWarning {
+    start: number;
+    end: number;
+    message: string;
+}
+
+/**
+ * 一个派生局部变量的有效期：`[from, to)`。
+ *
+ * - `from`：声明语句结束处 —— 之前它还不存在
+ * - `to`：让它失效的那条语句的起点。`Infinity` 表示活到函数末尾
+ *
+ * `to` 之前写它是有响应性的（等于写根上那条路径），之后就不是了。
+ */
+export interface BorrowWindow {
+    from: number;
+    to: number;
+    /** 从哪个根变量派生出来的 */
+    root: string;
+}
+
 export interface ScriptAnalysis {
     states: Map<string, StateInfo>;
     functions: Map<string, FunctionInfo>;
+    warnings: BorrowWarning[];
+}
+
+/**
+ * 这条语句写的是哪个名字（路径的第一段）。不是写操作就 null。
+ *
+ * 三种写：赋值、自增自减、容器方法（`arr.push(x)` / `map.set(k, v)`）。
+ */
+function writtenName(node: TSESTree.Node): string | null {
+    const target =
+        node.type === 'AssignmentExpression'
+            ? node.left
+            : node.type === 'UpdateExpression'
+              ? node.argument
+              : node.type === 'CallExpression' &&
+                  node.callee.type === 'MemberExpression' &&
+                  node.callee.property.type === 'Identifier' &&
+                  MUTATION_METHODS.has(node.callee.property.name)
+                ? node.callee.object
+                : null;
+
+    return target ? baseNameOf(target) : null;
+}
+
+/** 路径的第一段（`minkey.name` -> `minkey`）；不是标识符打头的就 null */
+function baseNameOf(node: TSESTree.Node): string | null {
+    let base: TSESTree.Node = node;
+
+    while (base.type === 'MemberExpression') base = base.object;
+
+    return base.type === 'Identifier' ? base.name : null;
+}
+
+/**
+ * 逃逸出去的根变量：`other = arr` —— 把根交给了**另一个响应式变量**。
+ *
+ * 之后改 `other` 等于改 `arr`，而那一侧编译期看不见（它可能在别的组件里），
+ * 所以 `arr` 的借用也得失效。
+ *
+ * 只看简单形式：左边是响应式变量、右边直接是响应式变量的标识符。`other.foo = arr`
+ * 那种不处理 —— 保守的收益很小，误判的代价更大。
+ */
+function escapedRoots(node: TSESTree.Node, states: Map<string, StateInfo>): string[] {
+    if (node.type !== 'AssignmentExpression') return [];
+    if (node.left.type !== 'Identifier' || !states.has(node.left.name)) return [];
+    if (node.right.type !== 'Identifier' || !states.has(node.right.name)) return [];
+
+    return [node.right.name];
+}
+
+/**
+ * 借用规则：算出每个派生局部变量的**有效期**，并挑出越界的写入。
+ *
+ * 照 Rust 的精神 —— 一个根变量同时只能有一个活跃的借用：
+ *
+ * - 后一次取出让前一次失效（`const minkey = arr[2]; const qaqFei = arr[0]`）
+ * - 写根变量（`arr = [...]` / `arr.sort()`）让之前的全部失效
+ * - 根变量逃逸（`other = arr`）也让它失效
+ *
+ * 跟以前不同的是**位置敏感**：失效发生在让它失效的那条语句**之后**，在那之前
+ * 那些引用仍然是响应式的。所以这里记的是区间，不是一个布尔。
+ */
+function analyzeBorrows(
+    node: FunctionLike,
+    states: Map<string, StateInfo>,
+    source: string
+): {
+    windows: Map<string, BorrowWindow>;
+    warnings: BorrowWarning[];
+    /** 派生成功的局部变量，交给调用方登记进 `states` */
+    derived: DerivedLocal[];
+} {
+    const windows = new Map<string, BorrowWindow>();
+    const warnings: BorrowWarning[] = [];
+    const derived: DerivedLocal[] = [];
+
+    /** 根 -> 它当前活着的那个派生名 */
+    const alive = new Map<string, string>();
+
+    /** 写入点。有效期是边扫边回填的，所以先记下、最后再判越界 */
+    const writes: Array<{ name: string; at: number; start: number; end: number }> = [];
+
+    const kill = (root: string, at: number): void => {
+        const name = alive.get(root);
+
+        if (name === undefined) return;
+
+        const window = windows.get(name);
+
+        if (window) window.to = at;
+
+        alive.delete(root);
+    };
+
+    simpleTraverse(node, {
+        enter(child) {
+            // 取出：`const x = arr[i]` / `const x = arr.prop`
+            if (child.type === 'VariableDeclaration') {
+                for (const declarator of child.declarations) {
+                    const init = declarator.init;
+
+                    if (!init || declarator.id.type !== 'Identifier') continue;
+                    if (init.type !== 'MemberExpression') continue;
+
+                    const root = rootOf(init);
+                    const state = root ? states.get(root) : undefined;
+
+                    // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
+                    if (!state || state.level < 1 || !root) continue;
+
+                    // 同一个根上之前那个，到这条语句为止
+                    kill(root, child.range[0]);
+
+                    if (child.kind !== 'const') {
+                        warnings.push({
+                            start: declarator.id.range[0],
+                            end: declarator.id.range[1],
+                            message:
+                                `\`${declarator.id.name}\` takes a value out of \`${root}\` ` +
+                                `but is not \`const\` — use \`const ${declarator.id.name}\` if the changes should stick`
+                        });
+
+                        // 不算派生，也就别占着"活跃借用"的位置
+                        continue;
+                    }
+
+                    const cell = init as TSESTree.MemberExpression;
+
+                    alive.set(root, declarator.id.name);
+                    windows.set(declarator.id.name, {
+                        from: child.range[1],
+                        to: Infinity,
+                        root
+                    });
+                    derived.push({
+                        name: declarator.id.name,
+                        root,
+                        path: pathOf(init) ?? root,
+                        // 下标表达式原样记下：动态的（`arr[i]`）也能定位到那一行
+                        index: cell.computed ? slice(source, cell.property.range) : undefined,
+                        init: slice(source, init.range),
+                        range: declarator.range
+                    });
+                }
+
+                return;
+            }
+
+            // 写根变量 / 根变量逃逸：之前取出的全部失效
+            for (const root of writtenRoots(child)) kill(root, child.range[0]);
+            for (const root of escapedRoots(child, states)) kill(root, child.range[0]);
+
+            const name = writtenName(child);
+
+            if (name !== null) {
+                writes.push({ name, at: child.range[0], start: child.range[0], end: child.range[1] });
+            }
+        }
+    });
+
+    // 越界写：过了有效期还写它 —— 那一下不会刷新，说一声
+    for (const write of writes) {
+        const window = windows.get(write.name);
+
+        if (!window || write.at < window.to) continue;
+
+        warnings.push({
+            start: write.start,
+            end: write.end,
+            message:
+                `\`${write.name}\` is no longer reactive here — it was borrowed from \`${window.root}\`, ` +
+                'and that root was reassigned (or borrowed again) in between'
+        });
+    }
+
+    return { windows, warnings, derived };
+}
+
+/** `analyzeBorrows` 认出来的一个派生局部变量 */
+interface DerivedLocal {
+    name: string;
+    root: string;
+    path: string;
+    index?: string;
+    init: string;
+    range: [number, number];
 }
 
 /**
@@ -238,9 +457,24 @@ export function collectReads(node: TSESTree.Node, aliases?: Map<string, string>)
 export function collectWrites(
     node: TSESTree.Node,
     shallow?: Set<string>,
-    aliases?: Map<string, string>
+    aliases?: Map<string, string>,
+    /**
+     * 派生局部变量的有效期。给了的话，**过了有效期**写它就不算数 ——
+     * 那时候它已经不指向根上的那条路径了，刷新一个跟它无关的数组没有意义
+     *（`analyzeBorrows` 算出来的）。
+     */
+    windows?: Map<string, BorrowWindow>
 ): Set<string> {
     const paths = new Set<string>();
+
+    /** 这个位置上的 `name` 还算响应式吗 */
+    const live = (name: string, at: number): boolean => {
+        const window = windows?.get(name);
+
+        if (!window) return true;
+
+        return at >= window.from && at < window.to;
+    };
 
     simpleTraverse(node, {
         enter(child) {
@@ -267,6 +501,11 @@ export function collectWrites(
                             : [target];
 
                     for (const one of targets) {
+                        // 过了有效期的派生：它已经不指向根上那条路径了
+                        const base = baseNameOf(one);
+
+                        if (base !== null && !live(base, child.range[0])) continue;
+
                         const path = pathOf(one, aliases);
 
                         if (path) paths.add(path);
@@ -281,6 +520,10 @@ export function collectWrites(
                         callee.property.type === 'Identifier' &&
                         MUTATION_METHODS.has(callee.property.name)
                     ) {
+                        const base = baseNameOf(callee.object);
+
+                        if (base !== null && !live(base, child.range[0])) break;
+
                         // 容器方法（`arr.push(...)`）改的是整个容器
                         const path = pathOf(callee.object, aliases);
 
@@ -418,6 +661,14 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
         [...states.values()].filter((state) => state.level === 0).map((state) => state.name)
     );
 
+    /** 先只把函数挑出来 —— 借用分析要跑在算 `writes` 之前（它给出有效期） */
+    const fnNodes: Array<{
+        name: string;
+        node: FunctionLike;
+        declaration: [number, number];
+        keyword: string;
+    }> = [];
+
     for (const statement of program.body) {
         if (statement.type === 'VariableDeclaration') {
             for (const declarator of statement.declarations) {
@@ -427,114 +678,81 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                 if (isState(init)) continue;
 
                 if (init.type === 'ArrowFunctionExpression' || init.type === 'FunctionExpression') {
-                    functions.set(declarator.id.name, {
+                    fnNodes.push({
                         name: declarator.id.name,
                         node: init,
                         // 换掉整个声明语句（`const f = () => {...};`），
                         // 包装后才写得出 `const f = function f(...) {...}`
                         declaration: statement.range,
-                        keyword: statement.kind,
-                        writes: collectWrites(init, shallow)
+                        keyword: statement.kind
                     });
                 }
             }
         } else if (statement.type === 'FunctionDeclaration' && statement.id) {
-            functions.set(statement.id.name, {
+            fnNodes.push({
                 name: statement.id.name,
                 node: statement,
                 declaration: statement.range,
-                keyword: 'function',
-                writes: collectWrites(statement, shallow)
+                keyword: 'function'
             });
         }
     }
 
-    // 第三遍：从响应式变量里取出来的局部变量（`const minkey = arr[2]`）。
+    // 借用规则：每个派生局部变量的有效期 + 越界写的提示。
     //
-    // 它继承根变量的响应性 —— 之后写它就等于写根上那一条路径。记的是**路径**而不是
-    // 根名：`minkey.name = 'x'` 要解析成 `arr[2].name`，才能只刷真正读它的那些片段。
-    //
-    // 借用规则（照 Rust 的精神）：对同一个根变量，**后一次取出让前一次的全部失效**；
-    // 写根变量也让之前取出的全部失效。原因是重新排列或者删除之后，先前取出的那个局部
-    // 变量可能已经指向一个不在数组里的东西，再写它就会去刷新一个跟它无关的数组 ——
-    // 而到底是哪一种情况，编译期判断不了，所以用这条静态规则一刀切。
-    for (const info of functions.values()) {
-        /** 根变量 -> 它当前还"活着"的那个派生名 */
-        const alive = new Map<string, string>();
+    // 必须在算 `writes` 之前跑 —— `collectWrites` 要用有效期过滤掉"失效之后那些
+    // 写入"，否则会为一条早就跟根变量无关的路径生成刷新。
+    const windows = new Map<string, BorrowWindow>();
+    const warnings: BorrowWarning[] = [];
+    const derived: DerivedLocal[] = [];
 
-        /** 这个函数里派生成功的局部变量（最后统一登记进 states） */
-        const borrowed: Array<{
-            name: string;
-            root: string;
-            path: string;
-            index?: string;
-            init: string;
-            range: [number, number];
-        }> = [];
+    for (const item of fnNodes) {
+        const result = analyzeBorrows(item.node, states, source);
 
-        /** 让某个根上当前活着的派生失效 */
-        const kill = (root: string): void => {
-            alive.delete(root);
-        };
+        for (const [name, window] of result.windows) windows.set(name, window);
 
-        simpleTraverse(info.node, {
-            enter(child) {
-                // 取出：`const x = arr[i]` / `const x = arr.prop`
-                if (child.type === 'VariableDeclarator' && child.id.type === 'Identifier' && child.init) {
-                    if (child.init.type === 'MemberExpression') {
-                        const root = rootOf(child.init);
-                        const state = root ? states.get(root) : undefined;
+        warnings.push(...result.warnings);
+        derived.push(...result.derived);
+    }
 
-                        // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
-                        if (state && state.level >= 1) {
-                            const path = pathOf(child.init) ?? root!;
-                            const cell = child.init as TSESTree.MemberExpression;
-
-                            // 同一个根上之前取过的那些，到这儿就失效了
-                            kill(root!);
-
-                            alive.set(root!, child.id.name);
-                            borrowed.push({
-                                name: child.id.name,
-                                root: root!,
-                                path,
-                                // 下标表达式原样记下：动态的（`arr[i]`）也能定位到那一行
-                                index: cell.computed ? slice(source, cell.property.range) : undefined,
-                                init: slice(source, child.init.range),
-                                range: child.range
-                            });
-                        }
-                    }
-
-                    return;
-                }
-
-                // 写根变量：之前取出的全部失效
-                for (const root of writtenRoots(child)) kill(root);
-            }
+    for (const item of fnNodes) {
+        functions.set(item.name, {
+            ...item,
+            writes: collectWrites(item.node, shallow, undefined, windows)
         });
-
-        for (const item of borrowed) {
-            // 只有最后还活着的那些才真的有响应性
-            if (alive.get(item.root) !== item.name) continue;
-            if (states.has(item.name)) continue;
-
-            states.set(item.name, {
-                name: item.name,
-                init: item.init,
-                range: item.range,
-                // 名字在声明语句里的位置：`const minkey = arr[2]` 的 minkey
-                nameRange: findNameRange(item.range, item.name, source),
-                level: states.get(item.root)!.level,
-                // 它对应的路径：`minkey` -> `arr[2]`
-                fromPath: item.path,
-                // 下标表达式：动态的（`arr[i]`）也记下，`setPath` 要靠它定位
-                fromIndex: item.index
-            });
-        }
     }
 
-    return { states, functions };
+    // 第三遍：把派生局部变量登记进 `states`（`const minkey = arr[2]`）。
+    //
+    // 它继承根变量的响应性 —— 写它就等于写根上那条路径。记的是**路径**而不是根名：
+    // `minkey.name = 'x'` 要解析成 `arr[2].name`，才能只刷真正读它的那些片段。
+    //
+    // **不管是否最终失效都登记**：失效是位置敏感的，在失效点之前它仍然响应式。
+    // "失效之后"那部分由 `collectWrites` 按有效期过滤（越界的写入不进 `writes`，
+    // 也就不会有刷新），提示收在 `warnings` 里。
+    for (const item of derived) {
+        if (states.has(item.name)) continue;
+
+        const window = windows.get(item.name);
+
+        states.set(item.name, {
+            name: item.name,
+            init: item.init,
+            range: item.range,
+            // 名字在声明语句里的位置：`const minkey = arr[2]` 的 minkey
+            nameRange: findNameRange(item.range, item.name, source),
+            level: states.get(item.root)!.level,
+            // 它对应的路径：`minkey` -> `arr[2]`
+            fromPath: item.path,
+            // 下标表达式：动态的（`arr[i]`）也记下，`setPath` 要靠它定位
+            fromIndex: item.index,
+            // 有效期：语言服务按它判断"这个位置还响应式吗"
+            aliveFrom: window?.from,
+            aliveTo: window?.to
+        });
+    }
+
+    return { states, functions, warnings };
 }
 
 /**

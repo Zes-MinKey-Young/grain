@@ -48,8 +48,9 @@ it('the script bodies are copied in place', () => {
     expect(virtual.slice(tag, tag + '</script>'.length).trim()).toBe('');
 });
 
-it('a derived local that lost its reactivity is not underlined', () => {
-    // 借用失效（同一个函数里动了根变量）之后它就不再是响应式的了 —— 别画下划线
+it('a derived local that lost its reactivity is not underlined any more', () => {
+    // 借用失效（同一个函数里重写了根变量）之后它就不再指根上那条路径了 —— 别画下划线。
+    // 声明那一处还留着：它是"这个变量在这儿、本来是响应式的"的标注
     const source = `<script>
     let arr = $state([{ name: 'a' }, { name: 'b' }]);
 
@@ -62,10 +63,41 @@ it('a derived local that lost its reactivity is not underlined', () => {
 </script>
 <p>{arr[0].name}</p>`;
 
-    const marked = analyze(source, 'App.grain')
-        .stateReferences()
-        .map((r) => source.slice(r.start, r.end));
+    const found = analyze(source, 'App.grain').stateReferences();
+    const marks = found.map((r) => source.slice(r.start, r.end));
+    const seconds = found.filter((r) => source.slice(r.start, r.end) === 'second');
 
-    expect(marked).not.toContain('second');
-    expect(marked).toContain('arr');
+    // `second` 只剩声明那处（`nameRange` 指向名字，不含 `const `）；`arr` 照旧标着
+    expect(seconds).toHaveLength(1);
+    expect(seconds[0].start).toBe(source.indexOf('const second') + 'const '.length);
+    expect(marks).toContain('arr');
+});
+
+it('borrowing is positional: still reactive before the root is touched', () => {
+    // 失效发生在那条语句**之后** —— 在那之前的引用仍然是响应式的
+    const source = `<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+
+    function use() {
+        const second = arr[1];
+
+        second.name = 'B';
+        arr = [arr[0]];
+        second.name = 'C';
+    }
+</script>
+<p>{arr[0].name}</p>`;
+
+    const found = analyze(source, 'App.grain').stateReferences();
+    const seconds = found.filter((r) => source.slice(r.start, r.end) === 'second');
+
+    const before = source.indexOf("second.name = 'B'");
+    const after = source.indexOf("second.name = 'C'");
+
+    // 声明 + 失效前那次；失效后那次不标
+    expect(seconds.map((r) => r.start)).toEqual([
+        source.indexOf('const second') + 'const '.length,
+        before
+    ]);
+    expect(seconds.every((r) => r.start !== after)).toBe(true);
 });

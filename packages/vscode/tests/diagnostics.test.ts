@@ -134,6 +134,45 @@ it('a multi-line handler is followed by a semicolon in the virtual file', () => 
     expect(virtual).toContain('});');
 });
 
+it('borrow warnings come through the language service too', () => {
+    // 跟编译器返回的是同一份：派生过了有效期还在写、非 const 派生
+    const source = `<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+
+    function drop() {
+        const second = arr[1];
+
+        arr = [arr[0]];
+        second.name = 'B';
+    }
+</script>
+<p>{arr[0].name}</p>`;
+
+    const found = analyze(source, 'App.grain').semantic();
+    const borrow = found.filter((problem) => problem.message.includes('no longer reactive'));
+
+    expect(borrow).toHaveLength(1);
+    // 位置对着最后那句 `second.name = 'B'`
+    expect(source.slice(borrow[0].start, borrow[0].end)).toContain("second.name = 'B'");
+});
+
+it('a non-const borrow is flagged by the language service', () => {
+    const source = `<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+
+    function f() {
+        let second = arr[1];
+
+        second.name = 'B';
+    }
+</script>
+<p>{arr[0].name}</p>`;
+
+    const found = analyze(source, 'App.grain').semantic();
+
+    expect(found.map((problem) => problem.message).join(' ')).toContain('is not `const`');
+});
+
 it('the player app (when this repo sits next to it) has no diagnostics', () => {
     const file = 'D:/zes/VSCode/Player/frontend/src/App.grain';
 

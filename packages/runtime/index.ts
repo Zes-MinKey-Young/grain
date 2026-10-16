@@ -1336,15 +1336,15 @@ class UpdaterImpl {
                 if (childEl) {
                     const before = host.childNodes.length;
 
-                    // 块（`{#for ...}` 之类）自己管节点：没挂载时它就把节点攒在 `nodes` 里，
-                    // 所以挂载要走这些节点，而不是只有那个锚点
+                    // 块（`{#for ...}` 之类）自己管节点：它的行节点攒在 `nodes` 里
+                    //（那个 getter 给的是"行节点 + 空列表分支 + 末尾锚点"），整段搬进来。
+                    //
+                    // 不能只插那个锚点 —— 行节点是 `place()` 时插到锚点前面的，而
+                    // `place()` 依赖锚点已经在 DOM 里（`el.parentNode`），那要等这一步做完
                     const managed = (child as Partial<List>).nodes;
 
                     if (managed) {
-                        // top-down 时块已经自己插进 host 了（见 `inserted`），不用再搬
-                        if (!(child as Partial<ListImpl>).inserted) {
-                            for (const node of managed) host.appendChild(node);
-                        }
+                        for (const node of managed) host.appendChild(node);
                     } else {
                         host.appendChild(childEl);
                     }

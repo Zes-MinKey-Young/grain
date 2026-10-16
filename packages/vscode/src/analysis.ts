@@ -291,6 +291,28 @@ function shadowedRanges(program: TSProgram, names: ReadonlySet<string>): Array<[
     return found;
 }
 
+/**
+ * 借用规则的提示 —— 跟编译器返回的是**同一份**（`analyzeScript` 的 `warnings`）。
+ *
+ * 两类：派生局部变量过了有效期还在写、以及不是 `const` 声明的派生。产物照跑，
+ * 只是那一下不会刷新，所以是提示不是错误。
+ */
+function borrowProblems(source: string, root: Root | null): SemanticProblem[] {
+    const found: SemanticProblem[] = [];
+
+    if (!root) return found;
+
+    for (const block of [root.script, root.module, root.onmount]) {
+        if (!block) continue;
+
+        for (const warning of analyzeScript(block.content, source).warnings) {
+            found.push({ start: warning.start, end: warning.end, message: warning.message });
+        }
+    }
+
+    return found;
+}
+
 /** 引用是不是落在某个遮蔽区间里 */
 function isShadowedAt(
     blinded: ReadonlyArray<[string, number, number]>,
@@ -298,6 +320,35 @@ function isShadowedAt(
     at: number
 ): boolean {
     return blinded.some(([blind, from, to]) => blind === name && at >= from && at <= to);
+}
+
+/** 扫的过程中带着名字，最后才筛（有效期要等所有 script 都扫完才知道） */
+type Marked = Reference & { name?: string };
+
+/**
+ * 这个引用处的借用是不是已经结束了。
+ *
+ * 声明本身不算 —— 它总是在区间之前（`from` 是声明语句的结束处），而那是"变量在
+ * 这儿"的标注，留着。
+ */
+function expiredReference(
+    reference: Marked,
+    windows: ReadonlyMap<string, [number, number]>,
+    declarations: ReadonlyMap<string, [number, number]>
+): boolean {
+    const name = reference.name;
+
+    if (name === undefined) return false;
+
+    const window = windows.get(name);
+
+    if (!window) return false;
+
+    const declared = declarations.get(name);
+
+    if (declared && reference.start >= declared[0] && reference.start <= declared[1]) return false;
+
+    return reference.start < window[0] || reference.start >= window[1];
 }
 
 /**
@@ -322,6 +373,14 @@ function stateReferencesOf(
      */
     const topLevel = new Set<string>();
 
+    /**
+     * 派生局部变量的借用有效期（`[from, to)`）—— 过了就不再响应式。
+     *
+     * `const third = arr[2]; arr = [...]; third.name = 'x'` 里最后那个 `third` 就是：
+     * 它已经不指向 `arr` 的任何一项了，产物不会为它生成刷新，下划线也不该画。
+     */
+    const windows = new Map<string, [number, number]>();
+
     for (const script of scripts) {
         if (!script) continue;
 
@@ -330,12 +389,17 @@ function stateReferencesOf(
         for (const state of analysis.states.values()) {
             if (state.nameRange) names.set(state.name, state.nameRange);
             if (!state.fromPath) topLevel.add(state.name);
+
+            // 派生局部变量的有效期：过了就不再有响应性，不该画下划线
+            if (state.aliveTo !== undefined) {
+                windows.set(state.name, [state.aliveFrom ?? 0, state.aliveTo]);
+            }
         }
     }
 
     if (names.size === 0) return [];
 
-    const found: Reference[] = [];
+    const found: Marked[] = [];
 
     // script / module / onmount 里：走 TS AST，属性名（`obj.count` 的 count）不算
     for (const script of scripts) {
@@ -356,7 +420,7 @@ function stateReferencesOf(
             if (sourceFirstNonSpace(source, end) === ':') return;
 
             // oxc 的 Identifier range 会连类型注解一起包（`a: Foo`）—— 只留名字那一段
-            found.push({ start, end: start + node.name.length });
+            found.push({ start, end: start + node.name.length, name: node.name });
         });
     }
 
@@ -377,7 +441,7 @@ function stateReferencesOf(
                 if (sourceFirstNonSpace(source, end) === ':') return;
 
                 // oxc 的 Identifier range 会连类型注解一起包（`a: Foo`）—— 只留名字那一段
-                found.push({ start, end: start + node.name.length });
+                found.push({ start, end: start + node.name.length, name: node.name });
             });
 
             continue;
@@ -399,7 +463,11 @@ function stateReferencesOf(
 
     const unique = new Map(found.map((reference) => [reference.start, reference]));
 
-    return [...unique.values()].sort((a, b) => a.start - b.start);
+    // 借用结束的那部分剔掉：那时候写它不再刷根变量，画下划线会误导
+    return [...unique.values()]
+        .filter((reference) => !expiredReference(reference, windows, names))
+        .sort((a, b) => a.start - b.start)
+        .map(({ start, end }) => ({ start, end }));
 }
 
 /** 递归收集所有层级的声明，同名时保留最靠前的那个 */
@@ -1641,7 +1709,12 @@ export function analyze(source: string, filename: string): Analysis {
             }
 
             // bind:this 声明的变量只在 onmount 里有效
-            return [...kept, ...thisLeaks(root, expressions, thisBindings)];
+            return [
+                ...kept,
+                ...thisLeaks(root, expressions, thisBindings),
+                // 借用规则的提示（跟编译器同一份 —— 越界写派生、非 const 派生）
+                ...borrowProblems(source, root)
+            ];
         },
 
         references(offset: number): Reference[] {

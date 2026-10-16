@@ -28,8 +28,10 @@ import {
     collectReads,
     collectWrites,
     intersects,
+    type BorrowWarning,
     type FunctionLike,
-    type ScriptAnalysis
+    type ScriptAnalysis,
+    type StateInfo
 } from './analyze.js';
 import { createScopeId, isGlobal, scopeStylesheet } from './style.js';
 
@@ -51,6 +53,13 @@ export interface CompileOptions {
 export interface CompileResult {
     js: string;
     css: string;
+    /**
+     * 借用规则给出的提示（不是错误，产物照样能跑）。
+     *
+     * 现在有两类：派生局部变量过了有效期还在写、以及不是 `const` 声明的派生。
+     * 编辑器那边读同一份（见 `packages/vscode`）。
+     */
+    warnings: BorrowWarning[];
 }
 
 /** 一个动态片段：属于哪个元素的调度器、编号是多少、依赖哪些 state */
@@ -527,6 +536,18 @@ interface Deferred {
     index: number;
 }
 
+/**
+ * 这个位置上，这个派生局部变量还算响应式吗。
+ *
+ * 借用是有**有效期**的（`analyzeBorrows` 算的）：过了失效点它就不再指向根上那条
+ * 路径了，写它不该再刷那边。没有区间的（顶层 `$state`）一直算响应式。
+ */
+function borrowAlive(state: StateInfo, at: number): boolean {
+    if (state.aliveTo === undefined) return true;
+
+    return at >= (state.aliveFrom ?? 0) && at < state.aliveTo;
+}
+
 function writesAreAssignments(node: TSESTree.Node, names: Set<string>): boolean {
     if (names.size === 0) return false;
 
@@ -813,7 +834,11 @@ class Generator {
               ? scopeStylesheet(stylesheet, this.scopeId)
               : stylesheet.raw;
 
-        return { js: transpile(output.join('\n'), this.filename), css };
+        return {
+            js: transpile(output.join('\n'), this.filename),
+            css,
+            warnings: this.analysis?.warnings ?? []
+        };
     }
 
     // ------------------------------------------------------------ script
@@ -2481,6 +2506,10 @@ class Generator {
 
                 if (!state?.fromPath || state.fromIndex === undefined) return null;
 
+                // 借用已经结束（过了有效期）就不算 —— 那时候它不指向根上那条路径了，
+                // 刷新一个跟它无关的格子没有意义
+                if (!borrowAlive(state, left.range[0])) return null;
+
                 // 根变量名：`arr[2]` / `arr`（动态下标时 fromPath 退化成根）
                 const name = state.fromPath.split('[')[0];
                 const lists = listsOf(name);
@@ -2715,7 +2744,7 @@ class Generator {
 function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
     if (list.length === 0) return null;
 
-    const merged: ScriptAnalysis = { states: new Map(), functions: new Map() };
+    const merged: ScriptAnalysis = { states: new Map(), functions: new Map(), warnings: [] };
 
     for (const item of list) {
         for (const [name, info] of item.states) {
@@ -2725,6 +2754,8 @@ function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
         for (const [name, info] of item.functions) {
             if (!merged.functions.has(name)) merged.functions.set(name, info);
         }
+
+        merged.warnings.push(...item.warnings);
     }
 
     return merged;
