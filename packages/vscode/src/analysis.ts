@@ -360,8 +360,29 @@ function stateReferencesOf(
         });
     }
 
-    // 模板表达式里：源码文本上找，同样不算属性名
+    // 模板表达式里：优先走 AST —— 字符串字面量和模板字符串的文本部分不该算引用
+    // （`onclick={() => console.log("audio time to: " + x)}` 里的 `time` 是句话，
+    //  跟响应式变量没关系）。正则那条留着给解析失败时兜底
     for (const expression of expressions) {
+        if (expression.content) {
+            // 节点的 range 就是**源码绝对偏移**（跟 script 一样，不用加 contentStart）
+            walk(expression.content, (node) => {
+                if (node?.type !== 'Identifier' || !names.has(node.name)) return;
+
+                const [start, end] = node.range;
+
+                // 属性名（`audio.currentTime` 的 currentTime）
+                if (sourceLastNonSpace(source, start) === '.') return;
+                // `{ count: 1 }` 里的键
+                if (sourceFirstNonSpace(source, end) === ':') return;
+
+                // oxc 的 Identifier range 会连类型注解一起包（`a: Foo`）—— 只留名字那一段
+                found.push({ start, end: start + node.name.length });
+            });
+
+            continue;
+        }
+
         for (const name of names.keys()) {
             const pattern = new RegExp(`(^|[^\\w$.])${name}(?![\\w$])`, 'g');
 
