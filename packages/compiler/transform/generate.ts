@@ -323,20 +323,7 @@ const KEYED_MUTATIONS = new Set(['set', 'add', 'delete', 'clear']);
 /** 这些工厂造出来的是"自己会通知改动"的容器 */
 const REACTIVE_FACTORIES = new Set(['reactiveArray', 'reactiveMap', 'reactiveSet']);
 
-/**
- * `$state(...)` 的初始值是容器字面量时，包上对应的工厂。
- *
- * `new Map(...)` -> `reactiveMap(new Map(...))`，`new Set(...)` 同理。
- * 数组不包 —— 它走编译期的精确调用（`push` 换成列表自己的方法），包了会刷两遍。
- *
- * 判据就是源码文本的形状：`init` 是 `$state(...)` 里那一段的原文。
- */
-function reactiveWrap(init: string): string {
-    if (/^new\s+Map\s*\(/.test(init)) return `reactiveMap(${init})`;
-    if (/^new\s+Set\s*\(/.test(init)) return `reactiveSet(${init})`;
 
-    return init;
-}
 
 /**
  * 找出用 `reactiveArray(...)` 之类声明的变量。
@@ -622,8 +609,6 @@ class Generator {
     private needsBound = false;
     /** 用到了 creList（`{#for ...}`） */
     private needsList = false;
-    /** 用到了 reactiveMap / reactiveSet（`$state(new Map(...))` 之类） */
-    private needsReactive = false;
     /**
      * 容器变量 -> 那个 `for` 产出的列表。
      *
@@ -723,7 +708,6 @@ class Generator {
         if (this.needsText) imported.push('creText');
         if (this.needsBound) imported.push('creBound');
         if (this.needsList) imported.push('creList');
-        if (this.needsReactive) imported.push('reactiveMap', 'reactiveSet');
         if (this.dev && this.pendingRefreshes.length > 0) imported.push('guard');
 
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
@@ -867,18 +851,12 @@ class Generator {
             // 它只是"写它等于写根上那个"的登记
             if (state.fromPath) continue;
 
-            // 容器字面量包上对应工厂：那样它有 `subscribe`，`{#for}` 才订得到改动。
-            // 不包的话 `let scores = $state(new Map(...))` 出来是个裸 Map，
-            // `if (typeof x?.subscribe === 'function')` 直接跳过 —— set / delete /
-            // add / clear 全都不刷新。
+            // 原样放初始值：`$state` 只是编译期的标记，不该改变里面东西的类型
+            //（Map 就是 Map，不该变成 Proxy 包着的 reactiveMap）。
             //
-            // **数组不包**：它的 push / splice 之类编译期就换成了列表自己的精确调用，
-            // 包上 reactiveArray 会两边都通知、刷两遍
-            const text = reactiveWrap(state.init);
-
-            if (text !== state.init) this.needsReactive = true;
-
-            edits.push({ start: state.range[0], end: state.range[1], text });
+            // 容器的改动由**编译期**追踪：`scores.set(k, v)` 那类调用会被换成列表
+            // 自己的 `setKey(k, v)` / `removeKey(k)` / `clear()`（见 mutationCalls）。
+            edits.push({ start: state.range[0], end: state.range[1], text: state.init });
         }
 
         // 3. `$props()` -> `props`

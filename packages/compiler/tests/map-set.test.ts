@@ -4,16 +4,18 @@ import { Window } from 'happy-dom';
 import type { Document } from 'happy-dom';
 import { join } from 'node:path';
 import { compile } from '..';
+import { CHANGE_CLEAR, CHANGE_DELETE, CHANGE_SET, reactiveMap } from '../../runtime/index.ts';
 
 /**
  * `$state(new Map(...))` / `$state(new Set(...))` 的响应性。
  *
- * 两处都得对，缺一个就不刷新：
+ * **`$state` 不改变容器的类型** —— Map 就是 Map，不该被包成 Proxy。所以改动靠
+ * 编译期追踪容器方法，两处都得对，缺一个就不刷新：
  *
- * 1. 编译期要把 `scores.set(k, v)` 这类方法当成"写了 scores" —— 否则写了它们的顶层
- *    函数 `writes` 是空的，`functionWrappers` 跳过，不生成 `list.setKey(...)`
- * 2. 产物要把容器包上 `reactiveMap` / `reactiveSet` —— 否则它是裸 Map，没有
- *    `subscribe`，`if (typeof x?.subscribe === 'function')` 直接跳过
+ * 1. `scores.set(k, v)` 这类方法要算作"写了 scores" —— 否则写了它们的顶层函数
+ *    `writes` 是空的，`functionWrappers` 跳过，不生成 `list.setKey(...)`
+ * 2. 生成出来的调用要带上定位信息（key），for 块里靠"值 -> 那一项"的映射
+ *    直接落到那一行，而不是遍历整个列表
  */
 
 const runtimePath = join(import.meta.dir, '..', '..', 'runtime', 'index.ts');
@@ -96,48 +98,26 @@ it('map.set / delete / clear refresh the list', async () => {
     expect(rows(target, 'srow')).toEqual([]);
 });
 
-it('map.set does not re-iterate the whole container', async () => {
-    // 以前 `set` 发出去的改动是 `[CHANGE_SET]` —— **不带 key/value**，收的人（List.apply）
-    // 定位不到是哪一行，只能落到 default："重新取一次再比对"，也就是遍历整个容器。
-    // 现在发 `[CHANGE_SET, key, value]`，apply 走 setKey 只动那一行。
+it('reactiveMap reports the key so a subscriber can stay precise', () => {
+    // `reactiveMap` 是给**手写代码**用的公开 API（编译器生成的产物不再用它 ——
+    // `$state` 不改容器的类型）。
     //
-    // 数迭代次数来盯住这条：全量必然会 `Array.from(source())`。
-    let iterations = 0;
+    // 它发出去的改动必须带 key/value：以前是 `[CHANGE_SET]`（光有种类），收的人定位
+    // 不到是哪一行，只能"重新取一次再比对"（遍历整个容器）。
+    const map = reactiveMap(new Map([['ada', 1]]));
+    const seen: unknown[] = [];
 
-    const original = Map.prototype[Symbol.iterator];
+    map.subscribe((change) => seen.push(change));
 
-    Map.prototype[Symbol.iterator] = function (this: Map<unknown, unknown>): MapIterator<[unknown, unknown]> {
-        iterations += 1;
+    map.set('bob', 2);
+    map.delete('ada');
+    map.clear();
 
-        return original.call(this) as MapIterator<[unknown, unknown]>;
-    };
-
-    try {
-        const target = await mount(`<script>
-    let scores = $state(new Map([['ada', 1], ['bob', 2], ['cy', 3]]));
-
-    function score(name, value) {
-        scores.set(name, value);
-    }
-</script>
-{#for [name, value] of scores with key = name}
-    <p class="srow">{name} = {value}</p>
-{/for}
-<button id="set" onclick={() => { score('bob', 99); }}>set</button>`);
-
-        expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 2', 'cy = 3']);
-
-        const before = iterations;
-
-        click(target, 'set');
-
-        expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 99', 'cy = 3']);
-
-        // 精确路径一次都不用迭代整个 Map
-        expect(iterations - before).toBe(0);
-    } finally {
-        Map.prototype[Symbol.iterator] = original;
-    }
+    expect(seen).toEqual([
+        [CHANGE_SET, 'bob', 2],
+        [CHANGE_DELETE, 'ada'],
+        [CHANGE_CLEAR]
+    ]);
 });
 
 it('set.add / delete refresh the list', async () => {
@@ -167,7 +147,12 @@ it('set.add / delete refresh the list', async () => {
     expect(rows(target, 'prow')).toEqual(['blue']);
 });
 
-it('the container is wrapped so it has subscribe', () => {
+it('$state does not change the container type', () => {
+    // `$state` 只是编译期的标记，不该把 Map 包成 Proxy —— 类型得原样保留
+    // （`scores instanceof Map` 之类的判断不能被破坏）。
+    //
+    // 改动靠**编译期**追踪容器方法：`scores.set(k, v)` 那类调用换成列表自己的
+    // `setKey` / `removeKey` / `clear`（见下一条）
     const js = compile(`<script>
     let scores = $state(new Map([['ada', 1]]));
     let picked = $state(new Set(['red']));
@@ -179,11 +164,75 @@ it('the container is wrapped so it has subscribe', () => {
     <p>{color}</p>
 {/for}`, { filename: 'App.grain' }).js;
 
-    expect(js).toContain('reactiveMap(new Map(');
-    expect(js).toContain('reactiveSet(new Set(');
+    expect(js).toContain('let scores = new Map(');
+    expect(js).toContain('let picked = new Set(');
+    expect(js).not.toContain('reactiveMap');
+    expect(js).not.toContain('reactiveSet');
+});
 
-    // 订阅那句也就接得上了
-    expect(js).toMatch(/if \(typeof __src\$\d+\?\.subscribe === 'function'\)/);
+it('container methods are turned into precise list calls at compile time', () => {
+    const js = compile(`<script>
+    let scores = $state(new Map([['ada', 1]]));
+
+    function setIt() {
+        scores.set('bob', 20);
+    }
+
+    function delIt() {
+        scores.delete('ada');
+    }
+
+    function clearIt() {
+        scores.clear();
+    }
+</script>
+{#for [name, value] of scores with key = name}
+    <p>{name}</p>
+{/for}`, { filename: 'App.grain' }).js;
+
+    expect(js).toMatch(/__list\$\d+\?\.setKey\('bob', 20\)/);
+    expect(js).toMatch(/__list\$\d+\?\.removeKey\('ada'\)/);
+    expect(js).toMatch(/__list\$\d+\?\.clear\(\)/);
+});
+
+it('setKey locates the row through the key map, not by scanning', async () => {
+    // `setKey` 以前是 `entries.findIndex(entry => entry.key === key)` —— 线性扫。
+    // 现在 for 块里维护着 key -> 那一项的映射，一次 `get` 就够
+    let scans = 0;
+
+    const original = Array.prototype.findIndex;
+
+    Array.prototype.findIndex = function (
+        this: unknown[],
+        ...args: [unknown, ...unknown[]]
+    ): number {
+        scans += 1;
+
+        return (original as (...rest: unknown[]) => number).apply(this, args);
+    } as never;
+
+    try {
+        const target = await mount(`<script>
+    let scores = $state(new Map([['ada', 1], ['bob', 2], ['cy', 3]]));
+
+    function score(name, value) {
+        scores.set(name, value);
+    }
+</script>
+{#for [name, value] of scores with key = name}
+    <p class="srow">{name} = {value}</p>
+{/for}
+<button id="set" onclick={() => { score('cy', 33); }}>set</button>`);
+
+        const before = scans;
+
+        click(target, 'set');
+
+        expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 2', 'cy = 33']);
+        expect(scans - before).toBe(0);
+    } finally {
+        Array.prototype.findIndex = original;
+    }
 });
 
 it('a plain array is not wrapped (precise calls already cover it)', () => {

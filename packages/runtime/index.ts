@@ -108,7 +108,17 @@ export interface ListEntry {
  * - `item`：这一项**当前**是什么值。比对时值没变就不用调 `update` —— 否则光换个
  *   顺序也会把每项的片段重跑一遍（行里写了 `Math.random()` 的话，数字就跳了）
  */
-type Entry = ListEntry & { key?: unknown; item?: unknown };
+type Entry = ListEntry & {
+    key?: unknown;
+    item?: unknown;
+    /**
+     * 这一项在 `entries` / `values` 里的位置。
+     *
+     * 存下来是为了让 `setKey` 能 O(1) 改到 `values[at]` —— 不用每次都 `findIndex`。
+     * 结构变了（push / splice / unshift）之后由 `reindex()` 重算。
+     */
+    at: number;
+};
 
 export interface ListOptions {
     /** 建一项。第一次调用后，同样的项靠 `update` 复用，不再重建 */
@@ -212,6 +222,17 @@ class ListImpl {
     el!: Node;
     /** 当前存活的项，顺序跟列表一致 */
     entries: Entry[] = [];
+    /**
+     * `with key = ...` 出来的键 -> 那一项。
+     *
+     * 编译期看到 `map.set(k, v)` / `map.delete(k)` 会生成 `setKey(k, v)` / `removeKey(k)`
+     * ——这就是那句"for 里要产生值到块的映射"：有了它，一次改动直接落到那一行，
+     * 不用遍历整个列表去找。
+     *
+     * 只能用 `!` 声明、在 `init` 里赋值：实例是 `Object.setPrototypeOf` 造的（不是
+     * `new`），类字段的初始化器根本不会执行
+     */
+    private byKey!: Map<unknown, Entry>;
     /** 空列表分支的节点（列表非空时要撤掉） */
     empty: Node[] = [];
     /** 当前列表的值：容器方法改完，靠它把剩下的项重新绑一遍 */
@@ -229,6 +250,7 @@ class ListImpl {
         this.entries = [];
         this.empty = [];
         this.values = [];
+        this.byKey = new Map();
     }
 
     /** 作为 updater 被父级调用时：重新取一次列表再比对（没有 source 就什么都不做） */
@@ -255,12 +277,21 @@ class ListImpl {
         for (const node of nodes) node.parentNode?.removeChild(node);
     }
 
+    /** 结构变了之后重算各项的位置（`setKey` 靠 `entry.at` 直接改 `values`） */
+    private reindex(from = 0): void {
+        for (let i = from; i < this.entries.length; i += 1) this.entries[i].at = i;
+    }
+
     private add(item: unknown, index: number, before: Node | null): Entry {
         const entry = this.options.render(item, index) as Entry;
 
         entry.key = this.options.key?.(item, index);
         // 记住这一项当前是什么值：下次比对时值没变就不用重跑它的片段
         entry.item = item;
+        entry.at = index;
+
+        // 有 key 的才登记：`#for` 没写 `with key` 的话 key 是 undefined，登记了会互相覆盖
+        if (this.options.key) this.byKey.set(entry.key, entry);
 
         this.place(entry.nodes, before);
 
@@ -301,10 +332,11 @@ class ListImpl {
         this.setEmpty(next.length === 0);
 
         if (this.options.key) {
-            // keyed：按 key 匹配，能对上就复用
-            const oldByKey = new Map<unknown, Entry>();
+            // keyed：按 key 匹配，能对上就复用。索引直接用现成的 `byKey`，
+            // 边比边把它重建一遍（复用的项位置可能变了）
+            const oldByKey = this.byKey;
 
-            for (const entry of this.entries) oldByKey.set(entry.key, entry);
+            this.byKey = new Map<unknown, Entry>();
 
             const kept: Entry[] = [];
 
@@ -321,6 +353,8 @@ class ListImpl {
                     if (force || found.item !== next[i]) found.update(next[i], i);
 
                     found.item = next[i];
+                    found.at = i;
+                    this.byKey.set(key, found);
                     kept.push(found);
                 } else {
                     kept.push(this.add(next[i], i, null));
@@ -387,6 +421,8 @@ class ListImpl {
         this.entries = [...created, ...this.entries];
         this.values = [...added, ...this.values];
 
+        // 旧项都往后挪了
+        this.reindex(added.length);
         this.rebindFrom(added.length);
     }
 
@@ -406,6 +442,7 @@ class ListImpl {
         ];
         this.values.splice(from, remove, ...added);
 
+        this.reindex(from);
         this.rebindFrom(from);
     }
 
@@ -566,33 +603,40 @@ class ListImpl {
         // 没有键就说不清是哪一项。编译器不会给这种 for 生成调用，这里只是兜底
         if (!this.options.key) return;
 
-        const at = this.entries.findIndex((entry) => entry.key === key);
         const item = this.itemFor(key, value);
+        const found = this.byKey.get(key);
 
         // 新键：跟 push 一样是追加
-        if (at < 0) {
+        if (!found) {
             this.push(item);
 
             return;
         }
 
+        const at = found.at;
+
         this.values[at] = item;
 
-        this.entries[at].update(item, at);
-        this.entries[at].item = item;
+        found.update(item, at);
+        found.item = item;
     }
 
     /** `map.delete(k)` / `set.delete(v)`：删掉那一项，后面的内容跟着换 */
     removeKey(key: unknown): void {
-        const at = this.entries.findIndex((entry) => entry.key === key);
+        const found = this.byKey.get(key);
 
-        if (at < 0) return;
+        if (!found) return;
 
-        this.drop(this.entries[at].nodes);
+        const at = found.at;
+
+        this.drop(found.nodes);
+        this.byKey.delete(key);
 
         this.entries = [...this.entries.slice(0, at), ...this.entries.slice(at + 1)];
         this.values.splice(at, 1);
 
+        // 后面的项往前挪了一格
+        this.reindex(at);
         this.rebindFrom(at);
         this.setEmpty(this.entries.length === 0);
     }
@@ -603,6 +647,7 @@ class ListImpl {
 
         this.entries = [];
         this.values = [];
+        this.byKey.clear();
 
         this.setEmpty(true);
     }
