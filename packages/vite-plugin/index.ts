@@ -13,7 +13,7 @@ import {
     type CompileResult,
     type PathConfig,
     type Root
-} from '../compiler/index.js';
+} from '../compiler/index.ts';
 
 /**
  * 组件里的 `<style>` 通过虚拟模块交给 Vite 的 CSS 管线：
@@ -39,6 +39,15 @@ const AST_QUERY = 'grain-ast';
  * 页面是懒加载的（`() => import(...)`），构建时 Vite 会自动切块。
  */
 const ROUTES_ID = 'grain:routes';
+
+/**
+ * `resolveId` 交出去的 id。
+ *
+ * 加 `\0` 前缀是 Vite 对虚拟模块的约定：dev 下如果不加，vite 会拿 `grain:routes`
+ * 当普通 URL 去匹配，匹配不上就落到 SPA fallback —— 于是 `/grain:routes` 返回的是
+ * index.html，路由表是空的（build 下 rollup 直接用返回值，所以那边看不出来）。
+ */
+const RESOLVED_ROUTES_ID = `\0${ROUTES_ID}`;
 
 /** `src/routes` 的默认位置（相对项目根） */
 const ROUTES_DIR = 'src/routes';
@@ -223,7 +232,7 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         // 虚拟模块
         load(id) {
             // `grain:routes` -> 目录即路由的表（项目根在 configResolved 时就定下来了）
-            if (id === ROUTES_ID) return routesModule(projectRoot ?? process.cwd());
+            if (id === RESOLVED_ROUTES_ID) return routesModule(projectRoot ?? process.cwd());
 
             const { file, queries } = splitId(id);
             if (!isGrain(file)) return null;
@@ -242,8 +251,10 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         },
 
         resolveId(id, importer) {
-            // 虚拟模块：不要 Vite 去文件系统里找
-            if (id === ROUTES_ID) return id;
+            // 虚拟模块：不要 Vite 去文件系统里找。交出去的是带 `\0` 的那个 id ——
+            // dev 下浏览器最终请求的是改写后的地址，不这么做 import 会原样留着
+            // `grain:routes`，请求它只会吃到 SPA fallback 的 index.html
+            if (id === ROUTES_ID) return RESOLVED_ROUTES_ID;
 
             const { file, queries } = splitId(id);
 
