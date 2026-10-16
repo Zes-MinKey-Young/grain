@@ -149,6 +149,81 @@ function escapedRoots(node: TSESTree.Node, states: Map<string, StateInfo>): stri
     return [node.right.name];
 }
 
+/** 这个 state 是 Map 吗 —— 看初始值源码的形状（`new Map(...)`） */
+function isMapState(state: StateInfo): boolean {
+    return /^new\s+Map\s*\(/.test(state.init.trim());
+}
+
+/**
+ * 这个初始化表达式是从响应式容器里**取出一项**吗。
+ *
+ * 两种形式：
+ *
+ * - `arr[2]` / `arr.prop` —— 数组、普通对象
+ * - `map.get('b')` —— Map。它的项不是属性，只能走 `get`。key 原样记下，正好喂给
+ *   `setPath(key, prop)` —— 那个签名本来就是 `(key, prop)`
+ *
+ * @returns `null` 表示这不是取出，按普通变量处理
+ */
+function takeoutOf(
+    init: TSESTree.Node,
+    states: Map<string, StateInfo>,
+    source: string
+): { root: string; path: string; index?: string; map: boolean; bracket: boolean } | null {
+    // `arr[2]` / `arr.prop`
+    if (init.type === 'MemberExpression') {
+        const root = rootOf(init);
+        const state = root ? states.get(root) : undefined;
+
+        // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
+        if (!root || !state || state.level < 1) return null;
+
+        const cell = init as TSESTree.MemberExpression;
+
+        return {
+            root,
+            path: pathOf(init) ?? root,
+            // 下标表达式原样记下：动态的（`arr[i]`）也能定位到那一行
+            index: cell.computed ? slice(source, cell.property.range) : undefined,
+            map: isMapState(state),
+            bracket: cell.computed
+        };
+    }
+
+    // `map.get('b')`
+    if (init.type === 'CallExpression') {
+        const callee = init.callee;
+
+        if (
+            callee.type !== 'MemberExpression' ||
+            callee.property.type !== 'Identifier' ||
+            callee.property.name !== 'get' ||
+            callee.object.type !== 'Identifier'
+        ) {
+            return null;
+        }
+
+        const root = callee.object.name;
+        const state = states.get(root);
+
+        // 只对 Map 认 —— 数组没有 `get`，写了就是用户自己的错，别去猜
+        if (!state || state.level < 1 || !isMapState(state)) return null;
+
+        const key = init.arguments[0];
+
+        return {
+            root,
+            // 路径退化成根：Map 的项没有"路径"可言，靠 key 定位
+            path: root,
+            index: key ? slice(source, key.range) : undefined,
+            map: true,
+            bracket: false
+        };
+    }
+
+    return null;
+}
+
 /**
  * 借用规则：算出每个派生局部变量的**有效期**，并挑出越界的写入。
  *
@@ -195,29 +270,40 @@ function analyzeBorrows(
 
     simpleTraverse(node, {
         enter(child) {
-            // 取出：`const x = arr[i]` / `const x = arr.prop`
+            // 取出：`const x = arr[i]` / `const x = arr.prop` / `const x = map.get('b')`
             if (child.type === 'VariableDeclaration') {
                 for (const declarator of child.declarations) {
                     const init = declarator.init;
 
                     if (!init || declarator.id.type !== 'Identifier') continue;
-                    if (init.type !== 'MemberExpression') continue;
 
-                    const root = rootOf(init);
-                    const state = root ? states.get(root) : undefined;
+                    const taken = takeoutOf(init, states, source);
 
-                    // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
-                    if (!state || state.level < 1 || !root) continue;
+                    if (!taken) continue;
+
+                    // Map 的项不是属性（`scores['b']` 会被当成 `scores.b`，产物读到一个
+                    // undefined）—— 明确说一声，别生成坏东西
+                    if (taken.map && taken.bracket) {
+                        warnings.push({
+                            start: init.range[0],
+                            end: init.range[1],
+                            message:
+                                `\`${taken.root}\` is a Map — its entries are not properties. ` +
+                                `Use \`${taken.root}.get(key)\` instead of the bracket form`
+                        });
+
+                        continue;
+                    }
 
                     // 同一个根上之前那个，到这条语句为止
-                    kill(root, child.range[0]);
+                    kill(taken.root, child.range[0]);
 
                     if (child.kind !== 'const') {
                         warnings.push({
                             start: declarator.id.range[0],
                             end: declarator.id.range[1],
                             message:
-                                `\`${declarator.id.name}\` takes a value out of \`${root}\` ` +
+                                `\`${declarator.id.name}\` takes a value out of \`${taken.root}\` ` +
                                 `but is not \`const\` — use \`const ${declarator.id.name}\` if the changes should stick`
                         });
 
@@ -225,20 +311,17 @@ function analyzeBorrows(
                         continue;
                     }
 
-                    const cell = init as TSESTree.MemberExpression;
-
-                    alive.set(root, declarator.id.name);
+                    alive.set(taken.root, declarator.id.name);
                     windows.set(declarator.id.name, {
                         from: child.range[1],
                         to: Infinity,
-                        root
+                        root: taken.root
                     });
                     derived.push({
                         name: declarator.id.name,
-                        root,
-                        path: pathOf(init) ?? root,
-                        // 下标表达式原样记下：动态的（`arr[i]`）也能定位到那一行
-                        index: cell.computed ? slice(source, cell.property.range) : undefined,
+                        root: taken.root,
+                        path: taken.path,
+                        index: taken.index,
                         init: slice(source, init.range),
                         range: declarator.range
                     });

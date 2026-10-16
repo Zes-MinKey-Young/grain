@@ -190,7 +190,12 @@ export interface List extends Updater {
      * 属性确实变了，读那个属性的片段得重算。整行重跑的话，行里其它部分（比如
      * `Math.random()`）也会被重算一遍。
      */
-    setPath(index: number, prop: string): void;
+    /**
+     * 只刷某一项的某个属性。
+     *
+     * `index` 是下标（数组）或者 key（Map）—— 两种都行，见 ListImpl 里的实现。
+     */
+    setPath(index: unknown, prop: string): void;
     /**
      * 一次改多个位置 —— 解构赋值用（`[a[0], a[1]] = [a[1], a[0]]`）。
      *
@@ -556,13 +561,20 @@ class ListImpl {
      * 整项没换（还是同一个对象引用），按值比对的 `sync` 会跳过它 —— 所以这里直接
      * 问那一行要一个"属性级"的更新。没实现 `updatePath` 的行（老产物）就退回整行刷。
      */
-    setPath(index: number, prop: string): void {
-        const entry = this.entries[Number(index)];
+    /**
+     * 只刷某一项的某个属性（`items[i].prop = x` / `map.get(k).prop = x`）。
+     *
+     * `index` 可能是数字下标（数组），也可能是 Map 的 key（字符串之类）—— 所以先按
+     * key 找（`byKey`），找不着再当数字下标用。以前只认数字，`'b'` 会被 `Number()`
+     * 转成 NaN、直接 return，于是 Map 上这么写**静默不刷新**。
+     */
+    setPath(index: unknown, prop: string): void {
+        const entry = this.byKey.has(index) ? this.byKey.get(index) : this.entries[Number(index)];
 
         if (!entry) return;
 
         if (entry.updatePath) entry.updatePath(prop);
-        else entry.update(entry.item, Number(index));
+        else entry.update(entry.item, entry.at);
     }
 
     /** `items[i] = v`：只换那一项（复用它的 DOM），不碰其余的 */
