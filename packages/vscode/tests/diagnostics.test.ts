@@ -1,11 +1,31 @@
 /// <reference types="bun" />
 import { it, expect } from 'bun:test';
+import { existsSync, readFileSync } from 'node:fs';
 
 import { analyze } from '../src/analysis.js';
 
+/**
+ * KNOWN ISSUE (kept as a note, not a test):
+ *
+ * When `<script onmount>` declares a local with the same name as a loop variable
+ * (Player does: `{#for [idx, song] of songs.entries()}` + onmount has
+ * `const song = songs[i]`), that `const song` lands at the top level of the
+ * virtual file and collides with the `declare let song: any;` we append at the
+ * end. TS then reports "Block-scoped variable 'song' used before its
+ * declaration." (`declare let` has a TDZ and the template uses come first.)
+ *
+ * The emitted code is fine - onmount lives in `create()`, the loop variable in
+ * `render()`, they never meet. It is purely an artifact of how the virtual file
+ * is laid out.
+ *
+ * Tried `declare var` (no TDZ): does not fix it, the complaints come from the
+ * two references inside onmount itself.
+ */
+
 it('a loop variable is not shadowed by a same-named local in a function', () => {
-    // `collectAll` 会把函数里的局部声明也收进来，于是 `song` 被认为"已经有了"、
-    // 不补 `declare let song` —— 而模板里的 `{song.name}` 就没声明了
+    // `collectAll` collects every level, so a `let song` inside some function made
+    // the compiler think the loop variable was already declared - and it never
+    // appended `declare let song`, leaving `{song.name}` unresolved
     const source = `<script>
     let songs = $state([{ name: 'a' }]);
 
@@ -40,7 +60,8 @@ it('a loop variable is not shadowed by a local inside <script onmount>', () => {
 });
 
 it('a bind:this variable is not reported as used before assignment', () => {
-    // 那次赋值是运行时做的（`"this": ($el) => { canvas = $el; }`），虚拟文件里体现不出来
+    // The assignment happens at runtime (`"this": ($el) => { canvas = $el; }`),
+    // so the virtual file cannot show it
     const source = `<script>
     let canvas;
 
@@ -66,17 +87,59 @@ it('a typed bind:this variable works the same way', () => {
     expect(analyze(source, 'App.grain').semantic()).toEqual([]);
 });
 
-/**
- * 已知问题（没在测试里，写在这儿提醒）：
- *
- * `<script onmount>` 里声明了跟循环变量**同名**的局部变量时（Player 就是：
- * `{#for [idx, song] of songs.entries()}` + onmount 里 `const song = songs[i]`），
- * 虚拟文件里那个 `const song` 是顶层的，跟补在末尾的 `declare let song: any;` 撞上 ——
- * TS 报 "Block-scoped variable 'song' used before its declaration."（`declare let`
- * 有 TDZ，而模板里的用法在前面）。
- *
- * 产物本身没问题：onmount 的内容在 `create()` 作用域里、循环变量在 `render()` 里，
- * 两者不相干。纯粹是虚拟文件的铺法造成的。
- *
- * 试过 `declare var`（无 TDZ）—— 不解决问题，报错来自 onmount 内部那两个引用。
- */
+it('a multi-line handler is separated from the next expression', () => {
+    // Without a semicolon after `(...)`, JS reads two adjacent expressions as a
+    // CALL: `(() => {...})\n(song.name)` -> "calling that arrow with one argument",
+    // which TS reports as "Expected 0 arguments, but got 1." - and the squiggle
+    // lands on the *second* expression, so it looks like `{song.name}` is broken.
+    // ASI does not save us: a newline is not a trigger, and `)` followed by `(`
+    // is legal call syntax.
+    const source = `<script>
+    let rows = $state([{ id: 7 }]);
+    let current = $state(0);
+</script>
+{#for [i, row] of rows.entries()}
+    <div
+        class="songitem {current === i ? 'on' : ''}"
+        onclick={() => {
+            current = i;
+        }}
+    >
+        {row.id}
+    </div>
+{/for}`;
+
+    expect(analyze(source, 'App.grain').semantic()).toEqual([]);
+});
+
+it('a multi-line handler is followed by a semicolon in the virtual file', () => {
+    const source = `<script>
+    let rows = $state([{ id: 7 }]);
+    let current = $state(0);
+</script>
+{#for [i, row] of rows.entries()}
+    <div
+        onclick={() => {
+            current = i;
+        }}
+    >
+        {row.id}
+    </div>
+{/for}`;
+
+    const virtual = analyze(source, 'App.grain').virtualText();
+
+    // the arrow function closes with `});` - the semicolon is what keeps the next
+    // line from being read as an argument list
+    expect(virtual).toContain('});');
+});
+
+it('the player app (when this repo sits next to it) has no diagnostics', () => {
+    const file = 'D:/zes/VSCode/Player/frontend/src/App.grain';
+
+    if (!existsSync(file)) return;
+
+    const problems = analyze(readFileSync(file, 'utf8'), 'App.grain').semantic();
+
+    expect(problems.map((problem) => problem.message)).toEqual([]);
+});

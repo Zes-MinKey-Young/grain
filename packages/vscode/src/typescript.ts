@@ -320,7 +320,15 @@ export function buildVirtual(
         if (start === 0 || end >= virtual.length) continue;
         if (virtual[start - 1] !== ' ' || virtual[end] !== ' ') continue;
 
-        const semicolon = virtual[end + 1] === ' ';
+        // 分号必须有：`(...)` 后面紧跟下一个 `(...)` 时，JS 会把它解析成**调用** ——
+        // `(() => {...})\n(song.name)` 被读成"调用那个箭头函数，传一个参数"，
+        // 于是 TS 报 "Expected 0 arguments, but got 1."，而位置落在下面那个表达式上
+        // （红线跑到 `{song.name}` 那儿去）。ASI 在这儿不生效：换行不是触发条件，
+        // `)` 后面接 `(` 是合法的调用语法。
+        //
+        // 第二个位置只要是**空白**就拿来用，换行也算 —— 把它换成 `;` 只是让虚拟文件
+        // 少一个换行，字符偏移一个没错，TS 报的位置照样对得上
+        const semicolon = /\s/.test(virtual[end + 1] ?? '');
 
         virtual =
             virtual.slice(0, start - 1) +
