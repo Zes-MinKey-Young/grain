@@ -635,8 +635,21 @@ class ListImpl {
                 this.splice(change[1], change[2], ...change[3]);
                 break;
 
+            case CHANGE_SET:
+                // Map/Set 改一项：只动那一行。以前落到 default（全量重取 + 比对）
+                this.setKey(change[1], change[2]);
+                break;
+
+            case CHANGE_DELETE:
+                this.removeKey(change[1]);
+                break;
+
+            case CHANGE_CLEAR:
+                this.clear();
+                break;
+
             default:
-                // `set` / `delete` / `clear`，以及说不清的那些：重新取一次再比对
+                // 说不清的那些：重新取一次再比对
                 if (this.options.source) {
                     this.values = Array.from(this.options.source());
 
@@ -698,8 +711,10 @@ export type ContainerChange =
     | [typeof CHANGE_SHIFT]
     | [typeof CHANGE_UNSHIFT, unknown[]]
     | [typeof CHANGE_SPLICE, number, number, unknown[]]
-    | [typeof CHANGE_SET]
-    | [typeof CHANGE_DELETE]
+    /** Map/Set 改一项：`set(k, v)` / `add(v)` 的 key 和 value */
+    | [typeof CHANGE_SET, unknown, unknown]
+    /** Map/Set 删一项：key */
+    | [typeof CHANGE_DELETE, unknown]
     | [typeof CHANGE_CLEAR]
     | [typeof CHANGE_UNKNOWN];
 
@@ -716,10 +731,18 @@ const ARRAY_METHODS: Record<string, (args: unknown[]) => ContainerChange> = {
     splice: (args) => [CHANGE_SPLICE, Number(args[0] ?? 0), Number(args[1] ?? 0), args.slice(2)]
 };
 
-const MAP_METHODS: Record<string, () => ContainerChange> = {
-    set: () => [CHANGE_SET],
-    add: () => [CHANGE_SET],
-    delete: () => [CHANGE_DELETE],
+/**
+ * Map / Set 的改动。
+ *
+ * `set` / `add` 要把 key 和 value 一起发出去 —— 收的人（List.apply）靠它们定位到
+ * 具体那一行，否则只能"重新取一次再比对"，那就是全量刷新。
+ *
+ * Set 的 `add(v)` / `delete(v)`：它既是 key 也是 value，所以两处都填 v。
+ */
+const MAP_METHODS: Record<string, (args: unknown[]) => ContainerChange> = {
+    set: (args) => [CHANGE_SET, args[0], args[1]],
+    add: (args) => [CHANGE_SET, args[0], args[0]],
+    delete: (args) => [CHANGE_DELETE, args[0]],
     clear: () => [CHANGE_CLEAR]
 };
 
@@ -808,12 +831,13 @@ export function reactiveArray<T>(initial: T[] = []): T[] & ReactiveContainer {
 export function reactiveMap<K, V>(
     initial: Iterable<readonly [K, V]> = []
 ): Map<K, V> & ReactiveContainer {
-    return wrap(new Map(initial), (key) => MAP_METHODS[key]?.() ?? null);
+    // `args` 要往下传：`set(k, v)` 的 key/value 得跟着改动一起发出去
+    return wrap(new Map(initial), (key, args) => MAP_METHODS[key]?.(args) ?? null);
 }
 
 /** 会通知改动的 Set（给数组也行） */
 export function reactiveSet<T>(initial: Iterable<T> = []): Set<T> & ReactiveContainer {
-    return wrap(new Set(initial), (key) => MAP_METHODS[key]?.() ?? null);
+    return wrap(new Set(initial), (key, args) => MAP_METHODS[key]?.(args) ?? null);
 }
 
 /**

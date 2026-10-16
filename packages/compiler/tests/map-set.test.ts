@@ -96,6 +96,50 @@ it('map.set / delete / clear refresh the list', async () => {
     expect(rows(target, 'srow')).toEqual([]);
 });
 
+it('map.set does not re-iterate the whole container', async () => {
+    // 以前 `set` 发出去的改动是 `[CHANGE_SET]` —— **不带 key/value**，收的人（List.apply）
+    // 定位不到是哪一行，只能落到 default："重新取一次再比对"，也就是遍历整个容器。
+    // 现在发 `[CHANGE_SET, key, value]`，apply 走 setKey 只动那一行。
+    //
+    // 数迭代次数来盯住这条：全量必然会 `Array.from(source())`。
+    let iterations = 0;
+
+    const original = Map.prototype[Symbol.iterator];
+
+    Map.prototype[Symbol.iterator] = function (this: Map<unknown, unknown>): MapIterator<[unknown, unknown]> {
+        iterations += 1;
+
+        return original.call(this) as MapIterator<[unknown, unknown]>;
+    };
+
+    try {
+        const target = await mount(`<script>
+    let scores = $state(new Map([['ada', 1], ['bob', 2], ['cy', 3]]));
+
+    function score(name, value) {
+        scores.set(name, value);
+    }
+</script>
+{#for [name, value] of scores with key = name}
+    <p class="srow">{name} = {value}</p>
+{/for}
+<button id="set" onclick={() => { score('bob', 99); }}>set</button>`);
+
+        expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 2', 'cy = 3']);
+
+        const before = iterations;
+
+        click(target, 'set');
+
+        expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 99', 'cy = 3']);
+
+        // 精确路径一次都不用迭代整个 Map
+        expect(iterations - before).toBe(0);
+    } finally {
+        Map.prototype[Symbol.iterator] = original;
+    }
+});
+
 it('set.add / delete refresh the list', async () => {
     const target = await mount(`<script>
     let picked = $state(new Set(['red']));
