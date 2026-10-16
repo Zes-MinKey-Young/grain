@@ -324,6 +324,21 @@ const KEYED_MUTATIONS = new Set(['set', 'add', 'delete', 'clear']);
 const REACTIVE_FACTORIES = new Set(['reactiveArray', 'reactiveMap', 'reactiveSet']);
 
 /**
+ * `$state(...)` 的初始值是容器字面量时，包上对应的工厂。
+ *
+ * `new Map(...)` -> `reactiveMap(new Map(...))`，`new Set(...)` 同理。
+ * 数组不包 —— 它走编译期的精确调用（`push` 换成列表自己的方法），包了会刷两遍。
+ *
+ * 判据就是源码文本的形状：`init` 是 `$state(...)` 里那一段的原文。
+ */
+function reactiveWrap(init: string): string {
+    if (/^new\s+Map\s*\(/.test(init)) return `reactiveMap(${init})`;
+    if (/^new\s+Set\s*\(/.test(init)) return `reactiveSet(${init})`;
+
+    return init;
+}
+
+/**
  * 找出用 `reactiveArray(...)` 之类声明的变量。
  *
  * 它们自己知道动了什么，所以 `for` 订阅它就行 —— 不用编译期去猜。
@@ -607,6 +622,8 @@ class Generator {
     private needsBound = false;
     /** 用到了 creList（`{#for ...}`） */
     private needsList = false;
+    /** 用到了 reactiveMap / reactiveSet（`$state(new Map(...))` 之类） */
+    private needsReactive = false;
     /**
      * 容器变量 -> 那个 `for` 产出的列表。
      *
@@ -706,6 +723,7 @@ class Generator {
         if (this.needsText) imported.push('creText');
         if (this.needsBound) imported.push('creBound');
         if (this.needsList) imported.push('creList');
+        if (this.needsReactive) imported.push('reactiveMap', 'reactiveSet');
         if (this.dev && this.pendingRefreshes.length > 0) imported.push('guard');
 
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
@@ -849,7 +867,18 @@ class Generator {
             // 它只是"写它等于写根上那个"的登记
             if (state.fromPath) continue;
 
-            edits.push({ start: state.range[0], end: state.range[1], text: state.init });
+            // 容器字面量包上对应工厂：那样它有 `subscribe`，`{#for}` 才订得到改动。
+            // 不包的话 `let scores = $state(new Map(...))` 出来是个裸 Map，
+            // `if (typeof x?.subscribe === 'function')` 直接跳过 —— set / delete /
+            // add / clear 全都不刷新。
+            //
+            // **数组不包**：它的 push / splice 之类编译期就换成了列表自己的精确调用，
+            // 包上 reactiveArray 会两边都通知、刷两遍
+            const text = reactiveWrap(state.init);
+
+            if (text !== state.init) this.needsReactive = true;
+
+            edits.push({ start: state.range[0], end: state.range[1], text });
         }
 
         // 3. `$props()` -> `props`

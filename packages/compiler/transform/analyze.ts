@@ -68,13 +68,24 @@ export interface ScriptAnalysis {
     functions: Map<string, FunctionInfo>;
 }
 
-/** 这些方法会原地修改数组 / 对象，视为对变量的写 */
+/**
+ * 这些方法会原地修改数组 / 对象 / Map / Set，视为对变量的写。
+ *
+ * 漏了 Map / Set 那几个（`set` / `add` / `delete` / `clear`）的后果：写了它们的顶层
+ * 函数 `writes` 是空的，`functionWrappers` 直接跳过 —— 于是 `scores.set(k, v)` 不生成
+ * `list.setKey(...)`，`{#for [k, v] of scores}` 那块不刷新。只有被模板**直接**引用的
+ * 函数能靠 `handler()` 那条路侥幸 work，包在箭头函数里调的就彻底不刷。
+ */
 const MUTATION_METHODS = new Set([
+    'add',
+    'clear',
     'copyWithin',
+    'delete',
     'fill',
     'pop',
     'push',
     'reverse',
+    'set',
     'shift',
     'sort',
     'splice',
