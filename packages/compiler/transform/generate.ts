@@ -2491,13 +2491,22 @@ class Generator {
                 for (const dep of slot.deps) {
                     if (dep === valueName || !dep.startsWith(`${valueName}.`)) continue;
 
-                    const prop = dep.slice(valueName.length + 1).split('.')[0];
-                    const byUpdater = pathGroups.get(prop) ?? new Map<string, number[]>();
-                    const indices = byUpdater.get(slot.update) ?? [];
+                    // 每一层前缀都登记：`{person.meta.author}` 读到的是 `meta.author`，
+                    // 而写它可能是 `setPath(i, 'meta')`（改整个 meta）也可能是
+                    // `setPath(i, 'meta.author')`（借出来的参数按完整路径报告）——
+                    // 两种都得刷到这个片段。以前只登记第一段，多段的匹配不上
+                    const parts = dep.slice(valueName.length + 1).split('.');
 
-                    indices.push(slot.index);
-                    byUpdater.set(slot.update, indices);
-                    pathGroups.set(prop, byUpdater);
+                    for (let depth = 1; depth <= parts.length; depth += 1) {
+                        const prop = parts.slice(0, depth).join('.');
+                        const byUpdater = pathGroups.get(prop) ?? new Map<string, number[]>();
+                        const indices = byUpdater.get(slot.update) ?? [];
+
+                        if (!indices.includes(slot.index)) indices.push(slot.index);
+
+                        byUpdater.set(slot.update, indices);
+                        pathGroups.set(prop, byUpdater);
+                    }
                 }
             }
         }
@@ -2740,8 +2749,116 @@ class Generator {
             return name;
         };
 
+        /**
+         * 实参是不是"列表里的一项"：`arr[2]` / `map.get('a')` / 派生变量。
+         *
+         * 是的话返回定位信息 —— `$borrow` 参数的调用点要靠它生成刷新函数。
+         */
+        const borrowArgOf = (
+            argument: TSESTree.Node
+        ): { list: string; index: string; root: string } | null => {
+            // `map.get('a')`
+            if (argument.type === 'CallExpression') {
+                const take = mapKeyOf(argument);
+
+                if (!take) return null;
+
+                const lists = listsOf(take.root);
+
+                return lists.length === 0 ? null : { list: lists[0], index: take.key, root: take.root };
+            }
+
+            // `arr[2]`
+            if (
+                argument.type === 'MemberExpression' &&
+                argument.computed &&
+                argument.object.type === 'Identifier'
+            ) {
+                const lists = listsOf(argument.object.name);
+
+                if (lists.length === 0) return null;
+
+                return {
+                    list: lists[0],
+                    index: reuse(this.slice(argument.property.range), argument.property.range),
+                    root: argument.object.name
+                };
+            }
+
+            // 派生变量（`const row = arr[2]`）
+            if (argument.type === 'Identifier') {
+                const state = this.analysis?.states.get(argument.name);
+
+                if (!state?.fromPath || state.fromIndex === undefined) return null;
+                if (!borrowAlive(state, argument.range[0])) return null;
+
+                const lists = listsOf(state.fromPath.split('[')[0]);
+
+                return lists.length === 0
+                    ? null
+                    : { list: lists[0], index: state.fromIndex, root: state.fromPath.split('[')[0] };
+            }
+
+            return null;
+        };
+
         simpleTraverse(node, {
             enter: (child, parent) => {
+                // 调用了带 `$borrow` 参数的函数：把"路径 -> 刷新"接进去。
+                //
+                // `rename(items[2])` -> `rename(items[2], (p) => __list?.setPath(2, p))`
+                //
+                // 函数体只报"写了哪条路径"（`__borrow('meta.author')`），路径对应的
+                // 是哪条 list、哪一格，只有调用点知道
+                if (child.type === 'CallExpression' && child.callee.type === 'Identifier') {
+                    const borrows = this.analysis?.functions.get(child.callee.name)?.borrows ?? [];
+
+                    if (borrows.length === 0) return;
+
+                    const borrow = borrows[0];
+                    const argument = child.arguments[borrow.index];
+
+                    // 没给这个参数：走默认值，没有路径可刷
+                    if (!argument) return;
+
+                    const target = borrowArgOf(argument);
+
+                    if (!target) {
+                        this.analysis?.warnings.push({
+                            start: argument.range[0],
+                            end: argument.range[1],
+                            message:
+                                `\`${child.callee.name}\` takes a borrowed parameter (level ${borrow.level}) — ` +
+                                'pass a reactive path such as `items[2]` or `map.get(key)`'
+                        });
+
+                        return;
+                    }
+
+                    // 级别检查：实参的级别不够就是契约违反
+                    // 级别看**容器变量**的（`target.list` 是列表名 `__list$6`，查不到）
+                    const level = this.analysis?.states.get(target.root)?.level ?? 0;
+
+                    if (level < borrow.level) {
+                        this.analysis?.warnings.push({
+                            start: argument.range[0],
+                            end: argument.range[1],
+                            message:
+                                `\`${child.callee.name}\` requires level ${borrow.level}, ` +
+                                `but \`${this.slice(argument.range)}\` is level ${level} — ` +
+                                `declare it as \`$state(..., ${borrow.level})\``
+                        });
+                    }
+
+                    edits.push({
+                        start: child.range[1] - 1,
+                        end: child.range[1] - 1,
+                        text: `, (p) => ${target.list}?.setPath(${target.index}, p)`
+                    });
+
+                    return;
+                }
+
                 // `items[i] = v`：只换那一项，其余的 DOM 不动。
                 // 复合赋值（`items[i] += 1`）和改元素内部（`items[i].name = x`）都不认 ——
                 // 前者还要读旧值，后者动的不是这个容器本身，都退回整块比对

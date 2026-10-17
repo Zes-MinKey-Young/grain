@@ -354,13 +354,30 @@ it("the level example itself: only the row that changed is refreshed", async () 
     const before = [0, 1, 2].map((at) => ident(at));
     const mapIdent = entries()[0].textContent!.match(/Ident: (\w+)/)![1];
 
-    // 第一个按钮：`modify`（数组）—— 第三行换语言，其余一点不动
+    // 第一个按钮：`modify`
+    //
+    //     const minkey = arr[2];
+    //     arr.unshift({ ... });      <- 挪动了已有项，借用到此为止
+    //     minkey.language = 'Grain'; <- 越界了，不刷
+    //
+    // 所以数组多一项，而 `Grain` 那句不生效
     (target.querySelectorAll("button")[0] as HTMLElement).click();
 
-    expect(language(2)).toBe("Grain");
-    expect(language(0)).toBe("C++");
-    expect(language(1)).toBe("Rust");
-    expect([0, 1, 2].map((at) => ident(at))).toEqual(before);
+    expect(rows()).toHaveLength(4);
+    expect(language(0)).toBe("Zig");        // 新插到最前面的
+    expect(language(1)).toBe("C++");
+    expect(language(2)).toBe("Rust");
+    expect(language(3)).toBe("TypeScript"); // `Grain` 没刷出来
+
+    // 原有三行的 Ident 一个没动 —— `unshift` 走的是精确插入
+    expect([1, 2, 3].map((at) => ident(at))).toEqual(before);
+
+    // 而越界那句有提示（`unshift` 在"会移动已有项"的名单里）
+    expect(
+        compile(source, { filename: "App.grain" })
+            .warnings.map((warning) => warning.message)
+            .join(" ")
+    ).toContain("`minkey` is no longer reactive");
 
     // 第二个按钮：`modifyMap` —— Map 那一行的语言换掉，Ident 不动（精确刷新）
     (target.querySelectorAll("button")[1] as HTMLElement).click();
