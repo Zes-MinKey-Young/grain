@@ -25,6 +25,7 @@ import { ParseError } from '../errors.js';
 
 import {
     analyzeScript,
+    borrowCallErrors,
     borrowParamsOf,
     collectReads,
     collectWrites,
@@ -35,6 +36,49 @@ import {
     type ScriptAnalysis,
     type StateInfo
 } from './analyze.js';
+
+/**
+ * 模板里所有 `{ ... }` 表达式（属性值、插值、块头、插槽绑定）。
+ *
+ * `analyzeScript` 只扫 `<script>` 本身，模板里的调用点（
+ * `onclick={() => { changeLang(minkey, 'x') }}`）它看不到。这里补上。
+ */
+function templateExpressions(root: Root): Expression[] {
+    const found: Expression[] = [];
+
+    const visit = (node: unknown): void => {
+        if (!node || typeof node !== 'object') return;
+
+        const current = node as Record<string, unknown>;
+
+        if (current.type === 'expression') {
+            if (current.content) found.push(current as unknown as Expression);
+
+            return;
+        }
+
+        // 只走已知的子节点字段 —— 别 `Object.values`，那会掉进 TS AST 里
+        for (const key of ['children', 'fallback', 'branches', 'value', 'get', 'listen']) {
+            const next = current[key];
+
+            if (Array.isArray(next)) next.forEach(visit);
+            else if (next && typeof next === 'object') visit(next);
+        }
+
+        // `attributes` 是 `{ onclick: {...} }` —— 表达式在**值**里，得逐项看
+        const attributes = current.attributes;
+
+        if (attributes && typeof attributes === 'object') {
+            for (const value of Object.values(attributes as Record<string, unknown>)) {
+                if (value && typeof value === 'object') visit(value);
+            }
+        }
+    };
+
+    for (const child of root.template.children) visit(child);
+
+    return found;
+}
 
 /**
  * 函数体里写了借来参数的哪些路径（`item.a.b = v` -> `a.b`）。
@@ -923,6 +967,24 @@ class Generator {
             : this.scopeId
               ? scopeStylesheet(stylesheet, this.scopeId)
               : stylesheet.raw;
+
+        // 模板表达式里的 `$borrow` 调用点：`analyzeScript` 只看 `<script>`，这里补上
+        //（`onclick={() => { changeLang(minkey, 'x') }}` 就是这种）
+        if (this.analysis) {
+            for (const expression of templateExpressions(this.root)) {
+                if (!expression.content) continue;
+
+                this.analysis.errors.push(
+                    ...borrowCallErrors(
+                        expression.content,
+                        this.analysis.functions,
+                        this.analysis.states,
+                        this.analysis.windows,
+                        this.source
+                    )
+                );
+            }
+        }
 
         return {
             js: transpile(output.join('\n'), this.filename),
@@ -2872,43 +2934,14 @@ class Generator {
 
                     const target = borrowArgOf(argument);
 
-                    if (!target) {
-                        // 两种原因分开说：派生变量**曾经**是响应式的、只是借用已经结束，
-                        // 跟"压根没传响应式的东西"是两回事
-                        const named = argument.type === 'Identifier' ? argument.name : null;
-                        const state = named ? this.analysis?.states.get(named) : undefined;
-                        const expired =
-                            state?.fromPath !== undefined &&
-                            state.fromIndex !== undefined &&
-                            !borrowAlive(state, argument.range[0]);
+                    // 合不合规由 `analyze` 那边报（编辑器读的是那一份）。这里只负责
+                    // "能定位就生成刷新"，定位不了就算了 —— 重复报会让同一条显示两遍
+                    if (!target) return;
 
-                        this.analysis?.errors.push({
-                            start: argument.range[0],
-                            end: argument.range[1],
-                            message: expired
-                                ? `\`${named}\` is no longer reactive here — its borrow ended ` +
-                                  `before this call, so \`${child.callee.name}\` cannot take it`
-                                : `\`${child.callee.name}\` takes a borrowed parameter (level ${borrow.level}) — ` +
-                                  'pass a reactive path such as `items[2]` or `map.get(key)`'
-                        });
-
-                        return;
-                    }
-
-                    // 级别检查：实参的级别不够就是契约违反
-                    // 级别看**容器变量**的（`target.lists` 是列表名 `__list$6`，查不到）
+                    // 级别不够也是 analyze 报的；这里不生成刷新，免得到时候瞄错地方
                     const level = this.analysis?.states.get(target.root)?.level ?? 0;
 
-                    if (level < borrow.level) {
-                        this.analysis?.errors.push({
-                            start: argument.range[0],
-                            end: argument.range[1],
-                            message:
-                                `\`${child.callee.name}\` requires level ${borrow.level}, ` +
-                                `but \`${this.slice(argument.range)}\` is level ${level} — ` +
-                                `declare it as \`$state(..., ${borrow.level})\``
-                        });
-                    }
+                    if (level < borrow.level) return;
 
                     // 同一个容器可能喂给几个 for —— 每一份都得刷
                     const body = target.lists
@@ -3120,7 +3153,13 @@ class Generator {
 function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
     if (list.length === 0) return null;
 
-    const merged: ScriptAnalysis = { states: new Map(), functions: new Map(), warnings: [], errors: [] };
+    const merged: ScriptAnalysis = {
+        states: new Map(),
+        functions: new Map(),
+        warnings: [],
+        errors: [],
+        windows: new Map()
+    };
 
     for (const item of list) {
         for (const [name, info] of item.states) {
@@ -3133,6 +3172,8 @@ function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
 
         merged.warnings.push(...item.warnings);
         merged.errors.push(...item.errors);
+
+        for (const [name, window] of item.windows) merged.windows.set(name, window);
     }
 
     return merged;

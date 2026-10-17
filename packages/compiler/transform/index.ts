@@ -1,11 +1,12 @@
 import { parse, type ParseOptions } from '../parser.js';
-import type { Root } from '../types.js';
-import { generate, type CompileOptions, type CompileResult } from './generate.js';
+import type { Root } from '../types.ts';
+import { generate, type CompileOptions, type CompileResult } from './generate.ts';
 
-export { generate, type CompileOptions, type CompileResult } from './generate.js';
-export { createScopeId, isGlobal, scopeStylesheet } from './style.js';
+export { generate, type CompileOptions, type CompileResult } from './generate.ts';
+export { createScopeId, isGlobal, scopeStylesheet } from './style.ts';
 export {
     analyzeScript,
+    borrowCallErrors,
     collectReads,
     collectWrites,
     intersects,
@@ -13,7 +14,7 @@ export {
     type FunctionLike,
     type ScriptAnalysis,
     type StateInfo
-} from './analyze.js';
+} from './analyze.ts';
 
 /** SFC 源码 -> 可执行 JS + CSS */
 export function compile(source: string, options: CompileOptions & ParseOptions = {}): CompileResult {

@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path';
 
 import {
     analyzeScript,
+    borrowCallErrors,
     compile,
     parse,
     parseRoot,
@@ -25,9 +26,12 @@ import {
     realName,
     virtualName,
     VIRTUAL_EXPORT,
+    type BorrowWindow,
     type CompletionDetail,
     type CompletionEntry,
     type Definition,
+    type FunctionInfo,
+    type StateInfo,
     type QuickInfo,
     type SemanticProblem,
     type SemanticSpan,
@@ -297,19 +301,46 @@ function shadowedRanges(program: TSProgram, names: ReadonlySet<string>): Array<[
  * 两类：派生局部变量过了有效期还在写、以及不是 `const` 声明的派生。产物照跑，
  * 只是那一下不会刷新，所以是提示不是错误。
  */
-function borrowProblems(source: string, root: Root | null): SemanticProblem[] {
-    const found: SemanticProblem[] = [];
+function borrowProblems(
+    source: string,
+    root: Root | null,
+    expressions: ExpressionRegion[]
+): SemanticProblem[] {
+    if (!root) return [];
 
-    if (!root) return found;
+    const found: SemanticProblem[] = [];
+    const states = new Map<string, StateInfo>();
+    const functions = new Map<string, FunctionInfo>();
+    const windows = new Map<string, BorrowWindow>();
 
     for (const block of [root.script, root.module, root.onmount]) {
         if (!block) continue;
 
         const analysis = analyzeScript(block.content, source);
 
+        for (const [name, info] of analysis.states) states.set(name, info);
+        for (const [name, info] of analysis.functions) functions.set(name, info);
+        for (const [name, window] of analysis.windows) windows.set(name, window);
+
         // 提示和错误都走 `semantic()` —— 那边一律按 Error 报，所以 `$borrow` 的契约
         // 违反在编辑器里是红线（这正是它跟"借用越界"那种提示的区别）
         for (const problem of [...analysis.warnings, ...analysis.errors]) {
+            found.push({ start: problem.start, end: problem.end, message: problem.message });
+        }
+    }
+
+    // 模板表达式里的调用点 `analyzeScript` 扫不到（它只看 script）——
+    // `onclick={() => { changeLang(minkey, 'x') }}` 就是这种
+    for (const expression of expressions) {
+        if (!expression.content) continue;
+
+        for (const problem of borrowCallErrors(
+            expression.content,
+            functions,
+            states,
+            windows,
+            source
+        )) {
             found.push({ start: problem.start, end: problem.end, message: problem.message });
         }
     }
@@ -1732,7 +1763,7 @@ export function analyze(source: string, filename: string): Analysis {
                 ...kept,
                 ...thisLeaks(root, expressions, thisBindings),
                 // 借用规则的提示（跟编译器同一份 —— 越界写派生、非 const 派生）
-                ...borrowProblems(source, root)
+                ...borrowProblems(source, root, expressions)
             ];
         },
 

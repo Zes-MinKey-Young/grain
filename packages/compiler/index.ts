@@ -1,14 +1,14 @@
-export { Parser, parse, parseRoot, type ParseOptions } from './parser.js';
-export { ParseError } from './errors.js';
-export { scanScript, scanExpression, scanStyle, type ScanResult } from './scan.js';
-export { checkBindings } from './check.js';
-export { nearestTsconfig, readPaths, resolveAlias } from './tsconfig.js';
-export type { PathAlias, PathConfig } from './tsconfig.js';
-export { splitForHeader } from './template.js';
-export { parseExpression, parseExpressions, parseForOf } from './read/expression.js';
-export { parseScript } from './read/script.js';
-export { MacroScope, expandMacros, type MacroReparse } from './macro.js';
-export { parseStyle } from './read/style.js';
+export { Parser, parse, parseRoot, type ParseOptions } from './parser.ts';
+export { ParseError } from './errors.ts';
+export { scanScript, scanExpression, scanStyle, type ScanResult } from './scan.ts';
+export { checkBindings } from './check.ts';
+export { nearestTsconfig, readPaths, resolveAlias } from './tsconfig.ts';
+export type { PathAlias, PathConfig } from './tsconfig.ts';
+export { splitForHeader } from './template.ts';
+export { parseExpression, parseExpressions, parseForOf } from './read/expression.ts';
+export { parseScript } from './read/script.ts';
+export { MacroScope, expandMacros, type MacroReparse } from './macro.ts';
+export { parseStyle } from './read/style.ts';
 export {
     compile,
     compileRoot,
@@ -17,6 +17,7 @@ export {
     isGlobal,
     scopeStylesheet,
     analyzeScript,
+    borrowCallErrors,
     collectReads,
     collectWrites,
     type CompileOptions,
@@ -24,5 +25,5 @@ export {
     type ScriptAnalysis,
     type StateInfo,
     type FunctionInfo
-} from './transform/index.js';
-export * from './types.js';
+} from './transform/index.ts';
+export * from './types.ts';

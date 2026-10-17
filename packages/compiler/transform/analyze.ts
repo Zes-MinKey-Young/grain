@@ -127,6 +127,13 @@ export interface ScriptAnalysis {
      * 跟 warnings 分开，构建那边可以让它失败。
      */
     errors: BorrowWarning[];
+    /**
+     * 派生局部变量的有效期。
+     *
+     * `analyzeScript` 只扫 script 本身，模板表达式里的调用点要由调用方另外扫
+     * （见 `borrowCallErrors`）—— 那边得知道"借用还活着吗"。
+     */
+    windows: Map<string, BorrowWindow>;
 }
 
 /**
@@ -893,6 +900,148 @@ export function borrowParamsOf(node: FunctionLike): BorrowParam[] {
     return found;
 }
 
+/**
+ * 这个实参能不能喂给 `$borrow(level)` 参数。
+ *
+ * 只判断"它是不是一条级别的够的响应式路径" —— **不需要**知道它对应哪个 `{#for}`，
+ * 所以能放在分析阶段（`generate` 那边负责生成刷新函数，判断放这儿编辑器才看得见）。
+ */
+function borrowArgProblem(
+    argument: TSESTree.Node,
+    level: number,
+    callee: string,
+    states: Map<string, StateInfo>,
+    windows: Map<string, BorrowWindow>,
+    source: string
+): BorrowWarning | null {
+    const span: [number, number] = [argument.range[0], argument.range[1]];
+
+    const fail = (message: string): BorrowWarning => ({
+        start: span[0],
+        end: span[1],
+        message
+    });
+
+    const tooLow = (name: string, actual: number): BorrowWarning =>
+        fail(
+            `\`${callee}\` requires level ${level}, but \`${name}\` is level ${actual} — ` +
+                `declare it as \`$state(..., ${level})\``
+        );
+
+    const notPath = (): BorrowWarning =>
+        fail(
+            `\`${callee}\` takes a borrowed parameter (level ${level}) — ` +
+                'pass a reactive path such as `items[2]` or `map.get(key)`'
+        );
+
+    // `arr[2]` / `arr.prop`
+    if (argument.type === 'MemberExpression') {
+        const root = rootOf(argument);
+        const state = root ? states.get(root) : undefined;
+
+        if (!root || !state) return notPath();
+
+        return state.level < level ? tooLow(root, state.level) : null;
+    }
+
+    // `map.get(key)`
+    if (argument.type === 'CallExpression') {
+        const target = argument.callee;
+
+        if (
+            target.type !== 'MemberExpression' ||
+            target.property.type !== 'Identifier' ||
+            target.property.name !== 'get' ||
+            target.object.type !== 'Identifier'
+        ) {
+            return notPath();
+        }
+
+        const state = states.get(target.object.name);
+
+        if (!state) return notPath();
+
+        return state.level < level ? tooLow(target.object.name, state.level) : null;
+    }
+
+    // 派生变量（`const row = arr[2]`）
+    if (argument.type === 'Identifier') {
+        const state = states.get(argument.name);
+
+        if (!state?.fromPath || state.fromIndex === undefined) return notPath();
+
+        // 借用还有效吗 —— 失效了再传就是在传一个不再指向根的东西
+        const window = windows.get(argument.name);
+
+        if (window && argument.range[0] >= window.to) {
+            return fail(
+                `\`${argument.name}\` is no longer reactive here — its borrow ended before ` +
+                    `this call, so \`${callee}\` cannot take it`
+            );
+        }
+
+        return state.level < level ? tooLow(argument.name, state.level) : null;
+    }
+
+    return notPath();
+}
+
+/**
+ * 这个函数里调用 `$borrow` 参数的地方，实参合不合规。
+ *
+ * 放分析阶段（不是 `generate`）是有意的 —— 编辑器读的 `analyzeScript(...).errors`
+ * 只到这儿；生成阶段再报的话，命令行能看到、编辑器看不到。
+ */
+export function borrowCallErrors(
+    node: TSESTree.Node,
+    functions: Map<string, FunctionInfo>,
+    states: Map<string, StateInfo>,
+    windows: Map<string, BorrowWindow>,
+    source: string
+): BorrowWarning[] {
+    const found: BorrowWarning[] = [];
+
+    /** 本次函数自己的借用参数：转发下去，不用重新检查 */
+    const self = new Set(
+        (node.type === 'FunctionDeclaration' ||
+        node.type === 'FunctionExpression' ||
+        node.type === 'ArrowFunctionExpression'
+            ? borrowParamsOf(node)
+            : []
+        ).map((item) => item.name)
+    );
+
+    simpleTraverse(node, {
+        enter(child) {
+            if (child.type !== 'CallExpression' || child.callee.type !== 'Identifier') return;
+
+            const wants = functions.get(child.callee.name)?.borrows ?? [];
+
+            if (wants.length === 0) return;
+
+            for (const borrow of wants) {
+                const argument = child.arguments[borrow.index];
+
+                if (!argument || argument.type === 'SpreadElement') continue;
+                if (argument.type === 'Identifier' && self.has(argument.name)) continue;
+
+                const problem = borrowArgProblem(
+                    argument,
+                    borrow.level,
+                    child.callee.name,
+                    states,
+                    windows,
+                    source
+                );
+
+                if (problem) found.push(problem);
+            }
+        }
+    });
+
+    return found;
+}
+
 /** 这个位置所在的那一行（用来找行内注释） */
 function lineOf(source: string, at: number): string {
     const start = source.lastIndexOf('\n', at - 1) + 1;
@@ -1086,6 +1235,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     }
 
     // 借来的参数又传出去了：接手的函数认不认？不认的话那边写它不会刷新 —— 说一声
+    //
+    // 只依赖 `functions`，跟派生变量无关，所以放这儿就行
     for (const info of functions.values()) {
         warnings.push(...borrowEscapeWarnings(info, functions, source));
     }
@@ -1123,7 +1274,15 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
         });
     }
 
-    return { states, functions, warnings, errors };
+    // `$borrow` 参数的调用点：实参得是级别够、且还活着的响应式路径。
+    //
+    // 必须等第三遍把派生变量登记进 `states` 之后再跑 —— 否则 `states.get('minkey')`
+    // 是 undefined，会误报"不是响应式路径"（而实际是"借用已经结束了"）
+    for (const info of functions.values()) {
+        errors.push(...borrowCallErrors(info.node, functions, states, windows, source));
+    }
+
+    return { states, functions, warnings, errors, windows };
 }
 
 /**
