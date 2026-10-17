@@ -220,6 +220,53 @@ ${ROWS}`;
     expect(js).not.toMatch(/scores\.b\.name/);
 });
 
+it('writing through map.get(k) directly refreshes too', async () => {
+    // 不经过一个 `const` 取出：`scores.get('b').name = 'B'`。
+    //
+    // 以前这条不刷新 —— `pathOf` 不认 `CallExpression`，那次写入进不了 `writes`；
+    // `cellOf` 也不认这种 left，精确的 setPath 生成不出来。两条路都断了，于是
+    // 改了数据、DOM 一动不动，也不报错
+    const source = `<script>
+    ${THREE}
+
+    function f() {
+        scores.get('b').name = 'B';
+    }
+</script>
+${ROWS}`;
+
+    const target = await mount(source);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    expect(names(target)).toEqual(['a', 'B', 'c']);
+    expect(compile(source, { filename: 'App.grain' }).js).toMatch(/setPath\('b', "name"\)/);
+});
+
+it('a dynamic key works the same way', async () => {
+    // key 是个变量 —— 照样定位到那一项
+    const source = `<script>
+    ${THREE}
+
+    function f() {
+        const which = 'c';
+
+        scores.get(which).name = 'C';
+    }
+</script>
+${ROWS}`;
+
+    const target = await mount(source);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    expect(names(target)).toEqual(['a', 'b', 'C']);
+});
+
 it('an array still uses the bracket form without complaint', () => {
     // 只对 Map 认 `get` —— 数组的下标写法照旧，别误报
     expect(

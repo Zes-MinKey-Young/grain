@@ -2562,7 +2562,47 @@ class Generator {
                 };
             }
 
+            // `scores.get('b').prop` —— 没经过一个 `const` 取出，直接写 Map 里那一项的
+            // 属性。key 就在 `get` 的参数上，`setPath(key, prop)` 要的正是它
+            if (left.object.type === 'CallExpression') {
+                const take = mapKeyOf(left.object);
+
+                if (!take) return null;
+
+                const lists = listsOf(take.root);
+
+                if (lists.length === 0) return null;
+
+                return { list: lists[0], index: reuse(take.key, take.keyRange, parent) };
+            }
+
             return null;
+        };
+
+        /** `map.get('b')` 吗 —— 是就给根名和 key（key 用来定位那一项） */
+        const mapKeyOf = (
+            call: TSESTree.CallExpression
+        ): { root: string; key: string; keyRange: [number, number] } | null => {
+            const callee = call.callee;
+
+            if (
+                callee.type !== 'MemberExpression' ||
+                callee.property.type !== 'Identifier' ||
+                callee.property.name !== 'get' ||
+                callee.object.type !== 'Identifier'
+            ) {
+                return null;
+            }
+
+            const argument = call.arguments[0];
+
+            if (!argument) return null;
+
+            return {
+                root: callee.object.name,
+                key: this.slice(argument.range),
+                keyRange: argument.range
+            };
         };
 
         /**
