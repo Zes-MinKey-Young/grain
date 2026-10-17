@@ -27,7 +27,7 @@ it('a loop variable is not shadowed by a same-named local in a function', () => 
     // the compiler think the loop variable was already declared - and it never
     // appended `declare let song`, leaving `{song.name}` unresolved
     const source = `<script>
-    let songs = $state([{ name: 'a' }]);
+    let songs = $state([{ name: 'a' }], 2);
 
     function pick() {
         let song = 'local';
@@ -44,7 +44,7 @@ it('a loop variable is not shadowed by a same-named local in a function', () => 
 
 it('a loop variable is not shadowed by a local inside <script onmount>', () => {
     const source = `<script>
-    let songs = $state([{ name: 'a' }]);
+    let songs = $state([{ name: 'a' }], 2);
 </script>
 {#for [idx, song] of songs}
     <p>{song.name}</p>
@@ -95,7 +95,7 @@ it('a multi-line handler is separated from the next expression', () => {
     // ASI does not save us: a newline is not a trigger, and `)` followed by `(`
     // is legal call syntax.
     const source = `<script>
-    let rows = $state([{ id: 7 }]);
+    let rows = $state([{ id: 7 }], 2);
     let current = $state(0);
 </script>
 {#for [i, row] of rows.entries()}
@@ -114,7 +114,7 @@ it('a multi-line handler is separated from the next expression', () => {
 
 it('a multi-line handler is followed by a semicolon in the virtual file', () => {
     const source = `<script>
-    let rows = $state([{ id: 7 }]);
+    let rows = $state([{ id: 7 }], 2);
     let current = $state(0);
 </script>
 {#for [i, row] of rows.entries()}
@@ -137,7 +137,7 @@ it('a multi-line handler is followed by a semicolon in the virtual file', () => 
 it('borrow warnings come through the language service too', () => {
     // 跟编译器返回的是同一份：派生过了有效期还在写、非 const 派生
     const source = `<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function drop() {
         const second = arr[1];
@@ -158,7 +158,7 @@ it('borrow warnings come through the language service too', () => {
 
 it('a non-const borrow is flagged by the language service', () => {
     const source = `<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function f() {
         let second = arr[1];

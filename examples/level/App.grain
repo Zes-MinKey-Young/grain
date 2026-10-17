@@ -3,13 +3,26 @@ interface Person {
     name: string,
     language: string,
 }
-let arr: Person[] = $state([{ name: "qaqFei", language: "C++" }, { name: "MilkCOCO", language: "Rust" }, { name: "Minkey", language: "TypeScript" }]);
-
+// 第二个参数是响应式级别：1（默认）只做整块追踪，2 才允许把一项取出来、
+// 之后只刷那一项。下面两个函数都用了 `const x = arr[2]` / `const y = map.get(...)`，
+// 所以要显式写 2
+let arr: Person[] = $state([{ name: "qaqFei", language: "C++" }, { name: "MilkCOCO", language: "Rust" }, { name: "Minkey", language: "TypeScript" }], 2);
+let map = $state(new Map<string, Person>(), 2);
+map.set("RPE", {
+    language: "C++",
+    name: "cmdysj"
+})
 
 
 function modify() {
     const minkey = arr[2];
+    arr.push({language: "Zig", name: "Jarred Sumner"});
     minkey.language = "Grain";
+}
+
+function modifyMap() {
+    const ysj = map.get("RPE")!;
+    ysj.language = "ECMAScript";
 }
 </script>
 
@@ -21,7 +34,17 @@ function modify() {
     </div>
 {/for}
 
+{#for [key, person] of map with key = key}
+    <div>
+        map key: {key}<br>
+        Name: {person.name}<br>
+        Language: {person.language}<br>
+        Ident: {Math.random().toString(16).substr(2, 8)}
+    </div>
+{/for}
+
 <button onclick={modify}>Modify</button>
+<button onclick={modifyMap}>ModifyMap</button>
 
 <style>
     div {

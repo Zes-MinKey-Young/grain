@@ -160,7 +160,7 @@ it('a row-inner fragment reading an outer state updates on write', async () => {
     // 现在顶层的刷新只留"刷那个 list"（`update$N?.(1)`），由 list 重跑每一行，
     // 行的 update 里再按需刷行内片段。
     const module = await build(`<script>
-    let items = $state(['a', 'b', 'c']);
+    let items = $state(['a', 'b', 'c'], 2);
     let selected = $state(0);
 
     function next() {
@@ -190,7 +190,7 @@ it('a row-inner fragment reading an outer state updates on write', async () => {
 it('the top-level refresh never calls into a row updater', () => {
     // 行内的 `update$N` 只在 render 作用域内存在，顶层不该出现对它的调用
     const js = compile(`<script>
-    let items = $state([1, 2]);
+    let items = $state([1, 2], 2);
     let selected = $state(0);
 
     function next() {

@@ -149,9 +149,47 @@ function escapedRoots(node: TSESTree.Node, states: Map<string, StateInfo>): stri
     return [node.right.name];
 }
 
-/** 这个 state 是 Map 吗 —— 看初始值源码的形状（`new Map(...)`） */
+/**
+ * 这个 state 是 Map 吗 —— 看初始值源码的形状。
+ *
+ * 得容下类型参数：`new Map<string, Person>()` 里 `Map` 和 `(` 之间还有一截。
+ * 用贪婪的 `.*` 而不是 `[^>]*`，否则嵌套泛型（`Map<string, Map<...>>`）会在第一个
+ * `>` 就停下。
+ */
 function isMapState(state: StateInfo): boolean {
-    return /^new\s+Map\s*\(/.test(state.init.trim());
+    return /^new\s+Map\s*(<.*>)?\s*\(/.test(state.init.trim());
+}
+
+/**
+ * 借用要求的最低级别。
+ *
+ * `1` 只做到"整块追踪内部"—— 容器里任何东西变了就重跑整段。想**取出一项**、之后
+ * 只刷那一项，得显式写 `$state(x, 2)`。
+ *
+ * 为什么不默认给 2：取出成引用之后，那一项可能已经不在容器里了（重新排序 / 删除），
+ * 编译期判断不了，于是定了一条借用规则去管它。那条规则有代价（借用会被打断、越界写
+ * 不再是响应式），所以让它显式开启。
+ */
+const BORROW_LEVEL = 2;
+
+/**
+ * 剥掉不影响"取出"语义的包装：非空断言（`map.get('b')!`）、`as Foo`、`<Foo>x`。
+ *
+ * `Map.get` 返回 `V | undefined`，用户几乎必然会写 `!`。不剥掉就认不出这是个取出，
+ * 那一项也就没有响应性了。
+ */
+function unwrapExpression(node: TSESTree.Node): TSESTree.Node {
+    let current = node;
+
+    while (
+        current.type === 'TSNonNullExpression' ||
+        current.type === 'TSAsExpression' ||
+        current.type === 'TSTypeAssertion'
+    ) {
+        current = (current as TSESTree.TSNonNullExpression).expression;
+    }
+
+    return current;
 }
 
 /**
@@ -170,13 +208,16 @@ function takeoutOf(
     states: Map<string, StateInfo>,
     source: string
 ): { root: string; path: string; index?: string; map: boolean; bracket: boolean } | null {
+    // `map.get('b')!` 这种：先剥掉断言，不然认不出来
+    init = unwrapExpression(init);
+
     // `arr[2]` / `arr.prop`
     if (init.type === 'MemberExpression') {
         const root = rootOf(init);
         const state = root ? states.get(root) : undefined;
 
-        // 根得是"追踪内部"的那一级，否则它内部变化本来就不追踪
-        if (!root || !state || state.level < 1) return null;
+        // 得是显式开了借用（level 2）的容器：level 1 只做整块追踪
+        if (!root || !state || state.level < BORROW_LEVEL) return null;
 
         const cell = init as TSESTree.MemberExpression;
 
@@ -207,7 +248,7 @@ function takeoutOf(
         const state = states.get(root);
 
         // 只对 Map 认 —— 数组没有 `get`，写了就是用户自己的错，别去猜
-        if (!state || state.level < 1 || !isMapState(state)) return null;
+        if (!state || state.level < BORROW_LEVEL || !isMapState(state)) return null;
 
         const key = init.arguments[0];
 

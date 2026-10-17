@@ -31,7 +31,7 @@ it('a type annotation is not part of the underline', () => {
     // oxc 的 `id.range` 连类型注解一起包（`typed: Foo`），装饰会多画一截
     for (const declaration of [
         'let a: Foo = $state({ x: 1 });',
-        'let a: number[] = $state([1]);',
+        'let a: number[] = $state([1], 2);',
         'let a: string | null = $state(null);',
         'let a: number = $state<number>(0);'
     ]) {
@@ -77,7 +77,7 @@ it('an inner binding that shadows the name is not underlined', () => {
 
 it('a derived local is underlined as well', () => {
     const source = `<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function pick() {
         const second = arr[1];

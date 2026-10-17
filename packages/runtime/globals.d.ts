@@ -16,6 +16,18 @@
  * Reactive state. Compiled down to a plain variable; functions that write to it
  * get the matching update calls appended.
  *
+ * `level` decides how deep the reactivity goes:
+ *
+ * | level | tracks | lets you take one item out |
+ * |---|---|---|
+ * | `0` | reassigning the variable itself | — |
+ * | `1` | its contents as a whole (one row changes → whole block re-runs) | — |
+ * | `2` | same as `1`, plus the borrowed item is refreshed on its own | ✓ |
+ *
+ * Arrays / `Map` / `Set` default to `1`. Pass `2` explicitly when you take an item
+ * out into a local (`const row = items[2]`) and write to it — that turns on the
+ * borrow rules for it.
+ *
  * @example
  * ```ts
  * let count = $state(0);
@@ -24,8 +36,18 @@
  *     count += 1;      // writes to it get the refresh calls appended
  * }
  * ```
+ *
+ * @example
+ * ```ts
+ * let items = $state([{ name: 'a' }, { name: 'b' }], 2);
+ *
+ * function rename() {
+ *     const second = items[1];    // borrow
+ *     second.name = 'B';          // only that row refreshes
+ * }
+ * ```
  */
-declare function $state<T>(initial: T): T;
+declare function $state<T>(initial: T, level?: 0 | 1 | 2): T;
 
 /**
  * Component props — the type parameter is the props type.

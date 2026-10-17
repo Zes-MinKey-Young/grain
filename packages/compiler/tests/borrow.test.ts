@@ -61,7 +61,7 @@ const messages = (source: string): string[] =>
 
 it('writing a derived local after the root was reassigned is flagged', () => {
     const found = messages(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function drop() {
         const second = arr[1];
@@ -77,7 +77,7 @@ it('writing a derived local after the root was reassigned is flagged', () => {
 
 it('a second borrow of the same root flags the first', () => {
     const found = messages(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function f() {
         const first = arr[0];
@@ -93,8 +93,8 @@ it('a second borrow of the same root flags the first', () => {
 
 it('a root escaping into another reactive variable flags the borrow', () => {
     const found = messages(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
-    let other = $state([]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
+    let other = $state([], 2);
 
     function f() {
         const second = arr[1];
@@ -110,7 +110,7 @@ it('a root escaping into another reactive variable flags the borrow', () => {
 
 it('a derived local must be const', () => {
     const found = messages(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function f() {
         let second = arr[1];
@@ -126,7 +126,7 @@ it('a derived local must be const', () => {
 it('nothing is flagged while the borrow is still alive', () => {
     expect(
         messages(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function f() {
         const second = arr[1];
@@ -152,9 +152,39 @@ const ROWS = `{#for item of arr}
 const names = (target: Element): string[] =>
     [...target.querySelectorAll('span')].map((node) => node.textContent);
 
+it('level 1 does not allow taking an item out', async () => {
+    // 默认 level 1：只做"整块追踪内部"—— 容器里变了就重跑整段。
+    // 把一项取出来写它**不算**写容器，所以不会有响应性。
+    // 想这么用得显式写 `$state(arr, 2)`
+    const source = `<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+
+    function f() {
+        const second = arr[1];
+
+        second.name = 'B';
+    }
+</script>
+${ROWS}`;
+
+    const target = await mount(source);
+
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    target.querySelector('button')!.click();
+
+    // 一点没动
+    expect(names(target)).toEqual(['a', 'b', 'c']);
+
+    const js = compile(source, { filename: 'App.grain' }).js;
+
+    // 没有精确调用（`setPath`），也没有针对 `second` 的借用跟踪
+    expect(js).not.toMatch(/setPath/);
+});
+
 it('④ the root untouched: the borrowed write refreshes', async () => {
     const target = await mount(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
     function f() {
         const second = arr[1];
@@ -174,7 +204,7 @@ ${ROWS}`);
 it('① the root reassigned before the borrow: still refreshes', async () => {
     // 根先整个换成 [x, y]，再取出第二项 —— 借用从取出那句才开始，不受之前影响
     const target = await mount(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
     function f() {
         arr = [{ name: 'x' }, { name: 'y' }];
@@ -199,7 +229,7 @@ it('② the root displaced in between: no refresh, and it is flagged', async () 
     // 上真能看出差别。整体重赋值会整块比对，那一次写入的结果会被顺带刷出来 ——
     // 对象确实被改了，只是没人通知 DOM
     const target = await mount(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
     function f() {
         const second = arr[1];
@@ -219,7 +249,7 @@ ${ROWS}`);
     expect(names(target)).toEqual(['b', 'c']);
 
     const js = compile(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
     function f() {
         const second = arr[1];
@@ -237,7 +267,7 @@ ${ROWS}`, { filename: 'App.grain' }).js;
 it('③ the root reassigned after the write: the write already happened', async () => {
     // 取出 -> 写入（借用还活着，刷新）-> 根再换掉。写入排在之前，照样算数
     const target = await mount(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
     function f() {
         const second = arr[1];
@@ -259,7 +289,7 @@ ${ROWS}`);
 it('a write before the root is touched still refreshes', async () => {
     // 位置敏感的核心：失效点之前写它，照样刷新
     const target = await mount(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function f() {
         const second = arr[1];
@@ -284,7 +314,7 @@ it('a write before the root is touched still refreshes', async () => {
 
 it('a write after the root is touched does not refresh', async () => {
     const target = await mount(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
     function f() {
         const third = arr[2];

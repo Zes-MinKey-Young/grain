@@ -43,7 +43,7 @@ const mount = async (source: string): Promise<Element> => {
 
 it("only re-renders the row that changed", async () => {
     const target = await mount(`<script>
-        let a = $state([1, 2]);
+        let a = $state([1, 2], 2);
 
         function bump() {
             a[0] = 9;
@@ -73,7 +73,7 @@ it("swaps rows in place", async () => {
     // `[a[0], a[1]] = [a[1], a[0]]` 是**同时**写入两个位置 —— 拆成两个 setAt 的话第一个会
     // 把第二个要读的值覆盖掉，顺序也就换不过来
     const target = await mount(`<script>
-        let a = $state([1, 2]);
+        let a = $state([1, 2], 2);
 
         function flip() {
             [a[0], a[1]] = [a[1], a[0]];
@@ -102,7 +102,7 @@ it("swaps keyed rows in the DOM", async () => {
     // 有 key 时，交换应该是**搬节点**：原来第一个那个 div 得跑到第二个位置去，
     // 不能只是把里面的文字换掉
     const target = await mount(`<script>
-        let a = $state([{ id: 1 }, { id: 2 }]);
+        let a = $state([{ id: 1 }, { id: 2 }], 2);
 
         function flip() {
             [a[0], a[1]] = [a[1], a[0]];
@@ -133,7 +133,7 @@ it("swaps when two loops share the array", async () => {
     // 两个 for 都拿 a 当源（`a` 和 `a.entries()`）—— 两个列表都要更新，而且
     // `entries()` 那边的项是 `[i, value]` 拼出来的，不能拿裸值去 update
     const target = await mount(`<script>
-        let a = $state([{ id: 1 }, { id: 2 }]);
+        let a = $state([{ id: 1 }, { id: 2 }], 2);
 
         function flip() {
             [a[0], a[1]] = [a[1], a[0]];
@@ -178,7 +178,7 @@ it("entries loop: a swap only re-runs the index", async () => {
     // `{#for [i, item] of a.entries()}` 的项是 `[下标, 值]`。就地交换时行应该跟着
     // **值**走，只有下标那一块重跑 —— 行里的 `{Math.random()}` 不该被重算
     const target = await mount(`<script>
-        let a = $state([{ id: 1 }, { id: 2 }]);
+        let a = $state([{ id: 1 }, { id: 2 }], 2);
 
         function flip() {
             [a[0], a[1]] = [a[1], a[0]];
@@ -210,7 +210,7 @@ it("evaluates a dynamic index only once", async () => {
     // `items[next()] = v`：下标有副作用，原语句和精确调用各求值一次的话 next() 就被调了
     // 两遍 —— 提成临时变量，只求值一次，用的是赋值那一刻的值
     const target = await mount(`<script>
-        let items = $state([{ id: 1 }, { id: 2 }, { id: 3 }]);
+        let items = $state([{ id: 1 }, { id: 2 }, { id: 3 }], 2);
         let at = 0;
         let pick_at = 9;
 
@@ -240,7 +240,7 @@ it("evaluates a dynamic index only once", async () => {
 
 it("keeps existing rows when appending", async () => {
     const target = await mount(`<script>
-        let a = $state([1]);
+        let a = $state([1], 2);
 
         function add() {
             a.push(2);

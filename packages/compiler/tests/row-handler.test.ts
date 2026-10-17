@@ -52,7 +52,7 @@ const mount = async (source: string): Promise<Element> => {
 
 it('a handler inside a for block sees the loop variable', async () => {
     const target = await mount(`<script>
-    let items = $state(['a', 'b', 'c']);
+    let items = $state(['a', 'b', 'c'], 2);
     let picked = $state('');
 </script>
 {#for item of items}
@@ -74,7 +74,7 @@ it('a handler inside a for block sees the loop variable', async () => {
 
 it('a destructured loop variable works too', async () => {
     const target = await mount(`<script>
-    let rows = $state([{ id: 7, name: 'x' }]);
+    let rows = $state([{ id: 7, name: 'x' }], 2);
     let chosen = $state(0);
 </script>
 {#for [i, row] of rows.entries()}
@@ -89,7 +89,7 @@ it('a destructured loop variable works too', async () => {
 
 it('the handler is defined inside render, before it is used', () => {
     const js = compile(`<script>
-    let items = $state([1, 2]);
+    let items = $state([1, 2], 2);
     let picked = $state(0);
 </script>
 {#for item of items}

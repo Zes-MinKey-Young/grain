@@ -66,7 +66,7 @@ const THREE = `let scores = $state(new Map([
         ['a', { name: 'a' }],
         ['b', { name: 'b' }],
         ['c', { name: 'c' }]
-    ]));`;
+    ]), 2);`;
 
 const names = (target: Element): string[] =>
     [...target.querySelectorAll('span')].map((node) => node.textContent);
@@ -271,7 +271,7 @@ it('an array still uses the bracket form without complaint', () => {
     // 只对 Map 认 `get` —— 数组的下标写法照旧，别误报
     expect(
         messages(`<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function f() {
         const second = arr[1];

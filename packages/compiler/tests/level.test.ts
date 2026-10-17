@@ -93,7 +93,7 @@ it("level 1: changing inside does refresh", async () => {
 
 it("a local taken out of a reactive array keeps its reactivity", async () => {
     const target = await mount(`<script>
-        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }]);
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }], 2);
 
         function modify() {
             const second = arr[1];
@@ -119,7 +119,7 @@ it("a local loses its reactivity when the root is also touched", async () => {
     // 静态约束：同一个函数里既持有派生局部变量、又直接动根变量，就不给它响应性 ——
     // 否则重新排列 / 删除之后，写那个局部变量会去刷新一个跟它无关的数组
     const target = await mount(`<script>
-        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]);
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }], 2);
 
         function dropAndModify() {
             const third = arr[2];
@@ -145,7 +145,7 @@ it("a local loses its reactivity when the root is also touched", async () => {
 it("a second borrow of the same root kills the first", async () => {
     // 借用规则：对同一个根，后一次取出让前一次失效 —— 无论后续有没有改
     const target = await mount(`<script>
-        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]);
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }], 2);
 
         function modify() {
             const first = arr[0];
@@ -175,7 +175,7 @@ it("a second borrow of the same root kills the first", async () => {
 
 it("the last borrow survives", async () => {
     const target = await mount(`<script>
-        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }]);
+        let arr = $state([{ id: 1, name: 'a' }, { id: 2, name: 'b' }, { id: 3, name: 'c' }], 2);
 
         function modify() {
             const first = arr[0];
@@ -201,7 +201,7 @@ it("the last borrow survives", async () => {
 it("changing one element only refreshes what reads it", async () => {
     // 路径级依赖：改 `arr[0]` 只刷读 `arr[0]` 的片段，读 `arr[1]` 的不能动
     const target = await mount(`<script>
-        let arr = $state([{ v: 1 }, { v: 2 }]);
+        let arr = $state([{ v: 1 }, { v: 2 }], 2);
 
         function changeFirst() {
             arr[0].v = 10;
@@ -235,7 +235,7 @@ it("a local's write only refreshes the path it points at", async () => {
     // 派生局部变量记的是路径：`minkey.name = ...` 解析成 `arr[2].name`，
     // 不该刷读 arr[0] / arr[1] 的片段
     const target = await mount(`<script>
-        let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+        let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
         function modify() {
             const minkey = arr[2];
@@ -261,7 +261,7 @@ it("changing one item's property only refreshes what reads it", async () => {
     // `arr[2].language = 'Grain'`（经派生局部变量）：整项没换，只是它内部一个属性变了 ——
     // 只有那一行里读了 language 的片段该重跑，行里其它部分（Math.random()）不该
     const target = await mount(`<script>
-        let arr = $state([{ name: 'a', language: 'C++' }, { name: 'b', language: 'Rust' }, { name: 'c', language: 'TS' }]);
+        let arr = $state([{ name: 'a', language: 'C++' }, { name: 'b', language: 'Rust' }, { name: 'c', language: 'TS' }], 2);
 
         function modify() {
             const third = arr[2];
@@ -297,7 +297,7 @@ it("a dynamic index still locates the row", async () => {
     // 下标先赋给变量再取（`const at = 2; const minkey = arr[at]`）：动态下标在依赖侧
     // 会保守退化成整个容器，但精确定位仍要能找到那一行
     const target = await mount(`<script>
-        let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }]);
+        let arr = $state([{ name: 'a' }, { name: 'b' }, { name: 'c' }], 2);
 
         function modify() {
             const at = 2;
@@ -335,27 +335,38 @@ it("the level example itself: only the row that changed is refreshed", async () 
     );
 
     const target = await mount(source);
-    const rows = () =>
-        [...target.querySelectorAll("div")].filter((node) => node.textContent!.includes("Name:"));
+
+    // 示例里有两个 for：数组那份、以及 Map 那份（它的行带 `map key:`）
+    const every = (filter: (text: string) => boolean) => () =>
+        [...target.querySelectorAll("div")].filter((node) => filter(node.textContent!));
+
+    const rows = every((text) => text.includes("Name:") && !text.includes("map key:"));
+    const entries = every((text) => text.includes("map key:"));
 
     const ident = (at: number) => rows()[at].textContent!.match(/Ident: (\w+)/)![1];
     // `C++` / `Rust` / `TypeScript`：语言名里可能带符号
     const language = (at: number) => rows()[at].textContent!.match(/Language: ([^\s]+)/)![1];
 
     expect(rows()).toHaveLength(3);
+    expect(entries()).toHaveLength(1);
     expect(language(2)).toBe("TypeScript");
 
     const before = [0, 1, 2].map((at) => ident(at));
+    const mapIdent = entries()[0].textContent!.match(/Ident: (\w+)/)![1];
 
-    (target.querySelector("button") as HTMLElement).click();
+    // 第一个按钮：`modify`（数组）—— 第三行换语言，其余一点不动
+    (target.querySelectorAll("button")[0] as HTMLElement).click();
 
-    // 只有第三行的 language 换了
     expect(language(2)).toBe("Grain");
     expect(language(0)).toBe("C++");
     expect(language(1)).toBe("Rust");
-
-    // 三行的随机数一个都没动
     expect([0, 1, 2].map((at) => ident(at))).toEqual(before);
+
+    // 第二个按钮：`modifyMap` —— Map 那一行的语言换掉，Ident 不动（精确刷新）
+    (target.querySelectorAll("button")[1] as HTMLElement).click();
+
+    expect(entries()[0].textContent).toContain("ECMAScript");
+    expect(entries()[0].textContent!.match(/Ident: (\w+)/)![1]).toBe(mapIdent);
 });
 
 it("a local taken out of a level-0 variable is not reactive", async () => {

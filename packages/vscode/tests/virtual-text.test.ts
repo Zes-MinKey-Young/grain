@@ -52,7 +52,7 @@ it('a derived local that lost its reactivity is not underlined any more', () => 
     // 借用失效（同一个函数里重写了根变量）之后它就不再指根上那条路径了 —— 别画下划线。
     // 声明那一处还留着：它是"这个变量在这儿、本来是响应式的"的标注
     const source = `<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function drop() {
         const second = arr[1];
@@ -76,7 +76,7 @@ it('a derived local that lost its reactivity is not underlined any more', () => 
 it('borrowing is positional: still reactive before the root is touched', () => {
     // 失效发生在那条语句**之后** —— 在那之前的引用仍然是响应式的
     const source = `<script>
-    let arr = $state([{ name: 'a' }, { name: 'b' }]);
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
 
     function use() {
         const second = arr[1];
