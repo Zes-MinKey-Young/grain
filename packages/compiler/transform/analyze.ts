@@ -247,8 +247,10 @@ function takeoutOf(
         const root = callee.object.name;
         const state = states.get(root);
 
-        // 只对 Map 认 —— 数组没有 `get`，写了就是用户自己的错，别去猜
-        if (!state || state.level < BORROW_LEVEL || !isMapState(state)) return null;
+        // 不看初始值是不是 `new Map(...)`：借出来的 Map（`const inner = map.get('a')!`）
+        // 初始值是别的，运行时却确实是 Map。level 的预算已经说明"这里还允许借"。
+        // 数组上没有 `get`，写了就是用户自己的错，不去猜
+        if (!state || state.level < BORROW_LEVEL) return null;
 
         const key = init.arguments[0];
 
@@ -901,7 +903,10 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
             range: item.range,
             // 名字在声明语句里的位置：`const minkey = arr[2]` 的 minkey
             nameRange: findNameRange(item.range, item.name, source),
-            level: states.get(item.root)!.level,
+            // 借出来的东西**降一级**：`$state(arr, 2)` 里 `const minkey = arr[2]` 的
+            // minkey 是 level 1 —— 它能刷自己那一项，但**不能再往下借**
+            //（`const deep = minkey.inner` 不算借用，否则可以无限借下去）
+            level: Math.max(0, states.get(item.root)!.level - 1),
             // 它对应的路径：`minkey` -> `arr[2]`
             fromPath: item.path,
             // 下标表达式：动态的（`arr[i]`）也记下，`setPath` 要靠它定位

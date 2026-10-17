@@ -31,17 +31,21 @@ const GRAIN_TYPE_SOURCE = `/**
  * Reactive state. Compiled down to a plain variable; functions that write to it
  * get the matching update calls appended.
  *
- * \`level\` decides how deep the reactivity goes:
+ * \`level\` is a **budget**, and borrowing out of it spends one:
  *
- * | level | tracks | lets you take one item out |
+ * | level | tracks | may borrow out |
  * |---|---|---|
  * | \`0\` | reassigning the variable itself | — |
  * | \`1\` | its contents as a whole (one row changes -> whole block re-runs) | — |
- * | \`2\` | same as \`1\`, plus the borrowed item is refreshed on its own | yes |
+ * | \`2\` | same as \`1\` | yes, one level |
  *
- * Arrays / \`Map\` / \`Set\` default to \`1\`. Pass \`2\` explicitly when you take an item
- * out into a local (\`const row = items[2]\`) and write to it -- that turns on the
- * borrow rules for it.
+ * Arrays / \`Map\` / \`Set\` default to \`1\`. Pass \`2\` when you take an item out into a
+ * local and write to it -- that turns on the borrow rules for it.
+ *
+ * What you borrowed is **one level down** (\`const row = items[2]\` is \`1\`), so it
+ * cannot be borrowed from again. That matters because a second-level reference no
+ * longer points at a row of the \`{#for}\` -- treating it as a borrow would generate
+ * refresh calls aimed at the wrong place.
  *
  * @example
  * \`\`\`ts
@@ -62,7 +66,7 @@ const GRAIN_TYPE_SOURCE = `/**
  * }
  * \`\`\`
  */
-declare function $state<T>(initial: T, level?: 0 | 1 | 2): T;
+declare function $state<T>(initial: T, level?: number): T;
 
 /**
  * Component props — the type parameter is the props type.

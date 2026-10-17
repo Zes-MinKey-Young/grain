@@ -152,6 +152,30 @@ const ROWS = `{#for item of arr}
 const names = (target: Element): string[] =>
     [...target.querySelectorAll('span')].map((node) => node.textContent);
 
+it('a borrowed local is one level down', () => {
+    // level 是**借几次的预算**，借一次减一：`$state(arr, 2)` 里
+    // `const mine = arr[0]` 的 mine 是 level 1。
+    //
+    // 这条测的是**声明能成立**（不是 warning）；递减的实际效果 —— `mine[0]` 不再
+    // 算借用 —— 在产物上看不出来：`mine[0]` 是第二层，本来就不指向 for 的任何一项，
+    // 认不认都不会生成 setPath。递减的价值是**不去生成那个错的调用**。
+    expect(
+        messages(`<script>
+    let arr = $state([[{ name: 'a' }], [{ name: 'b' }]], 2);
+
+    function f() {
+        const mine = arr[0];
+
+        mine.push({ name: 'c' });
+    }
+</script>
+{#for row of arr}
+    <span>{row[0].name}</span>
+{/for}
+<button onclick={f}>go</button>`)
+    ).toEqual([]);
+});
+
 it('level 1 does not allow taking an item out', async () => {
     // 默认 level 1：只做"整块追踪内部"—— 容器里变了就重跑整段。
     // 把一项取出来写它**不算**写容器，所以不会有响应性。
