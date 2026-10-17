@@ -13,11 +13,14 @@ map.set("RPE", {
     name: "cmdysj"
 })
 
+const changeLang = (person: Person = $borrow(1), lang: string) => {
+    person.language = lang;
+}
 
 function modify() {
     const minkey = arr[2];
-    arr.push({language: "Zig", name: "Jarred Sumner"});
-    minkey.language = "Grain";
+    arr.unshift({language: "Zig", name: "Jarred Sumner"});
+    changeLang(minkey, "Grain");
 }
 
 function modifyMap() {

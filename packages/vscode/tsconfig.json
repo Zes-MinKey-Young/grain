@@ -10,7 +10,10 @@
         "skipLibCheck": true,
         "esModuleInterop": true,
         "sourceMap": true,
-        "types": ["node", "vscode"]
+        "types": ["node", "vscode"],
+        "allowImportingTsExtensions": true,
+        "emitDeclarationOnly": true,
+        "declaration": true
     },
     "include": ["src/**/*.ts", "../compiler/**/*.ts"],
     "exclude": ["../compiler/**/*.test.ts"]

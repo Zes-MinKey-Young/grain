@@ -10,7 +10,8 @@
         // 编译器也要一起编译进来 —— 插件是单包发布的，不单独发 @graints/compiler
         "rootDir": "..",
         "skipLibCheck": true,
-        "types": ["node"]
+        "types": ["node"],
+        "allowImportingTsExtensions": true
     },
     "include": ["index.ts", "../compiler/**/*.ts"],
     // 测试不该进产物 —— 否则 dist 里会有一份同名测试被 bun 扫到（路径不对，一定失败）
