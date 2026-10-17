@@ -25,6 +25,15 @@ jobs:
                   registry-url: https://registry.npmjs.org
                   cache: pnpm
 
+            # 打包用的是 bun，不是 node：
+            # - @graints/vite-plugin 的 build（`bun build ../compiler/index.ts` 等）
+            # - grain-vscode 的 bundle（`bun build ./src/extension.ts`）
+            # 没这一步的话 `pnpm packages:build` 直接 `bun: command not found`
+            - uses: oven-sh/setup-bun@v2
+              with:
+                  # 跟本地开发保持一致，免得产物行为悄悄不一样
+                  bun-version: 1.3.11
+
             # 只编译 TS，不需要任何原生模块的构建脚本（keytar / esbuild 之类）
             - run: pnpm install --ignore-scripts --no-frozen-lockfile
 
