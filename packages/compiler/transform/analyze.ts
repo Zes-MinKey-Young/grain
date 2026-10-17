@@ -56,6 +56,24 @@ export type FunctionLike =
     | TSESTree.FunctionExpression
     | TSESTree.ArrowFunctionExpression;
 
+/**
+ * 一个"借来的"参数：`function f(item = $borrow(2))`。
+ *
+ * 意思是"这个参数只接受级别 >= level 的响应式路径"，而函数体里写它要能通知回
+ * 调用点 —— 调用点知道那条路径（`arr[2]` / `map.get('a')`），函数体不知道。
+ *
+ * 做法：函数多一个隐藏参数 `__borrow(path)`，函数体里写 `item.a.b = v` 时调
+ * `__borrow('a.b')`，由调用点把它翻译成 `list.setPath(index, 'a.b')`。
+ */
+export interface BorrowParam {
+    /** 在参数列表里的下标 */
+    index: number;
+    /** 参数名 */
+    name: string;
+    /** 要求的级别 */
+    level: number;
+}
+
 export interface FunctionInfo {
     name: string;
     node: FunctionLike;
@@ -70,6 +88,8 @@ export interface FunctionInfo {
     keyword: string;
     /** 这个函数写了哪些 state（含它内部嵌套函数写的） */
     writes: Set<string>;
+    /** 借来的参数（`item = $borrow(2)`）。没有就是空数组 */
+    borrows: BorrowParam[];
 }
 
 /**
@@ -833,6 +853,40 @@ function isState(node: TSESTree.Node | null | undefined): node is TSESTree.CallE
 }
 
 /**
+ * `function f(item = $borrow(2))` 里的那些参数。
+ *
+ * 只认"默认值是 `$borrow(n)` 调用"这一种形状 —— 那是唯一能静态确定"这个参数是借来的"
+ * 的位置，也不影响既有写法。
+ */
+export function borrowParamsOf(node: FunctionLike): BorrowParam[] {
+    const found: BorrowParam[] = [];
+
+    node.params.forEach((param, index) => {
+        if (param.type !== 'AssignmentPattern' || param.left.type !== 'Identifier') return;
+
+        const right = param.right;
+
+        if (
+            right.type !== 'CallExpression' ||
+            right.callee.type !== 'Identifier' ||
+            right.callee.name !== '$borrow'
+        ) {
+            return;
+        }
+
+        const given = right.arguments[0];
+
+        found.push({
+            index,
+            name: param.left.name,
+            level: given && given.type === 'Literal' && typeof given.value === 'number' ? given.value : 1
+        });
+    });
+
+    return found;
+}
+
+/**
  * 不写第二个参数时，哪些初始值默认"追踪内部"。
  *
  * 数组、`Map`、`Set` 默认 `1` —— 它们是容器，内部变化就是它们的内容；其他（对象、
@@ -955,7 +1009,8 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     for (const item of fnNodes) {
         functions.set(item.name, {
             ...item,
-            writes: collectWrites(item.node, shallow, undefined, windows)
+            writes: collectWrites(item.node, shallow, undefined, windows),
+            borrows: borrowParamsOf(item.node)
         });
     }
 

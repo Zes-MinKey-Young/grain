@@ -69,6 +69,24 @@ const GRAIN_TYPE_SOURCE = `/**
 declare function $state<T>(initial: T, level?: number): T;
 
 /**
+ * Declares a parameter as **borrowed**: this function only accepts a reactive path
+ * with at least \`level\` (see \`$state\`), and writes to the parameter keep refreshing
+ * after the value is handed over.
+ *
+ * Only valid as a parameter default -- the compiler strips it and threads a hidden
+ * reporter through instead (that is what makes \`update(items[2])\` keep working).
+ *
+ * \`\`\`ts
+ * function rename(item: Todo = $borrow(2)) {
+ *     item.title = 'done';     // refreshes that row
+ * }
+ *
+ * rename(items[2]);
+ * \`\`\`
+ */
+declare function $borrow(level?: number): any;
+
+/**
  * Component props — the type parameter is the props type.
  *
  * @example

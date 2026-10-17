@@ -25,14 +25,70 @@ import { ParseError } from '../errors.js';
 
 import {
     analyzeScript,
+    borrowParamsOf,
     collectReads,
     collectWrites,
     intersects,
+    type BorrowParam,
     type BorrowWarning,
     type FunctionLike,
     type ScriptAnalysis,
     type StateInfo
 } from './analyze.js';
+
+/**
+ * 函数体里写了借来参数的哪些路径（`item.a.b = v` -> `a.b`）。
+ *
+ * 只认"赋值 / 自增自减"，不认 `item.push(x)` 那种容器方法 —— 借来的东西通常是一项，
+ * 上面不太会再有容器（真有的话退回整块刷新）。
+ */
+function borrowPaths(node: FunctionLike, borrows: BorrowParam[]): string[] {
+    if (borrows.length === 0) return [];
+
+    const names = new Set(borrows.map((item) => item.name));
+    const found = new Set<string>();
+
+    const pathOf = (target: TSESTree.Node): string | null => {
+        let cursor: TSESTree.Node = target;
+        const parts: string[] = [];
+
+        while (cursor.type === 'MemberExpression') {
+            if (!cursor.computed) {
+                if (cursor.property.type !== 'Identifier') return null;
+
+                parts.unshift(cursor.property.name);
+            } else if (
+                cursor.property.type === 'Literal' &&
+                typeof cursor.property.value === 'string'
+            ) {
+                parts.unshift(cursor.property.value);
+            } else {
+                // `item[key]` 说不清是哪个属性
+                return null;
+            }
+
+            cursor = cursor.object;
+        }
+
+        if (cursor.type !== 'Identifier' || !names.has(cursor.name)) return null;
+
+        // `item = ...`（改局部变量本身）不算
+        return parts.length === 0 ? null : parts.join('.');
+    };
+
+    simpleTraverse(node, {
+        enter(child) {
+            if (child.type !== 'AssignmentExpression' && child.type !== 'UpdateExpression') return;
+
+            const target = child.type === 'AssignmentExpression' ? child.left : child.argument;
+            const path = pathOf(target);
+
+            if (path) found.add(path);
+        }
+    });
+
+    return [...found];
+}
 import { createScopeId, isGlobal, scopeStylesheet } from './style.js';
 
 export interface CompileOptions {
@@ -1149,7 +1205,11 @@ class Generator {
             if (info.declaration[0] < block.contentStart || info.declaration[1] > block.contentEnd) continue;
 
             const reactive = [...this.reactiveWrites(info.writes)];
-            if (reactive.length === 0) continue;
+            const borrows = borrowParamsOf(node);
+
+            // 有借来的参数也得包：它自己没写响应式变量，但要把"写了哪条路径"
+            // 报告给调用点（`__borrow('a.b')`）
+            if (reactive.length === 0 && borrows.length === 0) continue;
 
             // 跟宏替换重叠就跳过：宏展开会把 `$flip('name')` 换成另一段文本，而 AST 的
             // range 是基于替换**后**的源码算的，跟 this.source（原始 + 末尾追加）基准不同。
@@ -1168,7 +1228,7 @@ class Generator {
 
             this.mutationEdits = mutations.edits;
 
-            const params = node.params.map((param) => this.slice(param.range)).join(', ');
+            const params = this.paramsOf(node, borrows);
             // 去掉外层花括号，交给 guardChanges 重新包一层
             const inner = this.bodySource(node.body.range).slice(1, -1);
             const updates = this.updateCalls(new Set(reactive), mutations.skip);
@@ -1186,12 +1246,20 @@ class Generator {
                 inner
             );
 
+            // 借来的参数被写了：告诉调用点一声（它知道那条路径）
+            const notices =
+                borrows.length > 0
+                    ? borrowPaths(node, borrows)
+                          .map((path) => ` __borrow?.(${JSON.stringify(path)});`)
+                          .join('')
+                    : '';
+
             // `function f() {}` 要连声明一起换（箭头函数没有名字，得借 function 表达式补上）；
             // `const f = () => {}` 只换函数那段，前面的 `const f =` 原样留着
             const replacement =
                 info.keyword === 'function'
-                    ? `const ${name} = function ${name}(${params}) {${body}}`
-                    : `function ${name}(${params}) {${body}}`;
+                    ? `const ${name} = function ${name}(${params}) {${body}${notices}}`
+                    : `function ${name}(${params}) {${body}${notices}}`;
 
             edits.push({
                 start: info.declaration[0],
@@ -1394,10 +1462,28 @@ class Generator {
         }
     }
 
+    /**
+     * 参数列表。
+     *
+     * 借来的参数（`item = $borrow(2)`）只留名字 —— 默认值只是声明，产物里 `$borrow`
+     * 根本不存在。末尾再挂一个隐藏参数 `__borrow`，调用点用它把刷新接进来。
+     */
+    private paramsOf(node: FunctionLike, borrows: BorrowParam[]): string {
+        const byIndex = new Map(borrows.map((item) => [item.index, item]));
+        const parts = node.params.map(
+            (param, index) => byIndex.get(index)?.name ?? this.slice(param.range)
+        );
+
+        if (borrows.length > 0) parts.push('__borrow');
+
+        return parts.join(', ');
+    }
+
     /** 一个包装（事件处理器 / 写了 state 的函数）的定义语句 */
     private wrapperCode(wrapper: PendingWrapper): string {
         const node = wrapper.node;
-        const params = node.params.map((param) => this.slice(param.range)).join(', ');
+        const borrows = borrowParamsOf(node);
+        const params = this.paramsOf(node, borrows);
         const reactive = [...this.reactiveWrites(wrapper.writes)];
 
         // 直接改容器（`items.push(x)`）的话，用列表自己的精确调用顶掉整块比对。
@@ -1424,6 +1510,16 @@ class Generator {
             const inner = this.bodySource(node.body.range);
 
             body = `{ ${this.guardChanges(reactive, updates, writesAreAssignments(node, wrapper.writes), inner)} }`;
+        }
+
+        // 借来的参数被写了：告诉调用点一声（它知道那条路径）。
+        // 放末尾统一报告 —— `setPath` 只刷读了那个属性的片段，重复报告无害
+        if (borrows.length > 0) {
+            const notices = borrowPaths(node, borrows)
+                .map((path) => ` __borrow?.(${JSON.stringify(path)});`)
+                .join('');
+
+            body = body.slice(0, -1) + notices + ' }';
         }
 
         return `const ${wrapper.name} = ${head} ${body};`;
