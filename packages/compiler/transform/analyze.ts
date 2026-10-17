@@ -886,6 +886,69 @@ export function borrowParamsOf(node: FunctionLike): BorrowParam[] {
     return found;
 }
 
+/** 这个位置所在的那一行（用来找行内注释） */
+function lineOf(source: string, at: number): string {
+    const start = source.lastIndexOf('\n', at - 1) + 1;
+    const end = source.indexOf('\n', at);
+
+    return source.slice(start, end < 0 ? source.length : end);
+}
+
+/**
+ * 借来的参数被传给别的函数 —— 接手的不认它，那边写它就是写一个普通对象，
+ * 不会刷新。
+ *
+ * 接手的那一侧如果**同一个位置**也是借出的（`$borrow`），响应性照样传下去，不报。
+ *
+ * `// grain-ignore` 写在调用那一行（任意位置）可以消掉这条。
+ */
+function borrowEscapeWarnings(
+    info: FunctionInfo,
+    functions: Map<string, FunctionInfo>,
+    source: string
+): BorrowWarning[] {
+    if (info.borrows.length === 0) return [];
+
+    const borrowed = new Set(info.borrows.map((item) => item.name));
+    const found: BorrowWarning[] = [];
+
+    simpleTraverse(info.node, {
+        enter(child) {
+            if (child.type !== 'CallExpression' || child.callee.type !== 'Identifier') return;
+
+            const callee = child.callee.name;
+
+            // 递归调用自己：位置对得上就没事（下面按位置判断）
+            const wants = functions.get(callee)?.borrows ?? [];
+
+            // `// grain-ignore`：调用语句覆盖的每一行都看一眼
+            const ignored =
+                lineOf(source, child.range[0]).includes('grain-ignore') ||
+                lineOf(source, child.range[1]).includes('grain-ignore');
+
+            if (ignored) return;
+
+            child.arguments.forEach((argument, index) => {
+                if (argument.type !== 'Identifier' || !borrowed.has(argument.name)) return;
+
+                // 那个位置也是借出的 —— 响应性传下去了
+                if (wants.some((item) => item.index === index)) return;
+
+                found.push({
+                    start: argument.range[0],
+                    end: argument.range[1],
+                    message:
+                        `\`${argument.name}\` is borrowed — \`${callee}\` does not accept a ` +
+                        'borrowed parameter there, so writes to it inside will not refresh ' +
+                        '(add `// grain-ignore` to silence this)'
+                });
+            });
+        }
+    });
+
+    return found;
+}
+
 /**
  * 不写第二个参数时，哪些初始值默认"追踪内部"。
  *
@@ -1012,6 +1075,11 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
             writes: collectWrites(item.node, shallow, undefined, windows),
             borrows: borrowParamsOf(item.node)
         });
+    }
+
+    // 借来的参数又传出去了：接手的函数认不认？不认的话那边写它不会刷新 —— 说一声
+    for (const info of functions.values()) {
+        warnings.push(...borrowEscapeWarnings(info, functions, source));
     }
 
     // 第三遍：把派生局部变量登记进 `states`（`const minkey = arr[2]`）。

@@ -2749,6 +2749,16 @@ class Generator {
             return name;
         };
 
+        /** 本次函数自己的借用参数名（转发时要认出来，别当成"不是响应式路径"） */
+        const selfBorrows = new Set(
+            (node.type === 'FunctionDeclaration' ||
+            node.type === 'FunctionExpression' ||
+            node.type === 'ArrowFunctionExpression'
+                ? borrowParamsOf(node)
+                : []
+            ).map((item) => item.name)
+        );
+
         /**
          * 实参是不是"列表里的一项"：`arr[2]` / `map.get('a')` / 派生变量。
          *
@@ -2820,6 +2830,22 @@ class Generator {
 
                     // 没给这个参数：走默认值，没有路径可刷
                     if (!argument) return;
+
+                    // 实参是**本次函数自己的**借用参数：把上游的 `__borrow` 原样转下去。
+                    // 路径没变，不需要重新绑定（`$state(...)` 的级别检查也不该再做一遍）
+                    if (
+                        argument.type === 'Identifier' &&
+                        selfBorrows.has(argument.name) &&
+                        borrow.index === borrows[0].index
+                    ) {
+                        edits.push({
+                            start: child.range[1] - 1,
+                            end: child.range[1] - 1,
+                            text: ', __borrow'
+                        });
+
+                        return;
+                    }
 
                     const target = borrowArgOf(argument);
 

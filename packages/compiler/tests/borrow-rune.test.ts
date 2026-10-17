@@ -222,6 +222,53 @@ it('a level that is too low is flagged', () => {
     expect(found.join(' ')).toContain('requires level 2');
 });
 
+it('passing a borrowed param to a plain function is flagged', () => {
+    // 接手的函数不认借用 —— 那边写它就是写个普通对象，不刷新
+    const found = messages(`<script>
+    function touch(value) {
+        value.name = 'X';
+    }
+
+    function rename(item = $borrow(2)) {
+        touch(item);
+    }
+</script>
+<p>x</p>`);
+
+    expect(found.join(' ')).toContain('does not accept a borrowed parameter');
+});
+
+it('handing it to another borrowed position is fine', () => {
+    // 同一位置也是 `$borrow` —— 响应性接着传下去
+    expect(
+        messages(`<script>
+    function touch(value = $borrow(2)) {
+        value.name = 'X';
+    }
+
+    function rename(item = $borrow(2)) {
+        touch(item);
+    }
+</script>
+<p>x</p>`)
+    ).toEqual([]);
+});
+
+it('// grain-ignore silences it', () => {
+    expect(
+        messages(`<script>
+    function touch(value) {
+        value.name = 'X';
+    }
+
+    function rename(item = $borrow(2)) {
+        touch(item); // grain-ignore
+    }
+</script>
+<p>x</p>`)
+    ).toEqual([]);
+});
+
 it('an argument that is not a reactive path is flagged', () => {
     const found = messages(`<script>
     function rename(item = $borrow(2)) {
