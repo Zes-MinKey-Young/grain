@@ -164,33 +164,96 @@ const update$0 = creEle('button', { onclick: increment_$1 }, ["count is", () => 
 - 迭代一个 `$state` 数组能在数组变化时重渲染块的部分 (`push`, `splice`, …)。
 
 # 带级别的$state
-`$state()` 可以具有第二个参数，它指定变量的响应式级别。数组、ES6 集合和映射的默认级别是 `1`，即既追踪这个变量，也追踪变量内部发生的变化。其他的值默认级别是 `0`，即仅追踪该变量本身的重赋值。原始值类型不能拥有比 `0` 更高的级别。
+`$state()` 可以具有第二个参数，它指定变量的响应式级别。
 
-注意对象的默认级别也是 `0`，追踪其内部属性需要显式指定。例如 `let obj = $state({ a: 1}, 1);` 意味着当 `obj.a` 被改变时，引用了 `obj.a` 的地方会重新求值。但是，通过 `{#for}` 对 `obj` 进行迭代时并不能追踪 `obj.a` 的变化。这与追踪数组、ES6 集合和映射的行为不同。
+| 级别 | 追踪什么 |
+|---|---|
+| `0` | 这个变量本身被重赋值（`obj = { ... }`） |
+| `1` | 以上，**加上**它内部的变化（`obj.a = 2`） |
+| `2` | 以上，**并且允许从中取出一项**（借用） |
 
-当将一个高级变量中的属性或元素绑定到一个局部变量，且该变量不是原始类型且层级不为 `0` 时，该局部变量也会获得响应性，并且编译器能够记住从根响应变量获得该变量的路径。例如：
+数组、ES6 集合和映射的默认级别是 `1`。其他的值默认级别是 `0`，包括对象 —— 追踪其内部属性需要显式指定，例如 `let obj = $state({ a: 1 }, 1);`。原始值类型不能拥有比 `0` 更高的级别。
+
+注意通过 `{#for}` 对 `obj` 进行迭代时并不能追踪 `obj.a` 的变化，即使它是级别 `1` —— 迭代只认数组、`Map` 和 `Set`。
+
+## 取出一项：`$borrow`
+
+级别 `2` 才允许把一项取出来放进局部变量，并且保留响应性：
+
 ```grain
-<script>
-interface Person {
-    name: string,
-    language: string,
-}
-let arr: Person[] = $state([{ name: "qaqFei", language: "C++" }, { name: "MilkCOCO", language: "Rust" }, { name: "Minkey", language: "TypeScript" }]);
+let items = $state([{ title: 'a' }, { title: 'b' }], 2);   // 注意这个 2
 
+function rename(row = $borrow(2)) {
+    row.title = 'done';      // 只刷那一行
+}
+
+rename(items[1]);
+```
+
+`$borrow(level)` 是一个**参数声明**，意思是"这个函数只接受不低于该级别的响应式路径"。
+函数体不知道拿到的是哪条路径，所以由**调用点**把刷新接进去：
+
+```js
+const rename = function rename(row, __borrow) {
+    row.title = 'done';
+    __borrow?.("title");
+};
+
+rename(items[1], (p) => { __list$6?.setPath(1, p); });
+```
+
+产物里的 `row` 仍是普通对象 —— `$state` 和 `$borrow` 都不会用 Proxy 包装任何东西，
+所以 `instanceof` 和结构类型判断都不受影响。
+
+由此有两条，都是编译期检查的：
+
+- **级别是预算，借一次减一**。`const row = items[1]` 本身是级别 `1` —— 写它没问题，
+  但 `const deep = row.inner` 不再是借用（它不指向任何 `{#for}` 的行，精确刷它会瞄错地方）
+- **借用会结束**。重新排列或删除已有项（`sort` / `splice` / `shift` / `unshift` / `pop` /
+  `reverse` / `fill` / `clear`，或整体重赋值）之后，取出来的东西就失效了。此后写它没有
+  响应性，而**把它传给 `$borrow` 参数是编译错误**：
+
+  ```
+  `minkey` is no longer reactive here — its borrow ended before this call,
+  so `changeLang` cannot take it
+  ```
+
+  `push` / `Map.set` / `Set.add` 刻意**不**让借用失效：它们只追加，你持有的东西仍指向同一项。
+
+把借来的值传给一个不接受借用的函数会有提示（那边写它不会刷新），在调用那一行写
+`// grain-ignore` 可以消掉。传给另一个 `$borrow` 位置则会转发响应性，不用额外写什么。
+
+## 不用声明的借用（const 局部变量）
+
+用 `const` 取一项同样享受这套规则，只是不需要声明：
+
+```grain
 function modify() {
-    const minkey = arr[2];
-    minkey.language = "Grain";
+    const minkey = arr[2];           // 借用从这里开始
+    minkey.language = 'Grain';        // 刷那一行
+    arr.sort();                       // 借用到此为止
+    minkey.language = 'ECMAScript';   // 不再有响应性
 }
-</script>
+```
 
-{#for person of arr}
-    <div>
-        Name: {person.name}<br>
-        Language: {person.language}
-    </div>
-{/for}
+- 必须用 `const` 声明（用 `let` / `var` 会有提示，且不算借用）
+- 同根变量上**后一次取出让前一次失效**
+- 把根变量交给别的响应式变量（`other = arr`）同样让借用失效
 
-<button onclick="modify">Modify</button>
+注意失效是**位置敏感**的：在失效点**之前**那些写入仍然响应式，只有之后的不算。
+上面 `ok()` 里改的是 `arr[2].name`，而 `arr` 本身没被动过 —— 所以它是响应式的。
+
+```grain
+function ok() {
+    const minkey = arr[1];
+    minkey.name = 'Grain';        // 可以 —— 这里没动 arr 本身
+}
+
+function notTracked() {
+    const third = arr[2];
+    arr = [arr[0], arr[1]];       // 动了根变量……
+    third.name = 'Grain';         // ……从这句开始不再安排刷新
+}
 ```
 
 编译器知道 `minkey` 来自 `arr`，且路径是 `arr[2]`。当按钮被按下时，Minkey 的语言被修改为 Grain，这能够导致 `{#for}` 块的更新。
@@ -203,26 +266,15 @@ function modify() {
   （`arr[i]`）时静态判断不了，退回整个容器。
 - **改某一项内部的属性，只刷那一行里读了它的片段**。`{#for}` 里写 `arr[2].language =
   'Grain'`，重跑的只有第三行的 `{person.language}` —— 行里其它部分（`{Math.random()}`）
-  不算，其它行更是一点不动。
-- **同一个函数里不能再动根变量**。如果这个函数还写了根变量（重新排列、删元素、追加……），
-  这个局部变量就**不会**获得响应性。原因是：重新排列或者删除之后，它可能已经指向一个
-  不在数组里的东西，再写它就会去刷新一个跟它无关的数组 —— 而到底是哪一种情况，编译期
-  判断不了。所以这是一条静态规则：要么只写局部变量，要么别持有它。
+  不算，其它行更是一点不动。多级路径同样支持：`row.meta.author = 'x'` 走
+  `setPath(i, 'meta.author')`。
 
-```grain
-function ok() {
-    const minkey = arr[1];
-    minkey.name = 'Grain';        // 可以 —— 这里没动 arr 本身
-}
+`$state` 不改变它包装的东西的类型：`Map` 就是 `Map`。容器的改动靠**编译期**追踪方法
+实现 —— `scores.set(k, v)` / `map.delete(k)` / `set.add(v)` / `scores.clear()` 会换成
+`{#for}` 的 `setKey` / `removeKey` / `clear`；而 `{#for [key, value] of map}` 这种两项
+解构会自动拿第一项当 key，不用手写 `with key`。
 
-function notTracked() {
-    const third = arr[2];
-    arr = [arr[0], arr[1]];       // 动了根变量……
-    third.name = 'Grain';         // ……所以这次写入不安排任何刷新
-}
-```
-
-响应式变量在 VSCode 扩展中以黄色下划线标记。
+响应式变量（包括 `$borrow` 参数）在 VSCode 扩展中以黄色下划线标记。
 
 # bind
 `bind:` 用于双向绑定，可以把一个响应式变量绑到具有 `$bindable` 属性的子组件或者某些原生元素（比如 `<input>`）。

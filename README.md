@@ -494,6 +494,7 @@ let deep = $state({ a: 1 }, 1);    // level 1
 |---|---|
 | `0` | the variable being reassigned (`obj = { ... }`) |
 | `1` | that, **and** changes inside it (`obj.a = 2`) |
+| `2` | that, **and** one level may be borrowed out of it |
 
 Arrays, `Map` and `Set` default to `1` — they are containers, and their contents *are* what
 they hold. Everything else, **objects included**, defaults to `0`: tracking the inside has to
@@ -503,6 +504,79 @@ Because the level is a compile-time decision, a level-0 object is cheaper: `obj.
 not schedule anything. Note that `{#for}` over an object still will not track its properties
 even at level 1 — that is what arrays, `Map` and `Set` are for.
 
+### Borrowing an item out
+
+Level `2` unlocks taking a single item out into a local, and keeping the reactivity:
+
+```grain
+let items = $state([{ title: 'a' }, { title: 'b' }], 2);   // note the 2
+
+function rename(row = $borrow(2)) {
+    row.title = 'done';      // refreshes that row only
+}
+
+rename(items[1]);
+```
+
+`$borrow(level)` is a **parameter declaration**: "this function only accepts a reactive path
+of at least that level". The function body does not know which path it was handed, so the
+**call site** supplies the refresh:
+
+```js
+const rename = function rename(row, __borrow) {
+    row.title = 'done';
+    __borrow?.("title");
+};
+
+rename(items[1], (p) => { __list$6?.setPath(1, p); });
+```
+
+The emitted `rename` keeps `row` as a plain object — `$state` and `$borrow` never wrap
+anything in a Proxy, so `instanceof` and structural typing are unaffected.
+
+Two things follow from that, and both are checked at compile time:
+
+- **The level is a budget.** `const row = items[1]` is itself level `1` — it can be written
+  to, but `const deep = row.inner` is no longer a borrow (it does not point at any row of a
+  `{#for}`, so refreshing it precisely would aim at the wrong place)
+- **A borrow can end.** Reordering or removing rows (`sort` / `splice` / `shift` / `unshift`
+  / `pop` / `reverse` / `fill` / `clear`, or a whole reassignment) invalidates what you took
+  out. Writing it after that is not reactive — and *passing* it to a `$borrow` parameter is
+  an error:
+
+  ```
+  `minkey` is no longer reactive here — its borrow ended before this call,
+  so `changeLang` cannot take it
+  ```
+
+  `push` / `Map.set` / `Set.add` deliberately do **not** invalidate: they only add, so what
+  you hold still points at the same item.
+
+Handing a borrowed value to a function that does not accept one there is a warning (writes
+to it will not refresh). Put `// grain-ignore` on the call line to silence it. Handing it to
+another `$borrow` position forwards the reactivity — nothing to write.
+
+### Borrow rules for a local
+
+Taking an item out with `const` follows the same rules without any declaration:
+
+```grain
+function modify() {
+    const minkey = arr[2];          // borrow starts here
+    minkey.language = 'Grain';       // refreshes that row
+    arr.sort();                      // borrow ends here
+    minkey.language = 'ECMAScript';  // not reactive any more
+}
+```
+
+- The variable must be `const`
+- A **second** borrow of the same root ends the first
+- Assigning the root elsewhere (`other = arr`) ends it too
+
+`$state` never changes the type of what it wraps: `Map` stays `Map`. Container methods are
+tracked at compile time instead — `scores.set(k, v)` / `map.delete(k)` / `set.add(v)` /
+`scores.clear()` become `setKey` / `removeKey` / `clear` on the `{#for}`, and a
+`{#for [key, value] of map` with two destructured names picks `key` automatically.
 ### Locals taken out of a reactive variable
 
 Assign a property or element of a level-1 variable to a local, and the local keeps the
