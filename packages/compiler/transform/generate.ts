@@ -2323,17 +2323,30 @@ class Generator {
         const render = `render$${this.counter++}`;
         const list = `__list$${this.counter++}`;
 
-        // `with key = ...`：键是拿循环变量算的，所以参数就是那个绑定模式
-        const key = node.key ? `(${pattern}) => (${node.key.raw})` : 'null';
-
         // `{#for [k, v] of map}`：项是 [键, 值] 拼出来的。`map.set(k, v)` 只给键和值，
         // 更新那一项之前得先拼回项的形状（`set.add(v)` 和普通数组用不着）
         const pair = left.type === 'ArrayPattern' ? left.elements : null;
         const names = pair
             ? pair.map((element) => (element ? this.slice(element.range) : 'undefined'))
             : [];
+
+        // `with key = ...` 没写、而解构正好是两项（`[k, v]`）时，第一项天然就是键 ——
+        // `{#for [key, value] of map}` 本来就是 Map 的写法，`[i, item] of xs.entries()`
+        // 同理。不自动认的话这两个形状都得手写 `with key = key`，而漏写的后果是
+        // `setKey` / `removeKey` 一条都生成不出来（静默不刷新）
+        const autoKey = !node.key && names.length === 2 ? names[0] : null;
+
+        // 键是拿循环变量算的，所以参数就是那个绑定模式
+        const key = node.key
+            ? `(${pattern}) => (${node.key.raw})`
+            : autoKey
+              ? `(${pattern}) => (${autoKey})`
+              : 'null';
+
         const entry =
-            node.key && names.length === 2 ? `(${names.join(', ')}) => [${names.join(', ')}]` : 'null';
+            (node.key || autoKey) && names.length === 2
+                ? `(${names.join(', ')}) => [${names.join(', ')}]`
+                : 'null';
 
         // 项带下标：`entries()` 这种，源不是容器变量本身
         const indexed = node.content.right.type !== 'Identifier';
@@ -2455,7 +2468,8 @@ class Generator {
             if (known) known.push(list);
             else this.forSources.set(source, [list]);
 
-            if (node.key) this.forKeyed.add(list);
+            // 自动认出来的第一项也算（`{#for [k, v] of map}` 没写 `with key`）
+            if (node.key || autoKey) this.forKeyed.add(list);
 
             // 项带下标的（`entries()`）跟普通数组不一样，见 forShifted
             if (node.content.right.type !== 'Identifier') this.forShifted.add(list);

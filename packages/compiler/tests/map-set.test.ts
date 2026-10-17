@@ -235,6 +235,52 @@ it('setKey locates the row through the key map, not by scanning', async () => {
     }
 });
 
+it('a two-item destructuring for picks its key automatically', async () => {
+    // `{#for [key, value] of map}` 本来就是 Map 的写法，第一项天然是键 ——
+    // 不写 `with key` 也该认。漏认的话 `setKey` / `removeKey` 一条都生成不出来
+    const target = await mount(`<script>
+    let scores = $state(new Map([['ada', 1], ['bob', 2]]));
+
+    function score(name, value) {
+        scores.set(name, value);
+    }
+
+    function drop(name) {
+        scores.delete(name);
+    }
+</script>
+{#for [name, value] of scores}
+    <p class="srow">{name} = {value}</p>
+{/for}
+<button id="set" onclick={() => { score('bob', 99); }}>set</button>
+<button id="del" onclick={() => { drop('ada'); }}>del</button>`);
+
+    expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 2']);
+
+    click(target, 'set');
+    expect(rows(target, 'srow')).toEqual(['ada = 1', 'bob = 99']);
+
+    click(target, 'del');
+    expect(rows(target, 'srow')).toEqual(['bob = 99']);
+});
+
+it('the auto key is also used for locating the row', () => {
+    // 键认出来了才会登记成 keyed —— `setKey` 只对 keyed 的列表生成
+    const js = compile(`<script>
+    let scores = $state(new Map([['ada', 1]]));
+
+    function score(name, value) {
+        scores.set(name, value);
+    }
+</script>
+{#for [name, value] of scores}
+    <p>{name}</p>
+{/for}`, { filename: 'App.grain' }).js;
+
+    expect(js).toMatch(/key: \(\[name, value\]\) => \(name\)/);
+    expect(js).toMatch(/\.setKey\(name, value\)/);
+});
+
 it('a plain array is not wrapped (precise calls already cover it)', () => {
     // 数组的 push / splice 编译期就换成了 list.push(...)，再包 reactiveArray 会刷两遍
     const js = compile(`<script>
