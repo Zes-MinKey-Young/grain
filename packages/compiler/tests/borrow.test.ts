@@ -176,6 +176,54 @@ it('a borrowed local is one level down', () => {
     ).toEqual([]);
 });
 
+it('a second-level borrow falls back to the whole list', () => {
+    // `pathOf` 把 `.get()` 也算进路径，所以第二层认得出来（`map['a']['x']`），
+    // 而 `$state(map, 3)` 的预算够。
+    //
+    // 但那一项**不指向 `{#for}` 的任何一行** —— 生成 `setPath` 只会瞄准第一层，
+    // 刷错地方。所以 `cellOf` 对多层链返回 null，靠整块比对兜底（正确，但不精确）
+    const source = `<script>
+    let map = $state(new Map([['a', new Map([['x', { name: 'x' }]])]]), 3);
+
+    function f() {
+        const inner = map.get('a')!;
+        const item = inner.get('x')!;
+
+        item.name = 'X';
+    }
+</script>
+{#for [key, value] of map with key = key}
+    <span>{key}</span>
+{/for}
+<button onclick={f}>go</button>`;
+
+    const js = compile(source, { filename: 'App.grain' }).js;
+
+    // 不生成瞄错行的精确调用
+    expect(js).not.toMatch(/setPath/);
+    // 但有整块刷新兜底
+    expect(js).toMatch(/update\$\d+\?\.\(/);
+});
+
+it('a single-level chain still refreshes precisely', () => {
+    // 对照：一层链（`map['a']`）正好是 for 的一行 —— 精确
+    const js = compile(`<script>
+    let map = $state(new Map([['a', { name: 'a' }], ['b', { name: 'b' }]]), 2);
+
+    function f() {
+        const item = map.get('a')!;
+
+        item.name = 'A';
+    }
+</script>
+{#for [key, value] of map with key = key}
+    <span>{key}</span>
+{/for}
+<button onclick={f}>go</button>`, { filename: 'App.grain' }).js;
+
+    expect(js).toMatch(/setPath\('a', "name"\)/);
+});
+
 it('level 1 does not allow taking an item out', async () => {
     // 默认 level 1：只做"整块追踪内部"—— 容器里变了就重跑整段。
     // 把一项取出来写它**不算**写容器，所以不会有响应性。

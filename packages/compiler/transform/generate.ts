@@ -2550,6 +2550,10 @@ class Generator {
                 // 刷新一个跟它无关的格子没有意义
                 if (!borrowAlive(state, left.range[0])) return null;
 
+                // 多层链（`map['a']['x']`）不对应 `{#for}` 的任何一行 —— 那一项在
+                // 更深一层，`setPath` 只会瞄准第一层。交给片段刷新 / 整块比对
+                if ((state.fromPath.match(/\[/g) ?? []).length > 1) return null;
+
                 // 根变量名：`arr[2]` / `arr`（动态下标时 fromPath 退化成根）
                 const name = state.fromPath.split('[')[0];
                 const lists = listsOf(name);

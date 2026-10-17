@@ -206,27 +206,42 @@ function unwrapExpression(node: TSESTree.Node): TSESTree.Node {
 function takeoutOf(
     init: TSESTree.Node,
     states: Map<string, StateInfo>,
-    source: string
+    source: string,
+    /**
+     * 本次扫描里**已经认出**的派生：名字 -> 完整路径（`map['a']`）/ 级别。
+     *
+     * 这些还没进 `states`（那边要等借用分析整个跑完才登记），但下一层借用要拿它们
+     * 拼链（`inner.get('x')` 的路径应该是 `map['a']['x']`，不是 `inner['x']`），
+     * 也要靠它们的级别判断"还允许借吗"
+     */
+    seen?: { chains: Map<string, string>; levels: Map<string, number> }
 ): { root: string; path: string; index?: string; map: boolean; bracket: boolean } | null {
     // `map.get('b')!` 这种：先剥掉断言，不然认不出来
     init = unwrapExpression(init);
 
+    /** 这个名字现在的级别（顶层 `$state` 或本次扫出来的派生） */
+    const levelOf = (name: string): number | undefined =>
+        seen?.levels.get(name) ?? states.get(name)?.level;
+
     // `arr[2]` / `arr.prop`
     if (init.type === 'MemberExpression') {
         const root = rootOf(init);
-        const state = root ? states.get(root) : undefined;
+        const level = root ? levelOf(root) : undefined;
 
         // 得是显式开了借用（level 2）的容器：level 1 只做整块追踪
-        if (!root || !state || state.level < BORROW_LEVEL) return null;
+        if (!root || level === undefined || level < BORROW_LEVEL) return null;
 
         const cell = init as TSESTree.MemberExpression;
+        const state = states.get(root);
+        const full = pathOf(init, seen?.chains);
 
         return {
             root,
-            path: pathOf(init) ?? root,
+            // 整条链：`arr[2]` / `inner[0]`（inner 是派生的话就是它自己的链 + `[0]`）
+            path: full ?? root,
             // 下标表达式原样记下：动态的（`arr[i]`）也能定位到那一行
             index: cell.computed ? slice(source, cell.property.range) : undefined,
-            map: isMapState(state),
+            map: state ? isMapState(state) : false,
             bracket: cell.computed
         };
     }
@@ -245,19 +260,20 @@ function takeoutOf(
         }
 
         const root = callee.object.name;
-        const state = states.get(root);
+        const level = levelOf(root);
 
         // 不看初始值是不是 `new Map(...)`：借出来的 Map（`const inner = map.get('a')!`）
         // 初始值是别的，运行时却确实是 Map。level 的预算已经说明"这里还允许借"。
         // 数组上没有 `get`，写了就是用户自己的错，不去猜
-        if (!state || state.level < BORROW_LEVEL) return null;
+        if (level === undefined || level < BORROW_LEVEL) return null;
 
         const key = init.arguments[0];
 
         return {
             root,
-            // 路径退化成根：Map 的项没有"路径"可言，靠 key 定位
-            path: root,
+            // 记**整条链**：`map['a']`，再借一层就是 `map['a']['x']`。
+            // 前缀比较（`touches`）靠它把"写了哪一项"和"谁读了那一项"对上
+            path: pathOf(init, seen?.chains) ?? root,
             index: key ? slice(source, key.range) : undefined,
             map: true,
             bracket: false
@@ -293,6 +309,16 @@ function analyzeBorrows(
     const warnings: BorrowWarning[] = [];
     const derived: DerivedLocal[] = [];
 
+    /**
+     * 本次扫描认出的派生：名字 -> 完整路径（`map['a']['x']`）/ 级别。
+     *
+     * 它们还没进 `states`（那边要等整个借用分析跑完才登记），但下一层借用要拿路径
+     * 拼链、拿级别判断还允不允许借。
+     */
+    const chains = new Map<string, string>();
+    const levels = new Map<string, number>();
+    const seen = { chains, levels };
+
     /** 根 -> 它当前活着的那个派生名 */
     const alive = new Map<string, string>();
 
@@ -309,6 +335,11 @@ function analyzeBorrows(
         if (window) window.to = at;
 
         alive.delete(root);
+
+        // 失效之后不该再往下借 —— 链和级别一并清掉（`pathOf` 会退回名字本身，
+        // 那正好表示"不认识了"）
+        chains.delete(name);
+        levels.delete(name);
     };
 
     simpleTraverse(node, {
@@ -320,7 +351,7 @@ function analyzeBorrows(
 
                     if (!init || declarator.id.type !== 'Identifier') continue;
 
-                    const taken = takeoutOf(init, states, source);
+                    const taken = takeoutOf(init, states, source, seen);
 
                     if (!taken) continue;
 
@@ -360,6 +391,14 @@ function analyzeBorrows(
                         to: Infinity,
                         root: taken.root
                     });
+
+                    // 下一层借用要靠这两个：路径拼链、级别判断还允不允许借
+                    chains.set(declarator.id.name, taken.path);
+                    levels.set(
+                        declarator.id.name,
+                        Math.max(0, (seen.levels.get(taken.root) ?? states.get(taken.root)!.level) - 1)
+                    );
+
                     derived.push({
                         name: declarator.id.name,
                         root: taken.root,
@@ -381,7 +420,10 @@ function analyzeBorrows(
             // 这种写法（level 示例就是）
             const disrupted = disruptsBorrow(child);
 
-            if (disrupted && states.has(disrupted)) kill(disrupted, child.range[0]);
+            // `levels` 里也有本次扫出来的派生 —— 它们还不在 `states` 里
+            if (disrupted && (states.has(disrupted) || levels.has(disrupted))) {
+                kill(disrupted, child.range[0]);
+            }
             for (const root of escapedRoots(child, states)) kill(root, child.range[0]);
 
             const name = writtenName(child);
@@ -547,6 +589,31 @@ export function pathOf(
         return aliases?.get(node.name) ?? node.name;
     }
 
+    // `map.get('b')`：Map 的取出。路径写成 `map['b']`，跟数组的 `arr[2]` 一个形状
+    // —— 前缀比较（`touches`）才能跨层对上（`map['a']['x'].name` vs `map['a']`）
+    if (node.type === 'CallExpression') {
+        const callee = node.callee;
+
+        if (
+            callee.type !== 'MemberExpression' ||
+            callee.property.type !== 'Identifier' ||
+            callee.property.name !== 'get'
+        ) {
+            return null;
+        }
+
+        const base = pathOf(callee.object, aliases);
+        const key = node.arguments[0];
+
+        if (!base || !key) return null;
+
+        // 只认字面量 key：动态的说不清是哪一项，退回容器本身
+        if (key.type === 'Literal' && typeof key.value === 'string') return `${base}['${key.value}']`;
+        if (key.type === 'Literal' && typeof key.value === 'number') return `${base}[${key.value}]`;
+
+        return base;
+    }
+
     if (node.type !== 'MemberExpression') return null;
 
     const base = pathOf(node.object, aliases);
@@ -573,9 +640,17 @@ export function pathOf(
     return base;
 }
 
-/** 路径按 `.` / `[` 切开，用来做前缀比较 */
+/**
+ * 路径按 `.` / `[` 切开，用来做前缀比较。
+ *
+ * 两种下标都要认：`arr[2]`（数字）和 `map['a']`（Map 的字符串 key，`pathOf` 会
+ * 带上引号写成 `map['a']`）。
+ */
 function segmentsOf(path: string): string[] {
-    return path.replace(/\[(\d+)\]/g, '.$1').split('.');
+    return path
+        .replace(/\[\s*'([^']*)'\s*\]/g, '.$1')
+        .replace(/\[\s*(\d+)\s*\]/g, '.$1')
+        .split('.');
 }
 
 /**
@@ -906,7 +981,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
             // 借出来的东西**降一级**：`$state(arr, 2)` 里 `const minkey = arr[2]` 的
             // minkey 是 level 1 —— 它能刷自己那一项，但**不能再往下借**
             //（`const deep = minkey.inner` 不算借用，否则可以无限借下去）
-            level: Math.max(0, states.get(item.root)!.level - 1),
+            level: Math.max(0, (states.get(item.root)?.level ?? 0) - 1),
             // 它对应的路径：`minkey` -> `arr[2]`
             fromPath: item.path,
             // 下标表达式：动态的（`arr[i]`）也记下，`setPath` 要靠它定位
