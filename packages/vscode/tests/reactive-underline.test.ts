@@ -140,6 +140,47 @@ it('a template literal inside a handler is not scanned as text', () => {
     expect(found).toEqual(['time', 'progressVal', 'progressVal', 'time']);
 });
 
+it('a $borrow parameter is underlined too', () => {
+    // 它接的是调用点那条响应式路径，函数体里写它就是写根 —— 也是响应式的
+    const source = `<script>
+    function rename(item = $borrow(2)) {
+        item.title = 'X';
+        item.meta.author = 'Z';
+    }
+</script>
+<p>x</p>`;
+
+    // 参数声明 + 函数体里两处
+    expect(marked(source)).toEqual(['item', 'item', 'item']);
+});
+
+it('a plain parameter is not underlined', () => {
+    const source = `<script>
+    function greet(name = 'world') {
+        return name;
+    }
+</script>
+<p>x</p>`;
+
+    expect(marked(source)).toEqual([]);
+});
+
+it('the underline starts at the name, not the type annotation', () => {
+    const source = `<script>
+    interface Todo { title: string }
+    function rename(item: Todo = $borrow(2)) {
+        item.title = 'X';
+    }
+</script>
+<p>x</p>`;
+
+    const found = analyze(source, 'App.grain').stateReferences();
+
+    for (const reference of found) {
+        expect(source.slice(reference.start, reference.end)).toBe('item');
+    }
+});
+
 it('the offset is not doubled for template expressions', () => {
     // 表达式节点的 range 就是源码绝对偏移，再加一次 contentStart 会飞出文件末尾
     // （表现是插值那个位置 slice 出来是空串，装饰画到空气上）

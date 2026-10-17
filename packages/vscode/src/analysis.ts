@@ -305,8 +305,12 @@ function borrowProblems(source: string, root: Root | null): SemanticProblem[] {
     for (const block of [root.script, root.module, root.onmount]) {
         if (!block) continue;
 
-        for (const warning of analyzeScript(block.content, source).warnings) {
-            found.push({ start: warning.start, end: warning.end, message: warning.message });
+        const analysis = analyzeScript(block.content, source);
+
+        // 提示和错误都走 `semantic()` —— 那边一律按 Error 报，所以 `$borrow` 的契约
+        // 违反在编辑器里是红线（这正是它跟"借用越界"那种提示的区别）
+        for (const problem of [...analysis.warnings, ...analysis.errors]) {
+            found.push({ start: problem.start, end: problem.end, message: problem.message });
         }
     }
 
@@ -393,6 +397,21 @@ function stateReferencesOf(
             // 派生局部变量的有效期：过了就不再有响应性，不该画下划线
             if (state.aliveTo !== undefined) {
                 windows.set(state.name, [state.aliveFrom ?? 0, state.aliveTo]);
+            }
+        }
+
+        // `$borrow` 接进来的参数也是响应式的 —— 函数体里写它就是在写调用点那条路径
+        for (const info of analysis.functions.values()) {
+            for (const borrow of info.borrows) {
+                const param = info.node.params[borrow.index];
+
+                if (param?.type !== 'AssignmentPattern' || param.left.type !== 'Identifier') continue;
+
+                // 参数名那一段（可能带类型注解，按名字长度裁）
+                names.set(borrow.name, [
+                    param.left.range[0],
+                    param.left.range[0] + borrow.name.length
+                ]);
             }
         }
     }

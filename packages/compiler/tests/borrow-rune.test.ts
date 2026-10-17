@@ -39,8 +39,12 @@ beforeAll(() => {
 
 const js = (source: string): string => compile(source, { filename: 'App.grain' }).js;
 
-const messages = (source: string): string[] =>
-    compile(source, { filename: 'App.grain' }).warnings.map((warning) => warning.message);
+/** 提示 + 错误都算（ 的契约违反在 errors 里） */
+const messages = (source: string): string[] => {
+    const result = compile(source, { filename: 'App.grain' });
+
+    return [...result.warnings, ...result.errors].map((problem) => problem.message);
+};
 
 const mount = async (source: string): Promise<Element> => {
     const compiled = compile(source, { filename: 'App.grain', runtimeModule: runtimePath }).js;
@@ -294,6 +298,61 @@ it('// grain-ignore silences it', () => {
 </script>
 <p>x</p>`)
     ).toEqual([]);
+});
+
+it('the contract violations land in errors, not warnings', () => {
+    // 提示（产物照跑）和错误（契约违反）分开 —— 构建该让后者失败
+    const low = compile(`<script>
+    let arr = $state([{ name: 'a' }]);
+
+    function rename(item = $borrow(2)) {
+        item.name = 'X';
+    }
+</script>
+{#for row of arr}
+    <span>{row.name}</span>
+{/for}
+<button onclick={() => { rename(arr[0]); }}>go</button>`, { filename: 'App.grain' });
+
+    expect(low.errors.map((problem) => problem.message).join(' ')).toContain('requires level 2');
+    expect(low.warnings).toEqual([]);
+
+    const plain = compile(`<script>
+    function rename(item = $borrow(2)) {
+        item.name = 'X';
+    }
+</script>
+<button onclick={() => { rename({ name: 'a' }); }}>go</button>`, { filename: 'App.grain' });
+
+    expect(plain.errors.map((problem) => problem.message).join(' ')).toContain(
+        'pass a reactive path'
+    );
+    expect(plain.warnings).toEqual([]);
+});
+
+it('passing an expired borrow says so', () => {
+    // 它**曾经**是响应式的，只是借用已经结束 —— 跟"压根不是路径"是两回事
+    const result = compile(`<script>
+    let arr = $state([{ name: 'a' }, { name: 'b' }], 2);
+
+    function rename(item = $borrow(2)) {
+        item.name = 'X';
+    }
+
+    function go() {
+        const row = arr[0];
+
+        arr.unshift({ name: 'c' });
+        rename(row);
+    }
+</script>
+{#for item of arr}
+    <span>{item.name}</span>
+{/for}`, { filename: 'App.grain' });
+
+    expect(result.errors.map((problem) => problem.message).join(' ')).toContain(
+        'no longer reactive here'
+    );
 });
 
 it('an argument that is not a reactive path is flagged', () => {

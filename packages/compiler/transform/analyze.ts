@@ -119,7 +119,14 @@ export interface BorrowWindow {
 export interface ScriptAnalysis {
     states: Map<string, StateInfo>;
     functions: Map<string, FunctionInfo>;
+    /** 提示：产物照跑，只是那一下不会刷新 */
     warnings: BorrowWarning[];
+    /**
+     * 错误：契约违反了（ 的级别不够、实参不是响应式路径）。
+     *
+     * 跟 warnings 分开，构建那边可以让它失败。
+     */
+    errors: BorrowWarning[];
 }
 
 /**
@@ -1058,6 +1065,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     // 写入"，否则会为一条早就跟根变量无关的路径生成刷新。
     const windows = new Map<string, BorrowWindow>();
     const warnings: BorrowWarning[] = [];
+    const errors: BorrowWarning[] = [];
     const derived: DerivedLocal[] = [];
 
     for (const item of fnNodes) {
@@ -1115,7 +1123,7 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
         });
     }
 
-    return { states, functions, warnings };
+    return { states, functions, warnings, errors };
 }
 
 /**

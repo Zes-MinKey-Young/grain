@@ -116,6 +116,13 @@ export interface CompileResult {
      * 编辑器那边读同一份（见 `packages/vscode`）。
      */
     warnings: BorrowWarning[];
+    /**
+     * 编译**错误**：`$borrow` 的契约被违反了。
+     *
+     * 两类：实参的级别不够（`$borrow(2)` 收到 level 1 的容器）、实参不是响应式路径
+     * （`rename({ ... })`）。产物照样生成了，但构建那边该让它们失败。
+     */
+    errors: BorrowWarning[];
 }
 
 /** 一个动态片段：属于哪个元素的调度器、编号是多少、依赖哪些 state */
@@ -920,7 +927,8 @@ class Generator {
         return {
             js: transpile(output.join('\n'), this.filename),
             css,
-            warnings: this.analysis?.warnings ?? []
+            warnings: this.analysis?.warnings ?? [],
+            errors: this.analysis?.errors ?? []
         };
     }
 
@@ -2865,12 +2873,23 @@ class Generator {
                     const target = borrowArgOf(argument);
 
                     if (!target) {
-                        this.analysis?.warnings.push({
+                        // 两种原因分开说：派生变量**曾经**是响应式的、只是借用已经结束，
+                        // 跟"压根没传响应式的东西"是两回事
+                        const named = argument.type === 'Identifier' ? argument.name : null;
+                        const state = named ? this.analysis?.states.get(named) : undefined;
+                        const expired =
+                            state?.fromPath !== undefined &&
+                            state.fromIndex !== undefined &&
+                            !borrowAlive(state, argument.range[0]);
+
+                        this.analysis?.errors.push({
                             start: argument.range[0],
                             end: argument.range[1],
-                            message:
-                                `\`${child.callee.name}\` takes a borrowed parameter (level ${borrow.level}) — ` +
-                                'pass a reactive path such as `items[2]` or `map.get(key)`'
+                            message: expired
+                                ? `\`${named}\` is no longer reactive here — its borrow ended ` +
+                                  `before this call, so \`${child.callee.name}\` cannot take it`
+                                : `\`${child.callee.name}\` takes a borrowed parameter (level ${borrow.level}) — ` +
+                                  'pass a reactive path such as `items[2]` or `map.get(key)`'
                         });
 
                         return;
@@ -2881,7 +2900,7 @@ class Generator {
                     const level = this.analysis?.states.get(target.root)?.level ?? 0;
 
                     if (level < borrow.level) {
-                        this.analysis?.warnings.push({
+                        this.analysis?.errors.push({
                             start: argument.range[0],
                             end: argument.range[1],
                             message:
@@ -3101,7 +3120,7 @@ class Generator {
 function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
     if (list.length === 0) return null;
 
-    const merged: ScriptAnalysis = { states: new Map(), functions: new Map(), warnings: [] };
+    const merged: ScriptAnalysis = { states: new Map(), functions: new Map(), warnings: [], errors: [] };
 
     for (const item of list) {
         for (const [name, info] of item.states) {
@@ -3113,6 +3132,7 @@ function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
         }
 
         merged.warnings.push(...item.warnings);
+        merged.errors.push(...item.errors);
     }
 
     return merged;

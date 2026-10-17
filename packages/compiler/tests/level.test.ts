@@ -357,10 +357,10 @@ it("the level example itself: only the row that changed is refreshed", async () 
     // 第一个按钮：`modify`
     //
     //     const minkey = arr[2];
-    //     arr.unshift({ ... });      <- 挪动了已有项，借用到此为止
-    //     minkey.language = 'Grain'; <- 越界了，不刷
+    //     arr.unshift({ ... });          <- 挪动了已有项，借用到此为止
+    //     changeLang(minkey, 'Grain');   <- 传一个已经失效的借用 -> 编译错误
     //
-    // 所以数组多一项，而 `Grain` 那句不生效
+    // 所以数组多一项，而 `Grain` 不生效（运行时 `__borrow` 是 undefined，`?.` 兜住）
     (target.querySelectorAll("button")[0] as HTMLElement).click();
 
     expect(rows()).toHaveLength(4);
@@ -372,12 +372,12 @@ it("the level example itself: only the row that changed is refreshed", async () 
     // 原有三行的 Ident 一个没动 —— `unshift` 走的是精确插入
     expect([1, 2, 3].map((at) => ident(at))).toEqual(before);
 
-    // 而越界那句有提示（`unshift` 在"会移动已有项"的名单里）
+    // 而那是编译**错误** —— 它把失效的借用传给了 `$borrow` 参数
     expect(
         compile(source, { filename: "App.grain" })
-            .warnings.map((warning) => warning.message)
+            .errors.map((problem) => problem.message)
             .join(" ")
-    ).toContain("`minkey` is no longer reactive");
+    ).toContain("`minkey` is no longer reactive here");
 
     // 第二个按钮：`modifyMap` —— Map 那一行的语言换掉，Ident 不动（精确刷新）
     (target.querySelectorAll("button")[1] as HTMLElement).click();
