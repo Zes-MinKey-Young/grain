@@ -135,8 +135,35 @@ it('the call site wires a refresh function in', () => {
 {/for}
 <button onclick={() => { rename(arr[1]); }}>go</button>`);
 
-    // `rename(arr[1])` -> 多一个"路径 -> 刷新"的回调
-    expect(out).toMatch(/rename\(arr\[1\], \(p\) => __list\$\d+\?\.setPath\(1, p\)\)/);
+    // `rename(arr[1])` -> 多一个"路径 -> 刷新"的回调（每个 for 各一份）
+    expect(out).toMatch(/rename\(arr\[1\], \(p\) => \{ __list\$\d+\?\.setPath\(1, p\); \}\)/);
+});
+
+it('every for reading the same container gets refreshed', async () => {
+    // 一个容器喂给两个 for（一个显示 title、一个显示 author）—— 只刷第一个的话
+    // 另一半 DOM 不动
+    const target = await mount(`<script>
+    let rows = $state([{ title: 'a', meta: { author: 'A' } }, { title: 'b', meta: { author: 'B' } }], 2);
+
+    function rename(item = $borrow(2)) {
+        item.meta.author = item.meta.author + '!';
+    }
+</script>
+{#for row of rows}
+    <span>{row.title}</span>
+{/for}
+{#for row of rows}
+    <em>{row.meta.author}</em>
+{/for}
+<button id="go" onclick={() => { rename(rows[1]); }}>go</button>`);
+
+    const authors = () => [...target.querySelectorAll('em')].map((node) => node.textContent);
+
+    expect(authors()).toEqual(['A', 'B']);
+
+    (target.querySelector('#go') as HTMLElement).click();
+
+    expect(authors()).toEqual(['A', 'B!']);
 });
 
 it('a write through a borrowed param refreshes exactly that row', async () => {

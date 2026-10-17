@@ -2600,16 +2600,31 @@ class Generator {
         const skip = new Set<string>();
 
         /**
-         * 记下这次改动：紧跟原语句插一句精确调用，并（多半）顶掉整块比对
+         * 记下这次改动：紧跟原语句插一句精确调用，并（多半）顶掉整块比对。
+         *
+         * `list` 是数组 —— 同一个容器喂给几个 `{#for}` 就要刷几份，只刷第一个的话
+         * 剩下的那份 DOM 不动（数据改了、界面不更新）。
          */
-        const precise = (list: string, call: string, node: TSESTree.Node, parent?: TSESTree.Node): void => {
+        const precise = (
+            list: string | string[],
+            call: string,
+            node: TSESTree.Node,
+            parent?: TSESTree.Node
+        ): void => {
             const statement = parent?.type === 'ExpressionStatement' ? parent : node;
+            const targets = typeof list === 'string' ? [list] : list;
 
-            edits.push({ start: statement.range[1], end: statement.range[1], text: ` ${list}?.${call};` });
+            for (const target of targets) {
+                edits.push({
+                    start: statement.range[1],
+                    end: statement.range[1],
+                    text: ` ${target}?.${call};`
+                });
 
-            const slot = this.forSlots.get(list);
+                const slot = this.forSlots.get(target);
 
-            if (slot && !bulk) skip.add(`${slot.update}#${slot.index}`);
+                if (slot && !bulk) skip.add(`${slot.update}#${slot.index}`);
+            }
         };
 
         /**
@@ -2640,7 +2655,7 @@ class Generator {
         const cellOf = (
             left: TSESTree.MemberExpression,
             parent?: TSESTree.Node
-        ): { list: string; index: string } | null => {
+        ): { lists: string[]; index: string } | null => {
             // `items[i].prop`：下标是表达式，可能有副作用，提成临时变量
             if (
                 left.object.type === 'MemberExpression' &&
@@ -2652,7 +2667,7 @@ class Generator {
                 if (lists.length === 0) return null;
 
                 return {
-                    list: lists[0],
+                    lists,
                     index: reuse(this.slice(left.object.property.range), left.object.property.range, parent)
                 };
             }
@@ -2680,7 +2695,7 @@ class Generator {
                 if (lists.length === 0) return null;
 
                 return {
-                    list: lists[0],
+                    lists,
                     index: reuse(state.fromIndex, state.nameRange, parent)
                 };
             }
@@ -2696,7 +2711,7 @@ class Generator {
 
                 if (lists.length === 0) return null;
 
-                return { list: lists[0], index: reuse(take.key, take.keyRange, parent) };
+                return { lists, index: reuse(take.key, take.keyRange, parent) };
             }
 
             return null;
@@ -2766,7 +2781,7 @@ class Generator {
          */
         const borrowArgOf = (
             argument: TSESTree.Node
-        ): { list: string; index: string; root: string } | null => {
+        ): { lists: string[]; index: string; root: string } | null => {
             // `map.get('a')`
             if (argument.type === 'CallExpression') {
                 const take = mapKeyOf(argument);
@@ -2775,7 +2790,7 @@ class Generator {
 
                 const lists = listsOf(take.root);
 
-                return lists.length === 0 ? null : { list: lists[0], index: take.key, root: take.root };
+                return lists.length === 0 ? null : { lists, index: take.key, root: take.root };
             }
 
             // `arr[2]`
@@ -2789,7 +2804,7 @@ class Generator {
                 if (lists.length === 0) return null;
 
                 return {
-                    list: lists[0],
+                    lists,
                     index: reuse(this.slice(argument.property.range), argument.property.range),
                     root: argument.object.name
                 };
@@ -2806,7 +2821,7 @@ class Generator {
 
                 return lists.length === 0
                     ? null
-                    : { list: lists[0], index: state.fromIndex, root: state.fromPath.split('[')[0] };
+                    : { lists, index: state.fromIndex, root: state.fromPath.split('[')[0] };
             }
 
             return null;
@@ -2862,7 +2877,7 @@ class Generator {
                     }
 
                     // 级别检查：实参的级别不够就是契约违反
-                    // 级别看**容器变量**的（`target.list` 是列表名 `__list$6`，查不到）
+                    // 级别看**容器变量**的（`target.lists` 是列表名 `__list$6`，查不到）
                     const level = this.analysis?.states.get(target.root)?.level ?? 0;
 
                     if (level < borrow.level) {
@@ -2876,10 +2891,15 @@ class Generator {
                         });
                     }
 
+                    // 同一个容器可能喂给几个 for —— 每一份都得刷
+                    const body = target.lists
+                        .map((one) => `${one}?.setPath(${target.index}, p);`)
+                        .join(' ');
+
                     edits.push({
                         start: child.range[1] - 1,
                         end: child.range[1] - 1,
-                        text: `, (p) => ${target.list}?.setPath(${target.index}, p)`
+                        text: `, (p) => { ${body} }`
                     });
 
                     return;
@@ -2921,7 +2941,7 @@ class Generator {
 
                     if (cell && left.type === 'MemberExpression' && left.property.type === 'Identifier') {
                         precise(
-                            cell.list,
+                            cell.lists,
                             `setPath(${cell.index}, ${JSON.stringify(left.property.name)})`,
                             child,
                             parent
