@@ -11,7 +11,7 @@
 
 <ul>
     {#for post of posts}
-        <li><a href={`/post/${post.id}`}>{post.title}</a></li>
+        <li><a href={`/posts/${post.id}`}>{post.title}</a></li>
     {/for}
 </ul>
 

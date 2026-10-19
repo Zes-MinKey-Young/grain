@@ -27,14 +27,17 @@ const AST_QUERY = 'grain-ast';
 /**
  * `grain:routes` -> 路由表。
  *
- * 目录即路由：`src/routes` 下每个 `.grain` 是一个页面。
+ * 目录即路由：`src/routes` 下每个 **`+page.grain`** 是一个页面，跟 SvelteKit 一个路子。
  *
  * ```
- * src/routes/index.grain        ->  /
- * src/routes/about.grain        ->  /about
- * src/routes/post/[id].grain    ->  /post/:id
- * src/routes/[...all].grain     ->  兜底（其余都归它）
+ * src/routes/+page.grain                ->  /
+ * src/routes/about/+page.grain          ->  /about
+ * src/routes/posts/[id]/+page.grain     ->  /posts/:id
+ * src/routes/posts/[...all]/+page.grain ->  兜底（其余都归它）
  * ```
+ *
+ * 认 `+page.grain` 而不是"任意 .grain"：目录里还可能放共用的子组件，那样它们会被误
+ * 当成路由。布局（`+layout.grain`）**没有** —— 外壳自己写一个组件。
  *
  * 页面是懒加载的（`() => import(...)`），构建时 Vite 会自动切块。
  */
@@ -52,29 +55,33 @@ const RESOLVED_ROUTES_ID = `\0${ROUTES_ID}`;
 /** `src/routes` 的默认位置（相对项目根） */
 const ROUTES_DIR = 'src/routes';
 
-/** 把文件路径翻译成路由模式：`post/[id].grain` -> `/post/:id` */
+/**
+ * 页面文件名。目录里其它 `.grain`（共用的子组件之类）不当路由。
+ */
+const PAGE_FILE = '+page.grain';
+
+/**
+ * 把文件路径翻译成路由模式。
+ *
+ * `+page.grain` 前面那段目录就是路径：`posts/[id]/+page.grain` -> `/posts/:id`。
+ * `[id]` -> `:id`，`[...all]` -> `:all*`（剩下的都归它，排序时压到最后）。
+ */
 function routePattern(root: string, file: string): string {
     const relative = file.slice(root.length).replace(/\\/g, '/').replace(/^\/+/, '');
-    const withoutExt = relative.replace(/\.grain$/, '');
 
-    const segments = withoutExt
-        .split('/')
-        .map((segment) => {
-            // `index` 那一级不出现在路径里
-            if (segment === 'index') return '';
+    // 去掉文件名，剩下的目录层级就是路径
+    const directory = relative.slice(0, relative.length - PAGE_FILE.length).replace(/\/+$/, '');
+    const segments = directory === '' ? [] : directory.split('/');
 
-            // `[id]` -> `:id`，`[...all]` -> `:all`（剩下的都归它）
-            if (segment.startsWith('[') && segment.endsWith(']')) {
-                const name = segment.slice(1, -1).replace(/^\.\.\./, '');
+    const mapped = segments.map((segment) => {
+        if (!segment.startsWith('[') || !segment.endsWith(']')) return segment;
 
-                return segment.startsWith('[...') ? `:${name}*` : `:${name}`;
-            }
+        const name = segment.slice(1, -1).replace(/^\.\.\./, '');
 
-            return segment;
-        })
-        .filter((segment) => segment !== '');
+        return segment.startsWith('[...') ? `:${name}*` : `:${name}`;
+    });
 
-    return `/${segments.join('/')}`;
+    return `/${mapped.join('/')}`;
 }
 
 /** 目录扫一遍，生成 `grain:routes` 的模块代码 */
@@ -85,7 +92,9 @@ function routesModule(root: string): string {
 
     try {
         files = readdirSync(dir, { recursive: true, encoding: 'utf8' })
-            .filter((name) => name.endsWith('.grain'))
+            // Windows 上 recursive readdir 给的是 `\` 分隔，先归一化再比
+            .map((name) => name.replace(/\\/g, '/'))
+            .filter((name) => name === PAGE_FILE || name.endsWith(`/${PAGE_FILE}`))
             .sort();
     } catch {
         // 没有 src/routes 这个目录：给个空表，别让构建挂掉

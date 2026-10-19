@@ -836,3 +836,120 @@ Rules:
 - It is not an event handler, but writing to a `$state` there **does** schedule a refresh — it runs with the DOM already in place, so it is a fine place to kick off reactive work.
 
 A `bind:this` variable is typed with the matching DOM interface (`HTMLInputElement` for `<input>`, `HTMLDivElement` for `<div>`, …), so `box.value` and `box.focus()` are checked and completed. Unknown tags fall back to `HTMLElement`.
+
+# Routing: the directory is the route table
+
+An SPA router, **no pre-rendering**. The route table is generated **at compile time** by the
+vite plugin, which scans `src/routes/`. Pages are named `+page.grain` — the same convention
+as SvelteKit:
+
+```
+src/routes/+page.grain                 ->  /
+src/routes/about/+page.grain           ->  /about
+src/routes/posts/[id]/+page.grain      ->  /posts/:id
+src/routes/posts/[...all]/+page.grain  ->  /posts/:all*   (catch-all, sorted last)
+```
+
+Square brackets become `:id`, and the matched value lands on `route.params`. Only
+`+page.grain` counts as a route, so a directory may also hold shared child components —
+**there is no `+layout.grain`**; the shell is a component you write yourself.
+
+## The shell
+
+```grain
+<script>
+    import routes from "grain:routes";
+    import { createRouter } from "@graints/runtime";
+</script>
+
+<nav>
+    <a href="/">home</a>
+    <a href="/about">about</a>
+</nav>
+
+<main id="outlet"></main>
+
+<script onmount>
+    // the table is scanned out of the directory at compile time; pages load on demand
+    const outlet = document.getElementById("outlet");
+
+    createRouter({ routes, target: outlet }).start();
+</script>
+```
+
+`grain:routes` is a **virtual module** — it only exists inside `import`, is generated from the
+directory at build time, and never exists as a file.
+
+## Reading the current route
+
+`route` is a module-level reactive store, so every page sees the same one:
+
+```grain
+<script>
+    import { route } from "@graints/runtime";
+
+    const here = $node({
+        get: () => route.get(),
+        listen: (update) => route.subscribe(update)
+    });
+</script>
+
+<h1>Post {here.params.id ?? '?'}</h1>
+<p>Matched {here.pattern}.</p>
+```
+
+`route` carries three fields: `path` (`/post/7`), `pattern` (`/post/:id`) and `params`
+(`{ id: '7' }`). In a template it can also be used read-only: `{$read(route)}`.
+
+**Params do not arrive through `$props`.** The router calls `page(target)` and nothing else,
+so `$props()` is empty — read them from `route`.
+
+## Navigating
+
+Once `start()` has run, **every internal `<a>` is intercepted on `document`** — no per-link
+setup:
+
+```grain
+<a href="/about">about</a>            <!-- goes through the router, no full reload -->
+```
+
+From code, use the standalone `navigate` (it drives the last router that was `start()`ed):
+
+```grain
+<button onclick={() => navigate('/about')}>go to about (js)</button>
+```
+
+`navigate(to, { replace: true })` replaces the current history entry instead of pushing one.
+Browser back/forward go through `popstate` and just work.
+
+## Options
+
+`createRouter({ routes, target, fallback })`:
+
+- `routes` — order matters, the first match wins
+- `target` — where pages get mounted (emptied before each render)
+- `fallback` — a page to mount when nothing matches (omit to leave it empty)
+
+It returns `{ route, navigate, start, stop }`. `stop()` removes the listeners, calls the
+mounted page's dispose and forgets the router.
+
+## Lazy loading
+
+A route's `page` can be a dynamic import, so each route becomes its own chunk:
+
+```ts
+// this is the shape `grain:routes` generates
+export default [
+    { path: '/', page: () => import('./+page.grain') },
+    { path: '/posts/:id', page: () => import('./posts/[id]/+page.grain') }
+];
+```
+
+## Two things that are not there
+
+- **No SSR / pre-rendering** — the shell's `<main id="outlet">` is empty until JS runs
+- **No layout nesting** — a `+layout.svelte`-style wrapper is a shell component you write
+  yourself
+
+A working project is in `examples/router`. Note it needs a `src/main.ts` entry: a vite entry
+module drops default exports, so `mount()` has to be called explicitly.

@@ -1,0 +1,16 @@
+<script>
+    import { route } from "@graints/runtime";
+
+    // 当前路由是响应式的 —— params 从它取。路由器只调 page(target)，
+    // 不往组件里塞 props，所以 $props() 里没有 params
+    const here = $node({
+        get: () => route.get(),
+        listen: (update) => route.subscribe(update)
+    });
+</script>
+
+<h1>Post {here.params.id ?? '?'}</h1>
+
+<p>Matched <code>{here.pattern}</code>.</p>
+
+<p><a href="/">back home</a></p>

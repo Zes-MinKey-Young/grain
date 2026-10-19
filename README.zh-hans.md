@@ -751,3 +751,108 @@ function add() {
 - 它不是事件处理器，但在这里写 `$state` **会**安排刷新 —— 它跑的时候 DOM 已经就位，所以适合在这里启动响应式的工作
 
 `bind:this` 变量带的是对应的 DOM 接口类型（`<input>` 是 `HTMLInputElement`，`<div>` 是 `HTMLDivElement`……），所以 `box.value` 和 `box.focus()` 都有类型检查和补全。认不出来的标签退回 `HTMLElement`。
+
+# 路由：目录即路由表
+
+一个 SPA 路由器，**不做预渲染**。路由表由 vite 插件在**编译期**扫 `src/routes/` 生成。页面文件叫 `+page.grain`，跟 SvelteKit 一个路子：
+
+```
+src/routes/+page.grain                 ->  /
+src/routes/about/+page.grain           ->  /about
+src/routes/posts/[id]/+page.grain      ->  /posts/:id
+src/routes/posts/[...all]/+page.grain  ->  /posts/:all*   （兜底，排序压到最后）
+```
+
+方括号变成 `:id`，匹配到的值落在 `route.params` 上。只有 `+page.grain` 算路由，所以目录里可以放共用的子组件 —— 但**没有 `+layout.grain`**，外壳自己写一个组件。
+
+## 外壳
+
+```grain
+<script>
+    import routes from "grain:routes";
+    import { createRouter } from "@graints/runtime";
+</script>
+
+<nav>
+    <a href="/">home</a>
+    <a href="/about">about</a>
+</nav>
+
+<main id="outlet"></main>
+
+<script onmount>
+    // 路由表是插件编译期扫出来的，页面按需加载
+    const outlet = document.getElementById("outlet");
+
+    createRouter({ routes, target: outlet }).start();
+</script>
+```
+
+`grain:routes` 是个**虚拟模块** —— 只存在于 `import` 里，构建时由目录生成，磁盘上从来没有这个文件。
+
+## 读当前路由
+
+`route` 是模块级的响应式 store，所以每个页面看到的是同一个：
+
+```grain
+<script>
+    import { route } from "@graints/runtime";
+
+    const here = $node({
+        get: () => route.get(),
+        listen: (update) => route.subscribe(update)
+    });
+</script>
+
+<h1>Post {here.params.id ?? '?'}</h1>
+<p>Matched {here.pattern}.</p>
+```
+
+`route` 上有三个字段：`path`（`/post/7`）、`pattern`（`/post/:id`）、`params`（`{ id: '7' }`）。模板里只读地用它也可以：`{$read(route)}`。
+
+**params 不走 `$props`。** 路由器只调 `page(target)`，别的什么都不传，所以 `$props()` 是空的 —— 从 `route` 取。
+
+## 跳转
+
+`start()` 之后，**所有站内 `<a>` 都在 `document` 上被拦下**，不用逐个链接配：
+
+```grain
+<a href="/about">about</a>            <!-- 走路由，不整页刷新 -->
+```
+
+代码里用独立的 `navigate`（它驱动最近一个 `start()` 过的路由器）：
+
+```grain
+<button onclick={() => navigate('/about')}>go to about (js)</button>
+```
+
+`navigate(to, { replace: true })` 是替换当前历史记录而不是压一条。浏览器前进后退走 `popstate`，天然可用。
+
+## 参数
+
+`createRouter({ routes, target, fallback })`：
+
+- `routes` —— 顺序敏感，第一条匹配的赢
+- `target` —— 页面挂在哪（每次渲染前会清空）
+- `fallback` —— 都没匹配上时挂什么（不给就空着）
+
+返回 `{ route, navigate, start, stop }`。`stop()` 撤掉监听、调掉已挂页面的 dispose、忘掉这个路由器。
+
+## 懒加载
+
+一条路由的 `page` 可以是动态 import，于是每个路由是独立的一块：
+
+```ts
+// `grain:routes` 生成的就是这个形状
+export default [
+    { path: '/', page: () => import('./+page.grain') },
+    { path: '/posts/:id', page: () => import('./posts/[id]/+page.grain') }
+];
+```
+
+## 两个没有的东西
+
+- **没有 SSR / 预渲染** —— 外壳里 `<main id="outlet">` 在 JS 跑起来之前是空的
+- **没有布局嵌套** —— `+layout.svelte` 那种外壳自己写一个组件
+
+完整可跑的例子见 `examples/router`。注意它需要一个 `src/main.ts` 入口：vite 的入口模块会丢掉 default 导出，所以 `mount()` 得显式调一次。
