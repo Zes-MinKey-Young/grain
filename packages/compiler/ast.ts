@@ -130,7 +130,12 @@ export function parse(
 export function simpleTraverse(
     node: unknown,
     visitor: {
-        enter?(node: TSESTree.Node, parent: TSESTree.Node | undefined): void;
+        /**
+         * 返回 `false` 表示**连子节点一起跳过**（`leave` 也不会调）。
+         *
+         * 给"这一段不用看"用：比如 `$untrack(...)` 里的读取不算依赖。
+         */
+        enter?(node: TSESTree.Node, parent: TSESTree.Node | undefined): void | false;
         leave?(node: TSESTree.Node, parent: TSESTree.Node | undefined): void;
     }
 ): void {
@@ -140,7 +145,9 @@ export function simpleTraverse(
 
         const any = current as AnyNode;
 
-        visitor.enter?.(any as unknown as TSESTree.Node, parent as unknown as TSESTree.Node | undefined);
+        if (visitor.enter?.(any as unknown as TSESTree.Node, parent as unknown as TSESTree.Node | undefined) === false) {
+            return;
+        }
 
         for (const [key, value] of Object.entries(any)) {
             if (SKIP_KEYS.has(key)) continue;

@@ -30,6 +30,7 @@ import {
     collectReads,
     collectWrites,
     intersects,
+    untrackWarnings,
     type BorrowParam,
     type BorrowWarning,
     type FunctionLike,
@@ -644,6 +645,189 @@ interface Deferred {
 }
 
 /**
+ * 把 `$untrack(...)` 从代码文本里剥掉，只留参数。
+ *
+ * 括号是**配对**找的，而且认字符串 / 模板字面量 —— 参数里出现括号（
+ * `$untrack(Math.max(1, 2))`）、或者字符串里带括号（`$untrack(f('('))`）都不能数错。
+ * 模板字面量里的 `${...}` 也递归处理：那里面照样可以写 `$untrack`。
+ *
+ * 没有 `$untrack` 时原样返回（绝大多数代码走这条，不花钱）。
+ */
+function stripUntrack(text: string): string {
+    if (!text.includes('$untrack')) return text;
+
+    let out = '';
+    let at = 0;
+
+    while (at < text.length) {
+        const found = text.indexOf('$untrack', at);
+
+        if (found < 0) {
+            out += text.slice(at);
+
+            break;
+        }
+
+        // 前面紧跟标识符字符的话是别的名字（`my$untrack`），不算
+        if (found > 0 && /[\w$]/.test(text[found - 1])) {
+            out += text.slice(at, found + '$untrack'.length);
+            at = found + '$untrack'.length;
+
+            continue;
+        }
+
+        out += text.slice(at, found);
+
+        // `$untrack` 后面只允许空白，然后是 `(`
+        let open = found + '$untrack'.length;
+
+        while (open < text.length && /\s/.test(text[open])) open += 1;
+
+        if (text[open] !== '(') {
+            // 不是调用：原样留着
+            out += text.slice(found, open);
+            at = open;
+
+            continue;
+        }
+
+        const close = matchingParen(text, open);
+
+        if (close < 0) {
+            // 没配上（源码不完整）：保守起见整个留下
+            out += text.slice(found);
+
+            break;
+        }
+
+        // 参数本体递归剥 —— `$untrack($untrack(x))` 也得干净
+        out += stripUntrack(text.slice(open + 1, close));
+        at = close + 1;
+    }
+
+    return out;
+}
+
+/** `text` 里 `open` 那个 `(` 对应的 `)`；认字符串和模板字面量，找不到返回 -1 */
+function matchingParen(text: string, open: number): number {
+    let depth = 0;
+    let quote = '';
+
+    for (let at = open; at < text.length; at += 1) {
+        const char = text[at];
+
+        if (quote) {
+            if (char === '\\') {
+                at += 1;
+                continue;
+            }
+
+            if (char === quote) quote = '';
+
+            continue;
+        }
+
+        if (char === "'" || char === '"' || char === '`') {
+            quote = char;
+            continue;
+        }
+
+        if (char === '(') {
+            depth += 1;
+            continue;
+        }
+
+        if (char === ')') {
+            depth -= 1;
+
+            if (depth === 0) return at;
+        }
+    }
+
+    return -1;
+}
+
+/**
+ * 把模板里所有表达式的 `raw` 剥掉 `$untrack(...)`。
+ *
+ * 这些原文是**直接发射**的（`() => (${node.raw})` 之类），不走 `slice()`，所以得
+ * 单独处理。AST 不动 —— `content` 里仍然留着那个调用，依赖跳过和警告都靠它。
+ *
+ * 只走 Grain 自己的容器：TS AST 里的 `raw` 是字面量的原文（数据），碰了会改错东西。
+ */
+function stripUntrackRaw(root: Root): void {
+    const visit = (node: unknown): void => {
+        if (!node || typeof node !== 'object') return;
+
+        const current = node as Record<string, unknown>;
+
+        if (current.type === 'expression' && typeof current.raw === 'string') {
+            current.raw = stripUntrack(current.raw);
+        }
+
+        for (const key of ['children', 'fallback', 'alternates', 'test', 'key', 'expression', 'get', 'set', 'listen']) {
+            const value = current[key];
+
+            if (Array.isArray(value)) value.forEach(visit);
+            else if (value && typeof value === 'object') visit(value);
+        }
+
+        // 属性值：`{ onclick: ... }`，值可能是表达式、文本+表达式的数组、或绑定值
+        const attributes = current.attributes;
+
+        if (attributes && typeof attributes === 'object') {
+            for (const value of Object.values(attributes as Record<string, unknown>)) {
+                if (Array.isArray(value)) value.forEach(visit);
+                else if (value && typeof value === 'object') visit(value);
+            }
+        }
+    };
+
+    root.template.children.forEach(visit);
+}
+
+/**
+ * `<script>` 里的 `$untrack(...)` 调用：整个换成参数本体。
+ *
+ * 只记**最外层**那些 —— 嵌套的由 `stripUntrack` 在替换文本里递归剥掉，两条 edit
+ * 也就不会重叠（`applyEdits` 要求区间不交叉）。
+ *
+ * 按 range 取源码的函数体走 `slice()`（那边也剥），但整段脚本是
+ * `applyEdits(block.raw, ...)` 拼出来的，所以这一路必须显式补 edit。
+ */
+function untrackEdits(program: TSESTree.Node, source: string): Edit[] {
+    const found: Edit[] = [];
+
+    simpleTraverse(program, {
+        enter(child) {
+            if (
+                child.type !== 'CallExpression' ||
+                child.callee.type !== 'Identifier' ||
+                child.callee.name !== '$untrack'
+            ) {
+                return;
+            }
+
+            const argument = child.arguments[0];
+
+            found.push({
+                start: child.range[0],
+                end: child.range[1],
+                // 没有参数（`$untrack()`）是用户写错，给个 `undefined` 至少不抛
+                text: argument
+                    ? stripUntrack(source.slice(argument.range[0], argument.range[1]))
+                    : 'undefined'
+            });
+
+            // 嵌套的不用再记：替换文本里已经递归剥过了
+            return false;
+        }
+    });
+
+    return found;
+}
+
+/**
  * 这个函数里有没有**整体重赋值**（`arr = [...]`）。
  *
  * 只有它算：容器方法（`arr.push(x)` / `map.set(k, v)`）本身就被精确处理了
@@ -851,6 +1035,11 @@ class Generator {
         const rootName = `update$${this.counter++}`;
         this.rootName = rootName;
 
+        // `$untrack(...)` 是编译期标记，产物里不能留 —— 赶在模板生成**之前**剥：
+        // 模板表达式的原文是直接发射的（`() => (${node.raw})`），晚一步那些字符串
+        // 已经拼好了。按 range 取源码的那些走 `slice()`，那边也剥
+        stripUntrackRaw(this.root);
+
         this.fragment(this.root.template.children, rootName);
 
         // script 要先处理：`$bindable` 会决定要不要 import toBinding
@@ -868,7 +1057,7 @@ class Generator {
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
 
         if (this.root.module) {
-            output.push('', '/* <script module> */', this.root.module.raw.trim());
+            output.push('', '/* <script module> */', stripUntrack(this.root.module.raw).trim());
         }
 
         // import / export 留在模块顶层
@@ -969,7 +1158,8 @@ class Generator {
               : stylesheet.raw;
 
         // 模板表达式里的 `$borrow` 调用点：`analyzeScript` 只看 `<script>`，这里补上
-        //（`onclick={() => { changeLang(minkey, 'x') }}` 就是这种）
+        //（`onclick={() => { changeLang(minkey, 'x') }}` 就是这种）。
+        // `$untrack` 的"里面没有响应式东西"同理 —— 它也只可能出现在模板里
         if (this.analysis) {
             for (const expression of templateExpressions(this.root)) {
                 if (!expression.content) continue;
@@ -982,6 +1172,10 @@ class Generator {
                         this.analysis.windows,
                         this.source
                     )
+                );
+
+                this.analysis.warnings.push(
+                    ...untrackWarnings(expression.content, this.analysis.states)
                 );
             }
         }
@@ -1037,6 +1231,8 @@ class Generator {
             edits.push({ start: state.range[0], end: state.range[1], text: state.init });
         }
 
+
+
         // 3. `$props()` -> `props`
         const props = findProps(block);
         const bindables = props ? findBindables(block, this.source) : [];
@@ -1081,6 +1277,18 @@ class Generator {
                 end,
                 text: `\nconst ${bindable.binding} = toBinding(props[${JSON.stringify(bindable.prop)}], ${bindable.fallback});\nlet ${bindable.name} = ${bindable.binding}.get();`
             });
+        }
+
+        // 7. `$untrack(...)` -> 参数本体（编译期标记，不进产物）
+        //
+        // 放在**最后**：它得跟前面所有 edit 比区间。`$node({ get: () => $untrack(x) })`
+        // 这种外层 `$node` 的声明替换本身就覆盖了整个调用，里层再插一条就嵌套了
+        //（`applyEdits` 要求区间不交叉，嵌套会让外层那条失效）。重叠的那些不用管 ——
+        // `node.get` / `slice()` 取文本时已经顺手剥掉
+        for (const edit of untrackEdits(block.content, this.source)) {
+            const covered = edits.some((other) => edit.start >= other.start && edit.end <= other.end);
+
+            if (!covered) edits.push(edit);
         }
 
         return { head, body: applyEdits(block.raw, edits, block.contentStart).trim() };
@@ -1433,16 +1641,20 @@ class Generator {
             // 没有 `get` 时值由 listener 推，得有个地方放
             const current = node.get ? null : `__current$${this.counter++}`;
 
-            const parts: string[] = [node.get ? `get: ${node.get}` : `get: () => ${current}`];
+            const parts: string[] = [
+                node.get ? `get: ${stripUntrack(node.get)}` : `get: () => ${current}`
+            ];
 
-            if (node.set) parts.push(`set: ${node.set}`);
+            if (node.set) parts.push(`set: ${stripUntrack(node.set)}`);
             if (node.active) parts.push('active: true');
 
             if (node.listen) {
+                const listen = stripUntrack(node.listen);
+
                 parts.push(
                     current
-                        ? `listen: (__update) => (${node.listen})((__value) => { if (__value !== undefined) ${current} = __value; __update(); })`
-                        : `listen: ${node.listen}`
+                        ? `listen: (__update) => (${listen})((__value) => { if (__value !== undefined) ${current} = __value; __update(); })`
+                        : `listen: ${listen}`
                 );
             }
 
@@ -1480,12 +1692,16 @@ class Generator {
 
         // `$bindable` 的写入改写、`$node` 的写入改写、容器的精确调用，都算进去
         const edits = [...this.bindableEdits, ...this.nodeWriteEdits, ...this.mutationEdits];
-
-        if (edits.length === 0) return this.source.slice(from, to);
-
         const inside = edits.filter((edit) => edit.start >= from && edit.end <= to);
 
-        return applyEdits(this.source.slice(from, to), inside, from);
+        // edit 的偏移是**绝对**的，所以先按原样拼、再剥 `$untrack` ——
+        // 反过来（先剥再拼）长度变了，偏移就对不上了
+        const text =
+            inside.length === 0
+                ? this.source.slice(from, to)
+                : applyEdits(this.source.slice(from, to), inside, from);
+
+        return stripUntrack(text);
     }
 
     private wrapperStatements(): string[] {
@@ -3141,8 +3357,18 @@ class Generator {
         }
     }
 
+    /**
+     * 取一段源码。
+     *
+     * `$untrack(...)` 在这儿剥掉：它跟 `$state` 一样只是编译期标记，运行时不存在。
+     * 之所以不在解析阶段剥 —— AST 里得留着它，`collectReads` 才知道要跳过哪些依赖，
+     * `untrackWarnings` 才知道要警告"里面没有响应式东西"。
+     *
+     * 按 range 取源码的路径全都走这儿（函数体、循环源、edit 的替换文本……），
+     * 所以一处就够。
+     */
     private slice(range: [number, number]): string {
-        return this.source.slice(range[0], range[1]);
+        return stripUntrack(this.source.slice(range[0], range[1]));
     }
 }
 
@@ -3150,9 +3376,7 @@ class Generator {
  * 把几个 script 的分析结果并起来（`<script>` 和 `<script onmount>`）。
  * 区间都是绝对偏移，所以并一份用不会串；同名保留先出现的那个。
  */
-function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis | null {
-    if (list.length === 0) return null;
-
+function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis {
     const merged: ScriptAnalysis = {
         states: new Map(),
         functions: new Map(),

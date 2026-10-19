@@ -87,6 +87,24 @@ declare function $state<T>(initial: T, level?: number): T;
 declare function $borrow(level?: number): any;
 
 /**
+ * Reads \`expression\` **without** making it a dependency of whatever surrounds it.
+ *
+ * A rune, so it can sit anywhere an expression can -- a template interpolation, the
+ * \`get\` of a \`$node\`, an \`{#if}\` test -- mixed with other expressions:
+ *
+ * \`\`\`grain
+ * <p>{$untrack(count) + '/' + total}</p>
+ * \`\`\`
+ *
+ * Only the \`$untrack(...)\` part stops being tracked; \`total\` still is.
+ *
+ * It disappears from the output (like every rune) -- the emitted code is just the
+ * expression. Wrapping something that is **not** reactive does nothing, and the
+ * compiler says so.
+ */
+declare function $untrack<T>(expression: T): T;
+
+/**
  * Component props — the type parameter is the props type.
  *
  * @example

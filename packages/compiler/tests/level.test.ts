@@ -2,7 +2,8 @@
 import { beforeAll, it, expect } from "bun:test";
 import { Window } from "happy-dom";
 import type { Document } from "happy-dom";
-import { readFileSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compile } from "..";
 
@@ -29,7 +30,10 @@ beforeAll(() => {
 
 const mount = async (source: string): Promise<Element> => {
     const js = compile(source, { filename: "App.grain", runtimeModule: runtimePath }).js;
-    const file = join(import.meta.dir, ".tmp-" + Math.random().toString(36).slice(2) + ".ts");
+
+    // 产物落到系统临时目录并删掉：写进测试目录会被 `bun test`（root = packages）扫到，
+    // 堆积之后每次全量都多扫上千个文件，`tsc` 也会去啃
+    const file = join(tmpdir(), `grain-level-${Math.random().toString(36).slice(2)}.ts`);
 
     await Bun.write(file, js);
 
@@ -38,6 +42,12 @@ const mount = async (source: string): Promise<Element> => {
 
     document.body.appendChild(target);
     module.default(target);
+
+    try {
+        rmSync(file, { force: true });
+    } catch {
+        // 删不掉无所谓，它在临时目录里
+    }
 
     return target;
 };

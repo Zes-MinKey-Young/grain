@@ -1,6 +1,9 @@
 // 这个包标了 `__esModule` 却没有 default 导出，所以只能具名导入：
 // 默认导入在 CJS 下拿到的是 undefined（扩展就是 CJS 编译的）
-import { simpleTraverse } from '@typescript-eslint/typescript-estree';
+// 用自己那份 `simpleTraverse` 而不是包里的：它的 `enter` 可以返回 `false` 跳过整棵
+// 子树（`$untrack(...)` 里的读取不算依赖，就得这么跳）。包里那份没有这个能力，
+// 而且它按 visitorKeys 走、这份按字段走，两边行为本来就有细微差别 —— 统一成一份
+import { simpleTraverse } from '../ast.js';
 import type { TSESTree } from '@typescript-eslint/typescript-estree';
 
 
@@ -122,7 +125,7 @@ export interface ScriptAnalysis {
     /** 提示：产物照跑，只是那一下不会刷新 */
     warnings: BorrowWarning[];
     /**
-     * 错误：契约违反了（ 的级别不够、实参不是响应式路径）。
+     * 错误：契约违反了（`$borrow` 的级别不够、实参不是响应式路径）。
      *
      * 跟 warnings 分开，构建那边可以让它失败。
      */
@@ -710,11 +713,40 @@ export function touches(write: string, read: string): boolean {
 /**
  * 收集一段代码读过的**路径**（属性名本身不算 —— `obj.count` 的 count 不是变量）。
  */
-export function collectReads(node: TSESTree.Node, aliases?: Map<string, string>): Set<string> {
+/**
+ * `$untrack(expr)` 这个调用吗。
+ *
+ * 是个**符文**（不是宏）：它哪儿都能出现 —— 模板插值、`$node` 的 getter、`{#if}`
+ * 的测试…… 宏那套"整个值得是一个宏调用"的限制不适用。编译器做两件事：
+ * 里面的读取**不算依赖**（就是这儿），以及产物里把 `$untrack(...)` 剥掉只剩参数。
+ */
+function isUntrack(node: TSESTree.Node): boolean {
+    return (
+        node.type === 'CallExpression' &&
+        node.callee.type === 'Identifier' &&
+        node.callee.name === '$untrack'
+    );
+}
+
+/**
+ * 收集读取。
+ *
+ * @param throughUntrack 为 true 时跳过 `$untrack(...)` 里的读取（正常路径）；
+ *                       为 false 时**穿透**它 —— 只有"判断 `$untrack` 里有没有响应式
+ *                       东西"那个检查需要，默认路径下里面永远是空的
+ */
+function readPaths(
+    node: TSESTree.Node,
+    aliases: Map<string, string> | undefined,
+    throughUntrack: boolean
+): Set<string> {
     const paths = new Set<string>();
 
     simpleTraverse(node, {
         enter(child, parent) {
+            // `$untrack(...)` 里读的一律不算依赖，整棵子树跳过
+            if (throughUntrack && isUntrack(child)) return false;
+
             if (child.type !== 'Identifier') return;
 
             // `obj.count` 的 count、`{ count: 1 }` 的 key 都不是变量引用
@@ -730,9 +762,12 @@ export function collectReads(node: TSESTree.Node, aliases?: Map<string, string>)
         }
     });
 
-    // `arr[2].name`： Identifier 只给了 `arr`，整条链要另外收
+    // `arr[2].name`： Identifier 只给了 `arr`，整条链要另外收。
+    // 同样要跳过 `$untrack(...)` —— 不然里面那条链还是会被收进来
     simpleTraverse(node, {
         enter(child) {
+            if (throughUntrack && isUntrack(child)) return false;
+
             if (child.type !== 'MemberExpression') return;
 
             const path = pathOf(child, aliases);
@@ -742,6 +777,61 @@ export function collectReads(node: TSESTree.Node, aliases?: Map<string, string>)
     });
 
     return paths;
+}
+
+export function collectReads(node: TSESTree.Node, aliases?: Map<string, string>): Set<string> {
+    return readPaths(node, aliases, true);
+}
+
+/** 这一组读取里有没有真的响应式的（根是 `$state` 声明的，派生局部变量也算） */
+function hasReactiveRead(paths: Iterable<string>, states: Map<string, StateInfo>): boolean {
+    for (const path of paths) {
+        const root = path.split('[')[0].split('.')[0];
+
+        if (states.has(root)) return true;
+    }
+
+    return false;
+}
+
+/**
+ * `$untrack(...)` 里压根没有响应式读取 —— 那它在这儿什么用也没有。
+ *
+ * 这个检查得**穿透** `$untrack` 看里面读了什么（默认路径下里面被跳过，永远是空的），
+ * 再按根变量是不是 `$state` 判断那些读取有没有响应性。
+ *
+ * 为什么值得报：`$untrack` 的意思是"这儿有个依赖，别要它"。里面没有依赖时它不起作用，
+ * 还会让读代码的人以为"这儿刻意断掉了什么"—— 比不写更糟。
+ *
+ * 模板表达式里的 `$untrack` 由调用方另外扫（`analyzeScript` 只看 `<script>`），
+ * 跟 `borrowCallErrors` 一个路子。
+ */
+export function untrackWarnings(
+    node: TSESTree.Node,
+    states: Map<string, StateInfo>
+): BorrowWarning[] {
+    const found: BorrowWarning[] = [];
+
+    simpleTraverse(node, {
+        enter(child) {
+            if (!isUntrack(child)) return;
+
+            const inner = (child as TSESTree.CallExpression).arguments[0];
+
+            if (!inner) return;
+
+            if (hasReactiveRead(readPaths(inner, undefined, false), states)) return;
+
+            found.push({
+                start: child.range[0],
+                end: child.range[1],
+                message:
+                    '`$untrack(...)` wraps nothing reactive — there is no dependency to hide here'
+            });
+        }
+    });
+
+    return found;
 }
 
 /**
@@ -1281,6 +1371,10 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     for (const info of functions.values()) {
         errors.push(...borrowCallErrors(info.node, functions, states, windows, source));
     }
+
+    // `$untrack(...)` 里没有响应式读取：白写。同样等 states 齐了再跑 ——
+    // 不然判断不出"里面那个名字是不是响应式的"（派生局部变量也是第三遍才登记的）
+    warnings.push(...untrackWarnings(program, states));
 
     return { states, functions, warnings, errors, windows };
 }
