@@ -1532,12 +1532,15 @@ class Generator {
                           .join('')
                     : '';
 
+            // `async` 必须留着：包出来的新函数要是丢了它，函数体里的 `await` 就是语法错误
+            const async = (node as { async?: boolean }).async ? 'async ' : '';
+
             // `function f() {}` 要连声明一起换（箭头函数没有名字，得借 function 表达式补上）；
             // `const f = () => {}` 只换函数那段，前面的 `const f =` 原样留着
             const replacement =
                 info.keyword === 'function'
-                    ? `const ${name} = function ${name}(${params}) {${body}${notices}}`
-                    : `function ${name}(${params}) {${body}${notices}}`;
+                    ? `const ${name} = ${async}function ${name}(${params}) {${body}${notices}}`
+                    : `${async}function ${name}(${params}) {${body}${notices}}`;
 
             edits.push({
                 start: info.declaration[0],
@@ -1546,6 +1549,39 @@ class Generator {
             });
 
             this.wrappedFunctions.add(name);
+        }
+
+        // 顶层语句里的匿名回调：只换函数体那段，箭头/方法本身的写法不动
+        for (const info of this.analysis?.callbacks ?? []) {
+            const node = info.node;
+
+            if (node.body.type !== 'BlockStatement') continue;
+            if (node.range[0] < block.contentStart || node.range[1] > block.contentEnd) continue;
+
+            const reactive = [...this.reactiveWrites(info.writes)];
+            if (reactive.length === 0) continue;
+
+            const mutations = this.mutationCalls(node);
+
+            this.mutationEdits = mutations.edits;
+
+            const inner = this.bodySource(node.body.range).slice(1, -1);
+            const updates = this.updateCalls(new Set(reactive), mutations.skip);
+
+            this.mutationEdits = [];
+
+            const body = this.guardChanges(
+                reactive,
+                updates,
+                writesAreAssignments(node, info.writes),
+                inner
+            );
+
+            edits.push({
+                start: node.body.range[0],
+                end: node.body.range[1],
+                text: `{${body}}`
+            });
         }
 
         return edits;
@@ -3380,6 +3416,7 @@ function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis {
     const merged: ScriptAnalysis = {
         states: new Map(),
         functions: new Map(),
+        callbacks: [],
         warnings: [],
         errors: [],
         windows: new Map()
@@ -3393,6 +3430,8 @@ function mergeAnalyses(list: ScriptAnalysis[]): ScriptAnalysis {
         for (const [name, info] of item.functions) {
             if (!merged.functions.has(name)) merged.functions.set(name, info);
         }
+
+        merged.callbacks.push(...item.callbacks);
 
         merged.warnings.push(...item.warnings);
         merged.errors.push(...item.errors);

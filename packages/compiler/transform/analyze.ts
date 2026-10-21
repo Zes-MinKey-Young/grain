@@ -122,6 +122,14 @@ export interface BorrowWindow {
 export interface ScriptAnalysis {
     states: Map<string, StateInfo>;
     functions: Map<string, FunctionInfo>;
+    /**
+     * 顶层语句里的匿名回调（`.then(x => {...})`、`setTimeout(() => {...})`、
+     * 对象字面量里的方法）。
+     *
+     * 它们没有名字、不在 `functions` 里，但函数体里的写入同样要生成刷新调用。
+     * 只收**最外层**那一个：外层回调的包装覆盖整段函数体（含里面嵌套的回调）。
+     */
+    callbacks: FunctionInfo[];
     /** 提示：产物照跑，只是那一下不会刷新 */
     warnings: BorrowWarning[];
     /**
@@ -1376,7 +1384,48 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
     // 不然判断不出"里面那个名字是不是响应式的"（派生局部变量也是第三遍才登记的）
     warnings.push(...untrackWarnings(program, states));
 
-    return { states, functions, warnings, errors, windows };
+    // 顶层语句里的匿名回调：不包装的话，`.then(x => { status = ... })` 里的写入
+    // 改得到值、但 DOM 永远不刷新（用户看到的状态就卡在初始值）。
+    const wrappedNodes = new Set(fnNodes.map((item) => item.node));
+    const callbacks: FunctionInfo[] = [];
+
+    for (const statement of program.body) {
+        simpleTraverse(statement, {
+            enter(node) {
+                const type = node.type;
+
+                if (
+                    type !== 'ArrowFunctionExpression' &&
+                    type !== 'FunctionExpression' &&
+                    type !== 'FunctionDeclaration'
+                ) {
+                    return;
+                }
+
+                // 具名的那几个有专门的包装（换成 `const f = function f() {...}`），跳过
+                if (wrappedNodes.has(node)) return false;
+
+                // 表达式体（`x => a = x`）没有花括号，塞不进守卫，先不管
+                if (node.type === 'FunctionDeclaration' || node.body.type !== 'BlockStatement') {
+                    return false;
+                }
+
+                callbacks.push({
+                    name: '',
+                    node,
+                    declaration: node.range,
+                    keyword: 'callback',
+                    writes: collectWrites(node, shallow, undefined, windows),
+                    borrows: borrowParamsOf(node)
+                });
+
+                // 内层回调由这一层覆盖，不用再收
+                return false;
+            }
+        });
+    }
+
+    return { states, functions, callbacks, warnings, errors, windows };
 }
 
 /**
