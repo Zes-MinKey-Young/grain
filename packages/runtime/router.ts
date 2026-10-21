@@ -59,18 +59,22 @@ export interface RouteDef {
 
 /** 当前所在的路由 */
 export interface Route {
-    /** 实际路径，如 `/post/7` */
+    /** 相对 base 的路径，如 `/post/7`（`navigate()` 接受的也是这种） */
     path: string;
     /** 匹配上的模式，如 `/post/:id` */
     pattern: string;
     /** `:id` 这类段取出来的值 */
     params: Record<string, string>;
+    /** 路由所在的 base，如 `/` 或 `/kipphi-player/` */
+    base: string;
+    /** 浏览器里的真实路径（`base + path`），不带查询串和 hash */
+    fullPath: string;
 }
 
 export interface Router {
     /** 当前路由（响应式） */
     route: Writable<Route>;
-    /** 跳到某个路径 */
+    /** 跳到一个**相对 base** 的路径 */
     navigate(to: string, options?: { replace?: boolean }): void;
     /** 装上监听（拦截站内链接、响应前进后退） */
     start(): void;
@@ -125,6 +129,37 @@ export function normalize(path: string): string {
 }
 
 /**
+ * 归一化 base：一定是 `/xxx/` 这种「前后都有斜杠」的形状，根就是 `/`。
+ *
+ * 相对 base（`./` / `app/`）没法用于 `pushState`，退回根目录。
+ */
+export function normalizeBase(base: string | undefined): string {
+    if (!base) return '/';
+
+    const clean = base.split('?')[0].split('#')[0];
+
+    if (!clean.startsWith('/')) return '/';
+
+    return clean.length > 1 ? `${clean.replace(/\/+$/, '')}/` : '/';
+}
+
+/** 拿掉路径开头的 base：`/app/post/7` -> `/post/7`（base 是 `/app/`） */
+export function stripBase(path: string, base: string): string {
+    if (base === '/') return normalize(path);
+
+    const root = base.slice(0, -1);
+
+    if (path === root || path.startsWith(base)) return normalize(`/${path.slice(base.length)}`);
+
+    return normalize(path);
+}
+
+/** 反过来：`/post/7` -> `/app/post/7`（base 是 `/app/`） */
+export function joinBase(path: string, base: string): string {
+    return base === '/' ? normalize(path) : `${base.slice(0, -1)}${normalize(path)}`;
+}
+
+/**
  * 建一个路由。
  *
  * @param options.routes 路由表（顺序敏感：前面的先匹配）
@@ -144,28 +179,47 @@ export function navigate(to: string, options?: { replace?: boolean }): void {
 }
 
 /** 当前路由（响应式）；还没 start 时是个占位 */
-export const route = tiny<Route>({ path: '/', pattern: '', params: {} });
+export const route = tiny<Route>({
+    path: '/',
+    pattern: '',
+    params: {},
+    base: '/',
+    fullPath: '/'
+});
 
 export function createRouter(options: {
     routes: RouteDef[];
     target: Element;
     fallback?: Page;
+    /**
+     * 站点部署在子路径下时给的 base，如 `/kipphi-player/`（vite 的 `base`，
+     * 也就是 `import.meta.env.BASE_URL`）。缺省 `/`。
+     *
+     * 路由表里的 `path`、`navigate()` 的参数、`route.path` 都是**相对 base** 的；
+     * 浏览器地址栏里那个完整路径在 `route.fullPath` 上。
+     */
+    base?: string;
 }): Router {
     const { routes, target, fallback } = options;
+    const base = normalizeBase(options.base);
 
     // 用的是模块级那个 `route` —— 组件 import 到的就是同一个
-    route.set({
-        path: normalize(typeof location === 'undefined' ? '/' : location.pathname),
-        pattern: '',
-        params: {}
-    });
+    const here = typeof location === 'undefined' ? '/' : location.pathname;
+
+    route.set({ path: stripBase(here, base), pattern: '', params: {}, base, fullPath: normalize(here) });
 
     let mounted: (() => void) | null = null;
 
     const render = async (path: string): Promise<void> => {
         const found = match(routes, path);
 
-        route.set({ path, pattern: found?.def.path ?? '', params: found?.params ?? {} });
+        route.set({
+            path,
+            pattern: found?.def.path ?? '',
+            params: found?.params ?? {},
+            base,
+            fullPath: joinBase(path, base)
+        });
 
         // 上一个页面：编译产物可能返回 dispose，先调掉
         mounted?.();
@@ -199,11 +253,11 @@ export function createRouter(options: {
     };
 
     const navigate = (to: string, options?: { replace?: boolean }): void => {
-        const path = normalize(to);
+        const path = stripBase(to, base);
 
         if (typeof history !== 'undefined') {
-            if (options?.replace) history.replaceState({}, '', path);
-            else history.pushState({}, '', path);
+            if (options?.replace) history.replaceState({}, '', joinBase(path, base));
+            else history.pushState({}, '', joinBase(path, base));
         }
 
         void render(path);
@@ -231,7 +285,7 @@ export function createRouter(options: {
     };
 
     const onPop = (): void => {
-        void render(normalize(location.pathname));
+        void render(stripBase(location.pathname, base));
     };
 
     const start = (): void => {
