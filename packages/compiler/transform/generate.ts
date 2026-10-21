@@ -2536,6 +2536,15 @@ class Generator {
 
         if (owner) this.slots.push({ update: owner, index: slotIndex, deps });
 
+        // 单个表达式直接交原值：模板字符串会把 `false` 变成 "false"，
+        // 而布尔属性只认假值（运行时的 applyProp 靠 `false` 来 removeAttribute），
+        // 于是 `disabled={!ready}` 会永远是真、按钮一直点不动
+        if (chunks.length === 1 && typeof chunks[0] !== 'string') {
+            const expression = chunks[0] as Expression;
+
+            return { code: `${name}: () => (${expression.raw})`, slot: Boolean(owner) };
+        }
+
         return { code: `${name}: () => \`${parts.join('')}\``, slot: Boolean(owner) };
     }
 
