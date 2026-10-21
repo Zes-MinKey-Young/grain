@@ -12,7 +12,7 @@
  *   packages/runtime 和 packages/vite-plugin，改编译器即时生效
  * - 其他情况：依赖写成 registry 上的版本号
  */
-import { spawn } from 'node:childProcess';
+import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -21,7 +21,7 @@ const here = dirname(fileURLToPath(import.meta.url));
 const templateRoot = join(here, 'templates');
 
 /** registry 模式下写的版本号（包发布后这里就是给新项目用的版本） */
-const REGISTRY_VERSION = '^0.4.0';
+const REGISTRY_VERSION = '^0.4.1';
 
 const HELP = `
 create-grain — scaffold a new Grain project
@@ -155,7 +155,8 @@ function fileReference(from, to) {
 function pluginImport(target, repository) {
     if (!repository) return '@graints/vite-plugin';
 
-    const source = join(repository, 'packages', 'vite-plugin', 'index.js');
+    // 包根目录只有 index.ts（构建产物在 dist/ 下，不能引那个 —— 改了插件还得重新构建）
+    const source = join(repository, 'packages', 'vite-plugin', 'index.ts');
     const path = relative(target, source).split('\\').join('/');
 
     if (path.startsWith('.')) return path;
@@ -184,7 +185,8 @@ function copyTemplate(from, to, fill) {
 }
 
 function detectPm() {
-    const agent = process.env.npmConfigUserAgent ?? '';
+    // 环境变量名是 npm 定的（snake_case），不能跟着代码风格改成驼峰
+    const agent = process.env.npm_config_user_agent ?? '';
 
     if (agent.startsWith('pnpm')) return 'pnpm';
     if (agent.startsWith('yarn')) return 'yarn';

@@ -10,10 +10,10 @@
         "typecheck": "tsc --noEmit"
     },
     "dependencies": {
-        "@graints/runtime": "{{dep_grain}}"
+        "@graints/runtime": "{{depGrain}}"
     },
     "devDependencies": {
-        "@graints/vite-plugin": "{{dep_plugin}}",
+        "@graints/vite-plugin": "{{depPlugin}}",
         "typescript": "^6.0.3",
         "vite": "^8.3.2"
     }
