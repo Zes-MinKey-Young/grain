@@ -2926,6 +2926,22 @@ class Generator {
      * @returns `edits` 是"紧跟在原调用之后"的插入（不是追加到函数末尾——
      * 参数里可能引用了会被后面语句改掉的变量，`nextId` 就是个例子）
      */
+    /**
+     * 这个位置上的语句是不是「单语句体」—— `if (x) arr.push(y)` 里那个没有花括号的体。
+     *
+     * 从源码往前看：语句前最后一个 token 是 `)`（if / for / while 的头）或 `else`
+     * 关键字时就是。那种位置塞 `const` 会产出语法错误，得先补一层花括号。
+     */
+    private singleStatementBody(at: number): boolean {
+        const before = this.source
+            .slice(0, at)
+            .replace(/\/\*[\s\S]*?\*\/\s*$/, '')
+            .replace(/\/\/[^\n]*$/, '')
+            .replace(/\s+$/, '');
+
+        return before.endsWith(')') || /\belse$/.test(before);
+    }
+
     private mutationCalls(node: TSESTree.Node): { edits: Edit[]; skip: Set<string> } {
         const edits: Edit[] = [];
         const skip = new Set<string>();
@@ -3079,6 +3095,11 @@ class Generator {
          * 赋给一个局部变量，否则它会被求值两遍（`a.push({ ... })` 每次都是新对象）。
          *
          * 做法：声明插到整句之前，原位置换成那个变量。
+         *
+         * 但如果这个调用**本身就是**某条语句的单语句体（`if (x) arr.push(y)`、
+         * `for (...) arr.push(y)`），塞 `const` 会得到「单语句里写声明」的语法错误
+         * （rolldown: Lexical declaration cannot appear in a single-statement context），
+         * 这时候补一层花括号。
          */
         const reuse = (text: string, at: [number, number], parent?: TSESTree.Node): string => {
             // 标识符 / 数字 / 字符串 直接用，不必提取
@@ -3087,9 +3108,21 @@ class Generator {
             }
 
             const name = `__value$${this.counter++}`;
-            const statement = parent?.type === 'ExpressionStatement' ? parent.range[0] : at[0];
+            const init = `const ${name} = ${text}; `;
 
-            edits.push({ start: statement, end: statement, text: `const ${name} = ${text}; ` });
+            const statement = parent?.type === 'ExpressionStatement' ? parent.range : null;
+
+            if (statement && this.singleStatementBody(statement[0])) {
+                // `if (x) arr.push(y)` / `for (...) arr.push(y)`：体里没有花括号，
+                // 塞声明会得到「单语句里写声明」的语法错误，补一层
+                edits.push({ start: statement[0], end: statement[0], text: `{ ${init}` });
+                edits.push({ start: statement[1], end: statement[1], text: ' }' });
+            } else if (statement) {
+                edits.push({ start: statement[0], end: statement[0], text: init });
+            } else {
+                edits.push({ start: at[0], end: at[0], text: init });
+            }
+
             edits.push({ start: at[0], end: at[1], text: name });
 
             return name;
@@ -3097,13 +3130,13 @@ class Generator {
 
         /** 本次函数自己的借用参数名（转发时要认出来，别当成"不是响应式路径"） */
         const selfBorrows = new Set(
-            (node.type === 'FunctionDeclaration' ||
-            node.type === 'FunctionExpression' ||
-            node.type === 'ArrowFunctionExpression'
-                ? borrowParamsOf(node)
-                : []
-            ).map((item) => item.name)
-        );
+        (node.type === 'FunctionDeclaration' ||
+        node.type === 'FunctionExpression' ||
+        node.type === 'ArrowFunctionExpression'
+            ? borrowParamsOf(node)
+            : []
+        ).map((item) => item.name)
+    );
 
         /**
          * 实参是不是"列表里的一项"：`arr[2]` / `map.get('a')` / 派生变量。
