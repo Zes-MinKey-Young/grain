@@ -23,7 +23,7 @@ it('an async top-level function keeps its async keyword', () => {
 
     expect(js).toMatch(/const load = async function load\(/);
     // 包装照旧生效：先存旧值，末尾比对后刷新
-    expect(js).toMatch(/const __prev\$\d+ = status;/);
+    expect(js).toMatch(/(?:const|let) __prev\$\d+ = status;/);
     expect(js).toMatch(/if \(status !== __prev\$\d+\) \{[\s\S]*update\$\d+\?\.\(\d+\)/);
 });
 
@@ -51,7 +51,7 @@ it('writes inside an inline callback get the refresh calls', () => {
 <p>{status}</p>`, { filename: 'App.grain' }).js;
 
     expect(js).toMatch(/\.then\(\(?value\)? => \{/);
-    expect(js).toMatch(/const __prev\$\d+ = status;/);
+    expect(js).toMatch(/(?:const|let) __prev\$\d+ = status;/);
     expect(js).toMatch(/if \(status !== __prev\$\d+\) \{[\s\S]*update\$\d+\?\.\(\d+\)/);
 });
 
@@ -68,7 +68,8 @@ it('a callback inside a named function is not instrumented twice', () => {
 <p>{n}</p><button onclick={start}>go</button>`, { filename: 'App.grain' }).js;
 
     // 外层函数的守卫已经覆盖了整段函数体（含嵌套回调）
-    expect(js.match(/__prev\$\d+ = n;/g) ?? []).toHaveLength(1);
+    // 只数声明：刷新处会把快照重新赋值，那种赋值不是声明
+expect(js.match(/let __prev\$\d+ = n;/g) ?? []).toHaveLength(1);
 });
 
 it('a callback that writes nothing is left alone', () => {

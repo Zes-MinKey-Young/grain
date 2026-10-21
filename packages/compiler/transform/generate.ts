@@ -499,6 +499,59 @@ function sourceVariableOf(right: TSESTree.Expression): string | null {
     return null;
 }
 
+/**
+ * 函数体里属于**这个函数自己**的 `await` 位置
+ *
+ * 返回的是「含 await 的那条语句」的起点，偏移相对 `node.body.range[0] + 1`
+ * （也就是去掉外层花括号之后那段源码）。
+ *
+ * 嵌套函数里的 await 不算 —— 那是它们自己的钟，由它们自己的包装负责。
+ */
+function awaitFlushPoints(node: FunctionLike): number[] {
+    const body = node.body;
+
+    if (body.type !== 'BlockStatement') return [];
+
+    const base = body.range[0] + 1;
+    const points: number[] = [];
+
+    for (const statement of body.body) {
+        if (containsOwnAwait(statement)) points.push(Math.max(0, statement.range[0] - base));
+    }
+
+    return points;
+}
+
+/** 这条语句的执行路径上有没有 `await`（嵌套函数内部的不算） */
+function containsOwnAwait(root: TSESTree.Node): boolean {
+    let found = false;
+
+    const walk = (node: unknown): void => {
+        if (found || !node || typeof node !== 'object') return;
+
+        const any = node as TSESTree.Node;
+
+        if (typeof any.type !== 'string') return;
+        if (any !== root && isFunctionLike(any)) return;
+
+        if (any.type === 'AwaitExpression') {
+            found = true;
+
+            return;
+        }
+        for (const [key, value] of Object.entries(any)) {
+            if (key === 'range' || key === 'loc' || key === 'parent') continue;
+
+            if (Array.isArray(value)) value.forEach(walk);
+            else if (value && typeof value === 'object') walk(value);
+        }
+    };
+
+    walk(root);
+
+    return found;
+}
+
 function isFunctionLike(node: TSESTree.Node): node is FunctionLike {
     return (
         node.type === 'ArrowFunctionExpression' ||
@@ -1521,7 +1574,8 @@ class Generator {
                 // 换成 `arr` 之后就查不到它了 —— 而那种改动引用不变、内容变了，
                 // 加上"新旧值比一比"的守卫就会把刷新挡掉
                 writesAreAssignments(node, info.writes),
-                inner
+                inner,
+                awaitFlushPoints(node)
             );
 
             // 借来的参数被写了：告诉调用点一声（它知道那条路径）
@@ -1574,7 +1628,8 @@ class Generator {
                 reactive,
                 updates,
                 writesAreAssignments(node, info.writes),
-                inner
+                inner,
+                awaitFlushPoints(node)
             );
 
             edits.push({
@@ -1863,19 +1918,58 @@ class Generator {
      * `plain` 为 false（写入里有 `arr.push(v)` 之类）时不加比较 ——
      * 那种写法变量本身不会变，加了就永远不刷新了。
      */
-    private guardChanges(names: string[], updates: string, plain: boolean, inner: string): string {
+    private guardChanges(
+        names: string[],
+        updates: string,
+        plain: boolean,
+        inner: string,
+        flushPoints: number[] = []
+    ): string {
         // 函数体源码结尾通常已经有 `;` 或 `}`，别再补一个
         const joiner = /[;}]$/.test(inner.trim()) ? ' ' : '; ';
 
-        if (!updates || !plain || names.length === 0) {
-            return updates ? `${inner}${joiner}${updates}` : inner;
+        if (!updates) return inner;
+
+        /**
+         * 非 `plain`：写的是 `a.b` / `map.get(k).x` 这种**路径**，没法拿"旧值"比对
+         * （`scores['b']` 这种下标写法在 Map 上压根取不到东西，取一次就抛异常）。
+         * 那就无条件刷新，也不需要快照。
+         */
+        if (!plain || names.length === 0) {
+            const always = `${updates};`;
+
+            return `${this.withFlushes(inner, flushPoints, always)}${joiner}${always}`;
         }
 
         const previous = names.map(() => `__prev$${this.prevCounter++}`);
-        const snapshot = previous.map((name, index) => `${name} = ${names[index]}`).join(', ');
-        const changed = names.map((name, index) => `${name} !== ${previous[index]}`).join(' || ');
+        const pairs = previous.map((name, index) => `${name} = ${names[index]!}`).join(', ');
+        const changed = names.map((name, index) => `${name} !== ${previous[index]!}`).join(' || ');
 
-        return `const ${snapshot}; ${inner}${joiner}if (${changed}) { ${updates} }`;
+        // 刷完把快照更成当前值，下一段比的才是"上次刷到哪"
+        const flush = `if (${changed}) { ${updates} } ${pairs};`;
+
+        // 用 `let`：`await` 处刷完要重新赋值，快照跟着往前走
+        return `let ${pairs}; ${this.withFlushes(inner, flushPoints, flush)}${joiner}${flush}`;
+    }
+
+    /** 在每个 `await` 前面插一次刷新 */
+    private withFlushes(inner: string, points: number[], flush: string): string {
+        if (points.length === 0) return inner;
+
+        let result = '';
+        let taken = 0;
+
+        for (const point of points) {
+            const offset = Math.max(0, Math.min(point, inner.length));
+
+            // 同一条语句里有几个 await 也只插一次
+            if (offset < taken) continue;
+
+            result += `${inner.slice(taken, offset)}${flush} `;
+            taken = offset;
+        }
+
+        return result + inner.slice(taken);
     }
 
     /**

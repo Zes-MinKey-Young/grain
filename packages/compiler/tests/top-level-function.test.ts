@@ -24,7 +24,7 @@ it('a top-level arrow function that writes state gets the refresh calls', () => 
 
     // 函数被包装过（有"改之前的值"守卫）
     expect(js).toMatch(/function onEnded\(\)/);
-    expect(js).toMatch(/const __prev\$\d+ = index;/);
+    expect(js).toMatch(/(?:const|let) __prev\$\d+ = index;/);
 
     // 末尾追加了刷新调用
     expect(js).toMatch(/if \(index !== __prev\$\d+\) \{[\s\S]*update\$\d+\?\.\(\d+\)/);
