@@ -1,5 +1,5 @@
-import { readFileSync, readdirSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { dirname, extname, resolve } from 'node:path';
 
 import type { Plugin } from 'vite';
 
@@ -169,11 +169,150 @@ if (import.meta.hot) {
 }
 `;
 
+/** 多页模式生成的那个入口脚本 */
+const PAGE_ENTRY_FILE = '__grain-page.ts';
+
+export interface PagesOptions {
+    /** HTML 模板（相对项目根），默认 `app.html` */
+    template?: string;
+    /** 挂载点选择器，默认 `#app` */
+    mount?: string;
+}
+
 export interface GrainPluginOptions {
     /** 需要处理的文件后缀，默认 `['.grain']` */
     extensions?: string[];
     /** 透传给编译器的选项（比如 `runtimeModule`） */
     compiler?: CompileOptions;
+    /**
+     * 多页（MPA）模式：每条**静态**路由生成一个真实的 HTML 入口
+     *
+     * 默认是 SPA（一个 `index.html` + `grain:routes` + 前端路由）。开了这个就不一样了：
+     * `src/routes/record/+page.grain` 会变成 `<root>/record/index.html`，
+     * 每张页面自带入口脚本、自己 mount 自己，**不再经过路由**。
+     *
+     * ```
+     * src/routes/+page.grain          ->  index.html
+     * src/routes/record/+page.grain   ->  record/index.html
+     * ```
+     *
+     * 好处是静态托管（GitHub Pages 之类）不需要「404 回退到 index.html」那套把戏，
+     * 每条路由都是真文件、状态码都是 200，刷新和分享链接直接可用。
+     *
+     * 代价：页面之间是真跳转（整页刷新），站内不再有前端路由。动态段（`[id]`）
+     * 没法预渲染，会被跳过并给出提示。
+     *
+     * 模板默认读项目根的 `app.html`（和 SvelteKit 一个名字），里面的 module 脚本会被
+     * 换成该路由的入口。
+     */
+    pages?: boolean | PagesOptions;
+}
+
+/**
+ * 扫出所有能预渲染的静态路由
+ *
+ * 动态段（`[id]`）和兜底段（`[...all]`）没参数没法生成，跳过。
+ */
+export function staticPages(root: string): { pattern: string; file: string }[] {
+    const dir = resolve(root, ROUTES_DIR);
+
+    let names: string[] = [];
+
+    try {
+        names = readdirSync(dir, { recursive: true, encoding: 'utf8' })
+            .map((name) => name.replace(/\\/g, '/'))
+            .filter((name) => name === PAGE_FILE || name.endsWith(`/${PAGE_FILE}`))
+            .sort();
+    } catch {
+        return [];
+    }
+
+    return names
+        .map((name) => {
+            const file = resolve(dir, name);
+
+            return { pattern: routePattern(dir, file), file };
+        })
+        .filter(({ pattern }) => {
+            if (!pattern.includes(':')) return true;
+
+            console.warn(`[grain] 多页模式跳过动态路由 ${pattern}（没有参数，生成不出来）`);
+
+            return false;
+        });
+}
+
+/** 每个页面自己的入口脚本：把那个 `+page.grain` 挂上去，不经过路由 */
+function pageEntrySource(file: string, mount: string): string {
+    return `// 由 @graints/vite-plugin 生成，别手改
+import mount from ${JSON.stringify(file.replace(/\\/g, '/'))};
+
+const target = document.querySelector(${JSON.stringify(mount)}) as HTMLElement | null;
+
+if (target) mount(target);
+`;
+}
+
+/** 模板里挖掉原来的 module 脚本，换成这一页的入口 */
+export function pageHtml(template: string, entry: string): string {
+    const script = `<script type="module" src="${entry}"></script>`;
+    const stripped = template.replace(/[ \t]*<script[^>]*type=["']module["'][^>]*>\s*<\/script>\s*/gi, '');
+
+    return /<\/body>/i.test(stripped)
+        ? stripped.replace(/<\/body>/i, `        ${script}\n    </body>`)
+        : `${stripped}\n${script}\n`;
+}
+
+/**
+ * 生成多页入口，返回给 rollup 的 `input`
+ *
+ * 产物直接写在项目里（`index.html`、`record/index.html`），所以 vite 的 dev / preview
+ * 都能按「目录里有 index.html」这条规则直接命中，不用额外写中间件。
+ */
+export function writePages(root: string, options: PagesOptions, explicit = true): Record<string, string> {
+    const templatePath = resolve(root, options.template ?? 'app.html');
+    const mount = options.mount ?? '#app';
+
+    let template: string;
+
+    try {
+        template = readFileSync(templatePath, 'utf8');
+    } catch {
+        if (explicit) throw new Error(`[grain] 找不到多页模板 ${templatePath}`);
+
+        throw new Error(
+            '[grain] 多页模式需要一个 HTML 模板：把原来的 index.html 改名成 app.html '
+            + '（里面的 module 脚本会被各页面的入口替换）'
+        );
+    }
+
+    const entries: Record<string, string> = {};
+
+    for (const { pattern, file } of staticPages(root)) {
+        const segments = pattern === '/' ? [] : pattern.slice(1).split('/');
+        const htmlPath = resolve(root, ...segments, 'index.html');
+
+        if (htmlPath === templatePath) {
+            throw new Error(
+                `[grain] 模板不能是被覆盖的那个文件（${templatePath}）：`
+                + '把 index.html 改名成 app.html 再开多页模式'
+            );
+        }
+
+        const entryPath = resolve(root, ...segments, PAGE_ENTRY_FILE);
+        // 必须用**根相对**地址：dev 下 `/record`（不带尾斜杠）会被 vite 回退到
+        // `record/index.html`，但浏览器地址仍是 `/record`，`./__grain-page.ts`
+        // 会解析成根目录那个 —— 页面就挂错了
+        const entryUrl = `/${[...segments, PAGE_ENTRY_FILE].join('/')}`;
+
+        mkdirSync(dirname(htmlPath), { recursive: true });
+        writeFileSync(entryPath, pageEntrySource(file, mount), 'utf8');
+        writeFileSync(htmlPath, pageHtml(template, entryUrl), 'utf8');
+
+        entries[segments.length === 0 ? 'index' : segments.join('/')] = htmlPath;
+    }
+
+    return entries;
 }
 
 export default function grain(options: GrainPluginOptions = {}): Plugin {
@@ -220,10 +359,31 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         // Vite 认 tsconfig 的 `paths`，但默认是关的（resolve.tsconfigPaths）。
         // 项目里 alias 很常用，这里替用户打开；自己设过就听他的
         config(config) {
-            return {
+            const base = {
                 resolve: {
                     ...config.resolve,
                     tsconfigPaths: config.resolve?.tsconfigPaths ?? true
+                }
+            };
+
+            if (!options.pages) return base;
+
+            // 多页：按路由生成入口，并接管 rollup 的 input
+            const root = resolve(config.root ?? process.cwd());
+            const input = writePages(
+                root,
+                options.pages === true ? {} : options.pages,
+                options.pages !== true
+            );
+
+            return {
+                ...base,
+                build: {
+                    ...config.build,
+                    rollupOptions: {
+                        ...config.build?.rollupOptions,
+                        input
+                    }
                 }
             };
         },
@@ -236,6 +396,31 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
             const tsconfig = nearestTsconfig(config.root);
 
             paths = tsconfig ? readPaths(tsconfig) : null;
+        },
+
+        /**
+         * 多页模式下把 `/record` 重定向到 `/record/`
+         *
+         * 目录页的 HTML 里入口是根相对地址，但浏览器地址停在 `/record` 时
+         * 相对解析会跑偏；而且 vite 的目录回退在这种情况下会吐根目录的
+         * `index.html`，页面就挂错了。静态托管（GitHub Pages）本来也是这么做的。
+         */
+        configureServer(server) {
+            if (!options.pages) return;
+
+            const root = server.config.root;
+            const base = server.config.base;
+
+            server.middlewares.use((req, res, next) => {
+                const raw = (req.url ?? '').split('?')[0];
+
+                if (!raw.startsWith(base) || raw.endsWith('/') || extname(raw)) return next();
+                if (!existsSync(resolve(root, raw.slice(base.length), 'index.html'))) return next();
+
+                res.statusCode = 302;
+                res.setHeader('Location', `${raw}/`);
+                res.end();
+            });
         },
 
         // 虚拟模块
