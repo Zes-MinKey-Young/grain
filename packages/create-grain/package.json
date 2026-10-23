@@ -1,6 +1,6 @@
 {
     "name": "@graints/create-grain",
-    "version": "0.4.1",
+    "version": "0.4.2",
     "description": "Scaffold a new Grain project",
     "license": "MIT",
     "type": "module",
