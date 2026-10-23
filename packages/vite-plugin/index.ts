@@ -204,6 +204,9 @@ export interface GrainPluginOptions {
      *
      * 模板默认读项目根的 `app.html`（和 SvelteKit 一个名字），里面的 module 脚本会被
      * 换成该路由的入口。
+     *
+     * 注意：页面地址会多一层（`/record/`），`public/` 里的东西不能再写 `./x.png` ——
+     * 那会解析成 `/record/x.png`。一律用 `import.meta.env.BASE_URL + 'x.png'`。
      */
     pages?: boolean | PagesOptions;
 }
