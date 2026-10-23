@@ -423,6 +423,26 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
             });
         },
 
+        /** `vite preview` 也要一样的重定向，不然本地看预览会挂错页 */
+        configurePreviewServer(server) {
+            if (!options.pages) return;
+
+            const base = server.config.base;
+
+            server.middlewares.use((req, res, next) => {
+                const raw = (req.url ?? '').split('?')[0];
+
+                if (!raw.startsWith(base) || raw.endsWith('/') || extname(raw)) return next();
+                if (!existsSync(resolve(server.config.build.outDir, raw.slice(base.length), 'index.html'))) {
+                    return next();
+                }
+
+                res.statusCode = 301;
+                res.setHeader('Location', `${raw}/`);
+                res.end();
+            });
+        },
+
         // 虚拟模块
         load(id) {
             // `grain:routes` -> 目录即路由的表（项目根在 configResolved 时就定下来了）
