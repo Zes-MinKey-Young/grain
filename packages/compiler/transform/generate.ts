@@ -2520,6 +2520,15 @@ class Generator {
                 continue;
             }
 
+            // `bind:x` 简写（没写 `={...}`）：依赖就是父组件那个同名局部变量。
+            // 不记的话 deps 为空 -> 不生成 props 更新器 -> 子组件回写了父组件也推不回去
+            if (key.startsWith('bind:') && value === true) {
+                const target = key.slice('bind:'.length);
+                if (target !== 'this') deps.add(target);
+
+                continue;
+            }
+
             for (const chunk of chunksOf(value)) {
                 if (typeof chunk !== 'string') addAll(deps, collectReads(chunk.content));
             }
@@ -2979,12 +2988,25 @@ class Generator {
 
             // `bind:this` 没有"同名变量"这回事，跳过
             if (target !== 'this') {
-                const calls = this.updateCalls(new Set([target]));
+                // setter 走 `pendingBinds`：它是在**槽位都登记完**之后才渲染的，
+                // 那时候才知道要刷哪些片段。当场拼出来的话刷新调用是空的 ——
+                // 子组件回写时父组件不刷，按钮就"点了没反应"。
+                const setterName = `__bind$${this.counter++}`;
+
+                this.pendingBinds.push({
+                    name: setterName,
+                    render: (updates, names) =>
+                        `($value) => { ${this.guardChanges(
+                            names,
+                            updates,
+                            true,
+                            `${target} = $value;`
+                        )} return (() => (${target}))(); }`,
+                    writes: new Set([target])
+                });
 
                 return {
-                    code: `${name}: { external: true, get: () => (${target}), set: (__next) => { ${target} = __next;${
-                        calls ? ` ${calls}` : ''
-                    } } }`,
+                    code: `${name}: { external: true, get: () => (${target}), set: ${setterName} }`,
                     slot: false
                 };
             }

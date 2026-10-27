@@ -5,7 +5,7 @@ import type { Document } from 'happy-dom';
 import { join } from 'node:path';
 
 import { compile } from '..';
-import { flagToggle, popupOption } from './fixtures/components.ts';
+import { flagButton, flagToggle, popupOption } from './fixtures/components.ts';
 
 // 症状：点 OptionBox 里的某个选项，父组件收到了新值（界面变了），但 OptionBox
 // 自己显示的还是旧值。结构照 `PopupOption.grain` 抄（fixtures 里）。
@@ -128,6 +128,34 @@ it('binds `bind:checked` shorthand to the local variable, not to `true`', async 
 <FlagToggle bind:checked />`);
 
     expect(target.querySelector('.label')!.textContent!.trim()).toBe('off');
+});
+
+it('propagates a shorthand bind back to the parent', async () => {
+    // 子组件写 `checked` -> 走简写生成的 setter -> 父组件的变量和界面都要跟着变。
+    // setter 必须登记到 pendingBinds（槽位齐了才渲染），当场拼出来的刷新调用是空的，
+    // 结果就是"按钮点得动、但状态不动"。
+    await build(flagButton, 'flag-button');
+
+    const target = await mount(`<script>
+    import FlagButton from './flag-button.ts';
+
+    let checked = $state(false);
+</script>
+
+<FlagButton bind:checked />
+
+<span class="mirror">{checked ? 'on' : 'off'}</span>`);
+
+    const label = () => target.querySelector('.label')!.textContent!.trim();
+    const mirror = () => target.querySelector('.mirror')!.textContent!.trim();
+
+    expect(label()).toBe('off');
+    expect(mirror()).toBe('off');
+
+    click(target.querySelector('.btn')!);
+
+    expect(label()).toBe('on');
+    expect(mirror()).toBe('on');
 });
 
 it('keeps the selected marker on the picked option', async () => {

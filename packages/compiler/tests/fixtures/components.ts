@@ -119,6 +119,19 @@ export const flagToggle = `<script>
 <span class="label">{checked ? 'on' : 'off'}</span>
 `;
 
+/** 同上，但自己带个按钮会写 `checked` —— 用来验"子组件回写，父组件也跟着变" */
+export const flagButton = `<script>
+    let { checked = $bindable(false) } = $props<{ checked?: boolean }>();
+
+    function toggle() {
+        checked = !checked;
+    }
+</script>
+
+<span class="btn" role="button" onclick={toggle}>toggle</span>
+<span class="label">{checked ? 'on' : 'off'}</span>
+`;
+
 /** `GridSwitch.grain`：内联 SVG */
 export const gridSwitch = `<script>
     let { onchange: onChange, checked = $bindable(false) } = $props<{
