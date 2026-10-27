@@ -2424,7 +2424,7 @@ class Generator {
             }
 
             // 静态文本是字符串字面量，剩下的是可以刷新的 updater
-            slotUpdaters = items.filter((item) => !item.startsWith('"'));
+            slotUpdaters = items.filter((item) => item !== 'null' && !item.startsWith('"'));
             this.statements.push(...statements);
 
             const slotName = `slot$${this.counter++}`;
@@ -2911,7 +2911,12 @@ class Generator {
         for (const node of nodes) {
             // 元素（普通标签 / 组件）单独建：它要一个插入位置，而位置只有父建好才知道
             if (deferred && 'type' in node && node.type === 'element') {
+                // **必须先占位**：它虽然单独发射，但数组下标要和模板里的位置对齐。
+                // 不占位的话后面每个孩子都会往前挤一格 —— 连续两个元素会拿到同一个
+                // index，插到同一个参照节点前面，顺序就反了（进度条跑到按钮左边就是
+                // 这么来的）。运行时跳过 `null`，但它仍然占着那个下标。
                 deferred.push({ node: node as Element, index: items.length });
+                items.push('null');
 
                 continue;
             }

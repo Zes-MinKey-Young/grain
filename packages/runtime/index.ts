@@ -1085,7 +1085,21 @@ function resolveMount(at: Mount | undefined, self?: UpdaterImpl): { parent: Node
 
         if (!host) return null;
 
-        const before = at.index >= 0 ? (owner?.anchors ?? [])[at.index] ?? null : null;
+        // 这个槽位可能没有锚点（孩子带着插入位置单独发射，槽里留的是 `null` 占位）——
+        // 往后找第一个有锚点的兄弟，插在它前面；都没有就追加到末尾
+        const anchors = owner?.anchors ?? [];
+
+        let before: Node | null = null;
+
+        for (let position = at.index; position < anchors.length; position += 1) {
+            const node = anchors[position];
+
+            if (node) {
+                before = node;
+
+                break;
+            }
+        }
 
         return { parent: host, before };
     }
@@ -1419,6 +1433,10 @@ class UpdaterImpl {
         const host = this.host;
 
         children.forEach((child, index) => {
+            // `null` 是编译器留的占位：这个孩子自己带着插入位置发射（见 children()），
+            // 这里跳过，但下标要保留 —— 后面兄弟的 index 靠它对齐
+            if (child === null || child === undefined) return;
+
             if (typeof child === 'function') {
                 // 属性更新器：占一个片段编号，但不产生 DOM
                 if ((child as Partial<PropsUpdater>).props === true) {

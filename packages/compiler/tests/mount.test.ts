@@ -214,14 +214,17 @@ it('the top-level refresh never calls into a row updater', () => {
 });
 
 it('nested elements are created with an insert position, not inside children', () => {
-    // 父只收文本和插值；嵌套元素单独建，带 `{ parent, index }`
+    // 父只收文本和插值；嵌套元素单独建，带 `{ parent, index }`。
+    // 但它的槽位要留一个 `null` 占着：不占的话后面每个孩子都会往前挤一格，
+    // 连续两个元素会拿到同一个 index，插到同一个参照节点前面 —— 顺序就反了
+    // （进度条跑到按钮左边就是这么来的）。
     const js = compile(`<script>
     let count = $state(0);
 </script>
 <main>text <span>{count}</span> more</main>`, { filename: 'App.grain' }).js;
 
-    // main 的 children 里只有两个文本 —— span 不在里面
-    expect(js).toMatch(/creEle\("main", \{[^}]*\}, \["text ", " more"\]/);
+    // main 的 children 里是两个文本 + 一个 `null` 占位（span 自己带位置建）
+    expect(js).toMatch(/creEle\("main", \{[^}]*\}, \["text ", null, " more"\]/);
 
     // span 带着插入位置：插在 main 的第 1 个内容节点（" more"）前面
     expect(js).toMatch(/creEle\("span", \{\}, \[[^\]]*\], \{ parent: update\$\d+, index: 1 \}\)/);
