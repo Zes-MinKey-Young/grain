@@ -136,7 +136,7 @@ function borrowPaths(node: FunctionLike, borrows: BorrowParam[]): string[] {
 
     return [...found];
 }
-import { createScopeId, isGlobal, scopeStylesheet } from './style.js';
+import { createScopeId, isGlobal, scopeStylesheet, type StyleWarning } from './style.js';
 import { createSourceMap, type Anchor, type SourceMap } from './sourcemap.js';
 
 export interface CompileOptions {
@@ -1290,10 +1290,11 @@ class Generator {
         );
 
         const stylesheet = this.root.stylesheet;
+        const styleWarnings: StyleWarning[] = [];
         const css = !stylesheet
             ? ''
             : this.scopeId
-              ? scopeStylesheet(stylesheet, this.scopeId)
+              ? scopeStylesheet(stylesheet, this.scopeId, styleWarnings)
               : stylesheet.raw;
 
         // 模板表达式里的 `$borrow` 调用点：`analyzeScript` 只看 `<script>`，这里补上
@@ -1328,7 +1329,7 @@ class Generator {
             // 行级映射：DevTools 里才能看到原始的 `.grain` 行。
             // 锚点对着转译**前**的产物找（行数一致时更准：转译会改写类型标注等文本）
             map: createSourceMap(js, this.source, this.filename, this.anchors()),
-            warnings: this.analysis?.warnings ?? [],
+            warnings: [...(this.analysis?.warnings ?? []), ...styleWarnings],
             errors: this.analysis?.errors ?? []
         };
     }

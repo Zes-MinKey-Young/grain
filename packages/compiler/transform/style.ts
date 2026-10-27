@@ -12,6 +12,13 @@ import type { Stylesheet } from '../types.js';
 
 const REGEX_KEYFRAMES = /^(-(webkit|moz|o)-)?keyframes$/;
 
+/** 样式相关的提示。形状和借用警告一样，编辑器那条线一起显示 */
+export interface StyleWarning {
+    start: number;
+    end: number;
+    message: string;
+}
+
 /**
  * scope id：`grain-<hash>`，同时用作元素上的类名和选择器后缀。
  *
@@ -39,9 +46,10 @@ export function isGlobal(stylesheet: Stylesheet): boolean {
  * - 每个选择器的最后一段加上 `.grain-hash`
  * - `@keyframes` 的名字带上 hash，引用处（`animation` / `animation-name`）同步改
  */
-export function scopeStylesheet(stylesheet: Stylesheet, scopeId: string): string {
+export function scopeStylesheet(stylesheet: Stylesheet, scopeId: string, warnings: StyleWarning[] = []): string {
     const hash = scopeId.replace(/^grain-/, '');
     const keyframes = collectKeyframes(stylesheet.content.children, hash);
+    const warned = new Set<string>();
 
     walk(stylesheet.content.children, (node, insideKeyframes) => {
         if (node.type === 'Declaration') {
@@ -50,7 +58,25 @@ export function scopeStylesheet(stylesheet: Stylesheet, scopeId: string): string
             }
         } else if (node.type === 'Rule' && !insideKeyframes && node.prelude.type === 'SelectorList') {
             for (const selector of node.prelude.children.toArray()) {
-                if (selector.type === 'Selector') addScope(selector, scopeId);
+                if (selector.type !== 'Selector') continue;
+
+                const root = matchesNothing(selector);
+
+                if (root && !warned.has(root)) {
+                    warned.add(root);
+
+                    const offset = selector.loc?.start.offset ?? 0;
+
+                    warnings.push({
+                        start: offset,
+                        end: offset,
+                        message:
+                            `\`${root}\` matches nothing in a scoped style — it becomes \`${root}.${scopeId}\`, ` +
+                            `and no element carries that class. Use \`:global(${root})\``
+                    });
+                }
+
+                addScope(selector, scopeId);
             }
         }
     });
@@ -106,6 +132,36 @@ function renameAnimation(value: CssNode, renamed: Map<string, string>): void {
         const next = renamed.get(child.name);
         if (next) child.name = next;
     }
+}
+
+/** scoped 样式里"加完 scope 类就永远匹配不上"的选择器：`html` / `body` / `:root` */
+const ROOT_SELECTORS = new Set(['html', 'body']);
+
+/**
+ * 选择器的最后一段（scope 类就加在那儿）是不是根元素。
+ *
+ * `html .box` 没问题——类加在 `.box` 上；要警告的是 `html` / `body` / `:root` 自己
+ * 当最后一段的情况：`:root.grain-x` 没有任何元素能匹配，`<style>` 里定义的 CSS 变量
+ * 会整片失效（这个坑踩过一次）。
+ */
+function matchesNothing(selector: { children: List<CssNode> }): string | null {
+    const items = selector.children.toArray();
+
+    let start = 0;
+
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+        if (items[index]!.type === 'Combinator') {
+            start = index + 1;
+            break;
+        }
+    }
+
+    for (const item of items.slice(start)) {
+        if (item.type === 'PseudoClassSelector' && item.name === 'root') return ':root';
+        if (item.type === 'TypeSelector' && ROOT_SELECTORS.has(item.name)) return item.name;
+    }
+
+    return null;
 }
 
 /**
