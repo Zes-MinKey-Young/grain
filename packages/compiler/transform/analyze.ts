@@ -1402,13 +1402,14 @@ export function analyzeScript(program: TSProgram, source: string): ScriptAnalysi
                     return;
                 }
 
-                // 具名的那几个有专门的包装（换成 `const f = function f() {...}`），跳过
-                if (wrappedNodes.has(node)) return false;
+                // 具名的那几个有专门的包装（换成 `const f = function f() {...}`），
+                // 自己不再收 —— 但**要继续往下走**：它体内的回调
+                //（`requestAnimationFrame(() => …)`、`setTimeout`、`.then`）是异步执行的，
+                // 外层那份守卫在调用之后就比完旧值了，根本等不到写入
+                if (wrappedNodes.has(node)) return;
 
-                // 表达式体（`x => a = x`）没有花括号，塞不进守卫，先不管
-                if (node.type === 'FunctionDeclaration' || node.body.type !== 'BlockStatement') {
-                    return false;
-                }
+                // 函数声明本身不当回调（它有自己的包装）
+                if (node.type === 'FunctionDeclaration') return false;
 
                 callbacks.push({
                     name: '',

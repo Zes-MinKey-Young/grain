@@ -55,7 +55,7 @@ it('writes inside an inline callback get the refresh calls', () => {
     expect(js).toMatch(/if \(status !== __prev\$\d+\) \{[\s\S]*update\$\d+\?\.\(\d+\)/);
 });
 
-it('a callback inside a named function is not instrumented twice', () => {
+it('a callback inside a named function gets its own guard', () => {
     const js = compile(`<script>
     let n = $state(0);
 
@@ -67,9 +67,12 @@ it('a callback inside a named function is not instrumented twice', () => {
 </script>
 <p>{n}</p><button onclick={start}>go</button>`, { filename: 'App.grain' }).js;
 
-    // 外层函数的守卫已经覆盖了整段函数体（含嵌套回调）
-    // 只数声明：刷新处会把快照重新赋值，那种赋值不是声明
-expect(js.match(/let __prev\$\d+ = n;/g) ?? []).toHaveLength(1);
+    // 两份快照：外层函数一份，回调自己一份。
+    //
+    // 光靠外层那份不够 —— `.then(...)` 的回调在**外层返回之后**才跑，外层比旧值时
+    // `n` 还没变，那次刷新就白等（OptionBox 点开不显示就是这个）。两份都在的话，
+    // 回调跑完自己那份会刷新；外层那份提前刷一次只是多余，不影响正确性。
+    expect(js.match(/let __prev\$\d+ = n;/g) ?? []).toHaveLength(2);
 });
 
 it('a callback that writes nothing is left alone', () => {

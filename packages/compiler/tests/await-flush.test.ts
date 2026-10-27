@@ -59,8 +59,8 @@ it('嵌套函数里的 await 不算在这一层', () => {
 </script>
 <p>{status}</p><button onclick={() => void outer()}>go</button>`, { filename: 'App.grain' }).js;
 
-    // 外层：await 前一次 + 末尾一次。
-    // 内层那个 async 回调不算 —— 它是外层函数体里的嵌套函数，跟着外层的守卫走
-    // （顶层的匿名回调才会被单独包装，见 callback-and-async.test.ts）
-    expect(js.match(FLUSH) ?? []).toHaveLength(2);
+    // 两层各 2 次（await 前一次 + 末尾一次）：外层函数、内层那个 async 回调。
+    // 回调必须有自己的守卫 —— 它可能在很久以后才跑（`requestAnimationFrame`、
+    // `setTimeout`、`.then`），外层在调用之后就比完旧值了，那次刷新等不到它
+    expect(js.match(FLUSH) ?? []).toHaveLength(4);
 });

@@ -58,16 +58,14 @@ const triggers = async (target: Element) => {
     return trigger as Element;
 };
 
-// 已知缺口：写在**异步回调**里的 $state 写入不会生成刷新调用。
+// 回归线：`requestAnimationFrame(() => (sliding = true))` 里的写入必须能刷新。
 //
-// `requestAnimationFrame(() => (sliding = true))` 的守卫被发在了外层函数体上 ——
-// 外层的快照/比对在调用之后立刻执行，那时回调还没跑，等于没刷新。
-// 页面上的症状就是 OptionBox 点开不显示（弹窗节点在里面，但 `sliding` 那个 class 一直没刷上）。
+// 曾经守卫只发在外层函数体上（`let __prev = sliding; …; if (sliding !== __prev) …`），
+// 而 rAF 的回调要到下一帧才跑 —— 比较在回调执行前就做完了，class 永远刷不上，
+// 页面上的症状是 OptionBox 点开什么也看不到（弹窗节点在里面，但没有 `sliding`）。
 //
-// 修法在编译器里（把守卫塞进回调自己的函数体），试过一版但把 codegen 切坏了
-//（`isPlaying = false` 被插成 `isPlayingupdate$135?.(3); false`），先回滚。
-// 这条用例留着当红线的证据，改成 skip 只是为了让 regtest 保持绿。
-it.skip('shows the popup after clicking the trigger (blocked: callback writes do not refresh)', async () => {
+// 现在回调自己带守卫（含表达式体箭头），所以点开就能看到。
+it('shows the popup after clicking the trigger', async () => {
     const target = await mount(`<script>
     let visible = $state(false);
     let sliding = $state(false);

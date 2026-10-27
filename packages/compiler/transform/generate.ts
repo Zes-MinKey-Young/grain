@@ -1058,6 +1058,14 @@ class Generator {
      */
     private bindableEdits: Edit[] = [];
     /**
+     * 落在顶层函数体内的"回调守卫"改写（见 `callbackEdits`）。
+     *
+     * 这些不能进全局 edit 列表：顶层函数那条 edit 会把整个声明替换掉，嵌套应用会把
+     * 产物切坏。所以交给 `bodySource()` 拼进函数体里，每次 `callbackEdits(block)`
+     * 开头清空。
+     */
+    private callbackBodyEdits: Edit[] = [];
+    /**
      * 是否处在"每次重建都会重新创建"的上下文里（for 块、组件插槽）。
      * 这里面的片段不用注册——重建后旧节点就失效了，注册了只会产生无效的 update 调用。
      */
@@ -1518,6 +1526,11 @@ class Generator {
         this.nodeWriteEdits = this.nodeWrites(block);
         edits.push(...this.nodeWriteEdits);
 
+        // 5.4 匿名回调里的写入：守卫塞进回调自己的函数体。
+        // 必须在 5.5 之前登记 —— 顶层函数那条 edit 会把整个声明替换掉，
+        // 回调这条得先被 `bodySource()` 拼进函数体里，否则就是嵌套 edit
+        edits.push(...this.callbackEdits(block));
+
         // 5.5 写了 `$state` 的顶层函数：刷新直接写进函数体
         edits.push(...this.functionWrappers(block));
 
@@ -1796,7 +1809,7 @@ class Generator {
                 // 加上"新旧值比一比"的守卫就会把刷新挡掉
                 writesAreAssignments(node, info.writes),
                 inner,
-                awaitFlushPoints(node)
+                this.flushPoints(node.body.range, awaitFlushPoints(node))
             );
 
             // 借来的参数被写了：告诉调用点一声（它知道那条路径）
@@ -1826,11 +1839,33 @@ class Generator {
             this.wrappedFunctions.add(name);
         }
 
-        // 顶层语句里的匿名回调：只换函数体那段，箭头/方法本身的写法不动
+        return edits;
+    }
+
+    /**
+     * 匿名回调（`.then(x => …)`、`requestAnimationFrame(() => …)`、`setTimeout` …）：
+     * 守卫插进**回调自己的函数体**。
+     *
+     * 只靠外层函数的守卫是不够的 —— 回调是异步跑的，外层那份快照/比对在函数返回时就
+     * 做完了，那时写入还没发生（OptionBox 点开不显示：`sliding` 在 rAF 里置位，
+     * class 一直没刷上）。
+     *
+     * 落在顶层函数体内的那些**不能**单独应用：顶层函数那条 edit 会把整个声明替换掉，
+     * 嵌套应用会把产物切坏（出过 `isPlayingupdate$135?.(3); false` 这种事）。
+     * 所以它们进 `callbackBodyEdits`，由 `bodySource()` 在拼函数体时一并应用。
+     *
+     * @returns 需要单独应用的改写（不在任何顶层函数里的那些）
+     */
+    private callbackEdits(block: Script): Edit[] {
+        // 每个块自己算自己的：留着上一块的会把同一份 edit 应用两次（同样切坏产物）
+        this.callbackBodyEdits = [];
+
+        const outer: Edit[] = [];
+        const functions = [...(this.analysis?.functions.values() ?? [])];
+
         for (const info of this.analysis?.callbacks ?? []) {
             const node = info.node;
 
-            if (node.body.type !== 'BlockStatement') continue;
             if (node.range[0] < block.contentStart || node.range[1] > block.contentEnd) continue;
 
             const reactive = [...this.reactiveWrites(info.writes)];
@@ -1840,7 +1875,11 @@ class Generator {
 
             this.mutationEdits = mutations.edits;
 
-            const inner = this.bodySource(node.body.range).slice(1, -1);
+            // 表达式体（`() => (sliding = true)`）也要管
+            const blockBody = node.body.type === 'BlockStatement';
+            const inner = blockBody
+                ? this.bodySource(node.body.range).slice(1, -1)
+                : this.bodySource(node.body.range);
             const updates = this.updateCalls(new Set(reactive), mutations.skip);
 
             this.mutationEdits = [];
@@ -1850,17 +1889,26 @@ class Generator {
                 updates,
                 writesAreAssignments(node, info.writes),
                 inner,
-                awaitFlushPoints(node)
+                this.flushPoints(node.body.range, awaitFlushPoints(node))
             );
 
-            edits.push({
+            const edit: Edit = {
                 start: node.body.range[0],
                 end: node.body.range[1],
-                text: `{${body}}`
-            });
+                // 表达式体外面已经有括号了，塞 `{ … }` 会变成 `({ … })` 语法错 ——
+                // 用立刻执行的函数表达式，括号随便套
+                text: blockBody ? `{${body}}` : `(() => { ${body} })()`
+            };
+
+            const enclosing = functions.some(
+                (item) => node.range[0] >= item.node.range[0] && node.range[1] <= item.node.range[1]
+            );
+
+            if (enclosing) this.callbackBodyEdits.push(edit);
+            else outer.push(edit);
         }
 
-        return edits;
+        return outer;
     }
 
     /**
@@ -2007,11 +2055,45 @@ class Generator {
 
 
     /** 函数体源码；`$bindable` 的写入顺带改成读写对调用 */
+    /**
+     * `await` 刷新点换算成**改写后**文本里的偏移。
+     *
+     * `awaitFlushPoints()` 给的是相对原文的偏移，而 `bodySource()` 会应用一堆改写
+     *（`$bindable` / `$node` / 容器调用 / 回调守卫），长度就变了 —— 不校正的话刷新
+     * 调用会被插到标识符中间，实测切出过
+     * `await Images.loaupdate$135?.(3); dAndOptimize({`。
+     */
+    private flushPoints(range: [number, number], points: number[]): number[] {
+        const [from, to] = range;
+        const edits = [
+            ...this.bindableEdits,
+            ...this.nodeWriteEdits,
+            ...this.mutationEdits,
+            ...this.callbackBodyEdits
+        ].filter((edit) => edit.start >= from && edit.end <= to);
+
+        return points.map((point) => {
+            const absolute = from + point;
+            let shifted = absolute;
+
+            for (const edit of edits) {
+                if (edit.start < absolute) shifted += edit.text.length - (edit.end - edit.start);
+            }
+
+            return Math.max(0, shifted - from);
+        });
+    }
+
     private bodySource(range: [number, number]): string {
         const [from, to] = range;
 
-        // `$bindable` 的写入改写、`$node` 的写入改写、容器的精确调用，都算进去
-        const edits = [...this.bindableEdits, ...this.nodeWriteEdits, ...this.mutationEdits];
+        // `$bindable` 的写入改写、`$node` 的写入改写、容器的精确调用、回调守卫，都算进去
+        const edits = [
+            ...this.bindableEdits,
+            ...this.nodeWriteEdits,
+            ...this.mutationEdits,
+            ...this.callbackBodyEdits
+        ];
         const inside = edits.filter((edit) => edit.start >= from && edit.end <= to);
 
         // edit 的偏移是**绝对**的，所以先按原样拼、再剥 `$untrack` ——
