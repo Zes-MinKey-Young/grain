@@ -2242,7 +2242,11 @@ class Generator {
     private bindStatements(): string[] {
         return this.pendingBinds.map((bind) => {
             const reactive = [...this.reactiveWrites(bind.writes)];
-            const updates = this.updateCalls(new Set(reactive));
+
+            // 刷新按**全部写入**算，不只看 $state：$bindable 也是"写了要刷别人"的
+            //（`<Child bind:checked>` 简写生成的 setter 就是写它），过滤掉的话
+            // updates 是空的，子组件回写了父组件也不推 props —— 按钮点了没反应。
+            const updates = this.updateCalls(bind.writes.size > 0 ? bind.writes : new Set(reactive));
 
             return `const ${bind.name} = ${bind.render(updates, reactive)};`;
         });
