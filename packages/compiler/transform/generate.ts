@@ -2967,6 +2967,29 @@ class Generator {
     ): { code: string; slot: boolean } {
         const name = JSON.stringify(outputKey);
 
+        // `bind:checked` 这种**没写 `={...}`** 的简写：绑到父组件**同名局部变量**。
+        //
+        // HTML 里布尔属性不写值就是 true（下面那条），但 `bind:` 的语义是双向绑定 ——
+        // 简写应该等价于 `bind:checked={checked}`。按字面量 true 处理的话子组件一上来
+        // 就是 true（`PlayButton` 就是这么写的，于是播放按钮初始显示成暂停按钮）。
+        //
+        // 得放在 `value === true` 那条之前，否则永远轮不到这里。
+        if (key.startsWith('bind:') && value === true) {
+            const target = key.slice('bind:'.length);
+
+            // `bind:this` 没有"同名变量"这回事，跳过
+            if (target !== 'this') {
+                const calls = this.updateCalls(new Set([target]));
+
+                return {
+                    code: `${name}: { external: true, get: () => (${target}), set: (__next) => { ${target} = __next;${
+                        calls ? ` ${calls}` : ''
+                    } } }`,
+                    slot: false
+                };
+            }
+        }
+
         if (value === true) return { code: `${name}: true`, slot: false };
         if (typeof value === 'string') return { code: `${name}: ${JSON.stringify(value)}`, slot: false };
 

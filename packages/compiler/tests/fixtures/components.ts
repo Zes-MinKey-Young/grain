@@ -105,6 +105,20 @@ export const popupOption = `<script>
 </div>
 `;
 
+/**
+ * 只有一个 `$bindable` 开关、把状态显示出来的组件。
+ *
+ * 用来验 `bind:checked` 这种**没写 `={...}`** 的简写：它得绑到父组件同名的局部
+ * 变量，而不是 HTML 布尔属性那个字面量 `true`（PlayButton 就是这么写的，结果
+ * 播放按钮一上来就显示成暂停）。
+ */
+export const flagToggle = `<script>
+    let { checked = $bindable(false) } = $props<{ checked?: boolean }>();
+</script>
+
+<span class="label">{checked ? 'on' : 'off'}</span>
+`;
+
 /** `GridSwitch.grain`：内联 SVG */
 export const gridSwitch = `<script>
     let { onchange: onChange, checked = $bindable(false) } = $props<{

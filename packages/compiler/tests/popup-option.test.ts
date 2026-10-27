@@ -5,7 +5,7 @@ import type { Document } from 'happy-dom';
 import { join } from 'node:path';
 
 import { compile } from '..';
-import { popupOption } from './fixtures/components.ts';
+import { flagToggle, popupOption } from './fixtures/components.ts';
 
 // 症状：点 OptionBox 里的某个选项，父组件收到了新值（界面变了），但 OptionBox
 // 自己显示的还是旧值。结构照 `PopupOption.grain` 抄（fixtures 里）。
@@ -111,6 +111,23 @@ it('shows the store value right away when bound with $store', async () => {
     (window as unknown as { __active?: { set: (v: string) => void } }).__active?.set('c');
 
     expect(label()).toBe('b');
+});
+
+it('binds `bind:checked` shorthand to the local variable, not to `true`', async () => {
+    // `<Child bind:checked />` —— 没写 `={...}`。
+    // 这是 HTML 布尔属性的写法，但 grain 里 `bind:` 的简写应该绑到父组件**同名局部变量**。
+    // 绑成字面量 `true` 的话，子组件一上来就是 true（播放按钮显示成暂停按钮）。
+    await build(flagToggle, 'flag-toggle');
+
+    const target = await mount(`<script>
+    import FlagToggle from './flag-toggle.ts';
+
+    let checked = $state(false);
+</script>
+
+<FlagToggle bind:checked />`);
+
+    expect(target.querySelector('.label')!.textContent!.trim()).toBe('off');
 });
 
 it('keeps the selected marker on the picked option', async () => {
