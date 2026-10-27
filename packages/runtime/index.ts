@@ -1085,6 +1085,11 @@ function resolveMount(at: Mount | undefined, self?: UpdaterImpl): { parent: Node
 
         if (!host) return null;
 
+        // 父是组件根（fragment）：它的孩子都插在同一个参照节点之前。
+        // fragment 没有自己的元素，`anchors` 里也不会有东西 —— 不认这个的话，
+        // 组件的根元素会一路 append 到末尾（跑到后面的兄弟后面去）
+        if (owner?.insertBefore) return { parent: host, before: owner.insertBefore };
+
         // 这个槽位可能没有锚点（孩子带着插入位置单独发射，槽里留的是 `null` 占位）——
         // 往后找第一个有锚点的兄弟，插在它前面；都没有就追加到末尾
         const anchors = owner?.anchors ?? [];
@@ -1314,6 +1319,14 @@ class UpdaterImpl {
      * 不给 `at` 时两者相同（都装进一个 DocumentFragment），也就是旧行为。
      */
     host!: Node;
+    /**
+     * 组件根（fragment）的 children 要插到**哪个节点之前**。
+     *
+     * 元素有自己的 `el`，可以 `insertBefore(el, spot.before)` 一步到位；fragment 没有
+     * 元素，只能把 children 一个个插进去 —— 那就得记住同一个参照节点，否则它们会
+     * 一路 append 到末尾，跑到后面的兄弟后面去（footer 里组件甩到进度条右边就是这个）。
+     */
+    insertBefore: Node | null = null;
     /** children 里的动态片段，按 children 下标编号 */
     slots: Array<Slot | null> = [];
     /** 属性里的动态片段，接着往下编号 */
@@ -1344,6 +1357,7 @@ class UpdaterImpl {
 
         // 组件根没有自己的元素，children 直接插到调用方指定的位置
         this.host = spot && tag === null ? spot.parent : this.el;
+        this.insertBefore = spot && tag === null ? spot.before : null;
         this.slots = new Array(children.length).fill(null);
         this.propSlots = [];
         this.nested = [];
@@ -1429,6 +1443,12 @@ class UpdaterImpl {
         }
     }
 
+    /** 插一个节点：组件根要插在调用方给的参照节点之前，其余追加到末尾 */
+    private place(node: Node): void {
+        if (this.insertBefore) this.host.insertBefore(node, this.insertBefore);
+        else this.host.appendChild(node);
+    }
+
     private buildChildren(children: unknown[]): void {
         const host = this.host;
 
@@ -1469,8 +1489,6 @@ class UpdaterImpl {
                 const childEl = (child as Partial<Updater>).el;
 
                 if (childEl) {
-                    const before = host.childNodes.length;
-
                     // 块（`{#for ...}` 之类）自己管节点：它的行节点攒在 `nodes` 里
                     //（那个 getter 给的是"行节点 + 空列表分支 + 末尾锚点"），整段搬进来。
                     //
@@ -1479,14 +1497,14 @@ class UpdaterImpl {
                     const managed = (child as Partial<List>).nodes;
 
                     if (managed) {
-                        for (const node of managed) host.appendChild(node);
+                        for (const node of managed) this.place(node);
                     } else {
-                        host.appendChild(childEl);
+                        this.place(childEl);
                     }
 
                     // 这一项的参照节点：后面进来的元素要靠它定位插在哪。
                     // 用**第一个**节点（"插在这一项前面"的意思）—— 块可能有好几个节点
-                    this.anchors[index] = host.childNodes[before] as Node | undefined;
+                    this.anchors[index] = (managed ? managed[0] : childEl) as Node | undefined;
 
                     this.nested.push(child as Updater);
 
