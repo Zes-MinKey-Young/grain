@@ -16,7 +16,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "bun build ../compiler/index.ts --outfile dist/compiler/index.js --target node --format esm --external typescript --external css-tree --external oxc-parser && tsc -p . --emitDeclarationOnly && bun build index.ts --outfile dist/vite-plugin/index.js --target node --format esm --external typescript --external css-tree --external oxc-parser"
+        "build": "bun build ../compiler/index.ts --outfile dist/compiler/index.js --target node --format esm --external typescript --external css-tree --external oxc-parser && tsc -p . --emitDeclarationOnly && bun build index.ts --outfile dist/vite-plugin/index.js --target node --format esm --external vite --external typescript --external css-tree --external oxc-parser"
     },
     "publishConfig": {
         "access": "public",

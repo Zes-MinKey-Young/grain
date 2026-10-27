@@ -10,6 +10,7 @@ import type {
     Expression,
     ForBlock,
     IfBlock,
+    NodeDecl,
     Root,
     Script,
     TemplateNode
@@ -22,6 +23,7 @@ const { transpileModule, ModuleKind, ScriptTarget } = ts;
 
 import { parseInline } from '../nodes.js';
 import { ParseError } from '../errors.js';
+import { applyEdits, type Edit } from '../utils.js';
 
 import {
     analyzeScript,
@@ -135,6 +137,7 @@ function borrowPaths(node: FunctionLike, borrows: BorrowParam[]): string[] {
     return [...found];
 }
 import { createScopeId, isGlobal, scopeStylesheet } from './style.js';
+import { createSourceMap, type Anchor, type SourceMap } from './sourcemap.js';
 
 export interface CompileOptions {
     /** 运行时模块路径，默认 `@graints/runtime` */
@@ -154,6 +157,13 @@ export interface CompileOptions {
 export interface CompileResult {
     js: string;
     css: string;
+    /**
+     * JS 的行级 sourcemap（映射回原始的 `.grain`）。
+     *
+     * 只映射"原样来自源码"的行（脚本体那些），生成出来的行留空 —— 浏览器会沿用
+     * 上一段的映射。够 DevTools 显示原文件、断点落在正确的行上。
+     */
+    map: SourceMap | null;
     /**
      * 借用规则给出的提示（不是错误，产物照样能跑）。
      *
@@ -349,27 +359,39 @@ interface BindableInfo {
     statementEnd: number;
 }
 
-/** script 源码里的一处改写，区间是相对 script 内容开头的原始偏移 */
-interface Edit {
-    start: number;
-    end: number;
-    text: string;
-}
+/**
+ * `<script>` 里有没有**顶层** `await`（函数体里的不算）。
+ *
+ * 有的话整个实例脚本得放进 async IIFE —— 「await 完再建模板」正是我们要的语义：
+ * 数据先到，组件树后建。原来 SvelteKit 是靠 `+page.ts` 的 load 做到这一点的。
+ */
+function hasTopLevelAwait(block: Script | null): boolean {
+    if (!block) return false;
 
-/** 从后往前应用，前面的改写不会影响后面区间的计算 */
-function applyEdits(code: string, edits: Edit[], base: number): string {
-    let result = code;
+    let found = false;
 
-    for (const edit of [...edits].sort((a, b) => b.start - a.start || b.end - a.end)) {
-        const start = edit.start - base;
-        const end = edit.end - base;
+    simpleTraverse(block.content, {
+        enter(node) {
+            if (node.type === 'AwaitExpression') {
+                found = true;
 
-        if (start < 0 || end > result.length) continue;
+                return false;
+            }
 
-        result = result.slice(0, start) + edit.text + result.slice(end);
-    }
+            // 函数体里的 await 由函数自己的 async 负责，跟这一层无关
+            if (
+                node.type === 'FunctionDeclaration' ||
+                node.type === 'FunctionExpression' ||
+                node.type === 'ArrowFunctionExpression'
+            ) {
+                return false;
+            }
 
-    return result;
+            return undefined;
+        }
+    });
+
+    return found;
 }
 
 /** 找出 `$props()` 解构里用 `$bindable(...)` 声明的项 */
@@ -952,8 +974,55 @@ function writesAreAssignments(node: TSESTree.Node, names: Set<string>): boolean 
     return plain;
 }
 
+/**
+ * 语句列表：push 的时候顺手记下"这条语句对应源码哪个偏移"。
+ *
+ * 这么做而不是在几十个 push 点上各改一行 —— 那些点有的在 `capture()` 交换出来的
+ * 临时数组上，改起来容易把 `{#for}` 的语句顺序搞乱。
+ */
+class StatementList extends Array<string> {
+    static get [Symbol.species]() {
+        return Array;
+    }
+
+    constructor(
+        private readonly origin: () => number | null,
+        private readonly sink: Anchor[]
+    ) {
+        super();
+    }
+
+    override push(...items: string[]): number {
+        const offset = this.origin();
+
+        if (offset !== null) {
+            for (const item of items) this.sink.push({ text: item, offset });
+        }
+
+        return super.push(...items);
+    }
+}
+
 class Generator {
-    private statements: string[] = [];
+    /** 收集所有语句的锚点（各个 `capture()` 出来的临时列表共用一份） */
+    private anchorSink: Anchor[] = [];
+    /**
+     * 正在生成的模板节点在源码里的偏移。
+     *
+     * codegen 深度优先、按文档顺序走，"最近进入的那个节点"就是当前语句的来源；
+     * `child()` 进出时保存/恢复，父节点自己的那几条语句仍然记在父节点上。
+     */
+    private currentOrigin: number | null = null;
+
+    private statements: string[] = new StatementList(() => this.currentOrigin, this.anchorSink);
+    /**
+     * 正在生成的模板节点在源码里的偏移。
+     *
+     * codegen 是深度优先、按文档顺序走的，所以"最近进入的那个节点"就是当前语句的来源；
+     * `child()` 进出时保存/恢复，父节点自己那几条语句仍然记在父节点上。
+     */
+
+
     private slots: Slot[] = [];
     private wrappers: PendingWrapper[] = [];
     /**
@@ -1047,6 +1116,13 @@ class Generator {
      * （事件处理器、箭头函数、onmount、定时器……），也不用去改调用点的名字。
      */
     private wrappedFunctions = new Set<string>();
+    /**
+     * 已经被 `bodySource()` 拼进函数体里的 edit。
+     *
+     * 这些 edit 不能再交给全局的 `applyEdits` —— 它们跟"整段替换函数"是嵌套的，
+     * 嵌套会让偏移失效，产物被切坏（实测出过 `}, e, { const: __next$3 = newValue }`）。
+     */
+    private innerEdits: Edit[] = [];
     /** `$bindable` 变量 -> 它的刷新函数名 */
     private refreshNames = new Map<string, string>();
     /** 待生成的刷新函数（要等片段收集完才知道刷哪些） */
@@ -1110,7 +1186,7 @@ class Generator {
         const output: string[] = [`import { ${imported.join(', ')} } from ${JSON.stringify(this.runtime)};`];
 
         if (this.root.module) {
-            output.push('', '/* <script module> */', stripUntrack(this.root.module.raw).trim());
+            output.push('', '/* <script module> */', this.moduleScript(this.root.module));
         }
 
         // import / export 留在模块顶层
@@ -1182,15 +1258,25 @@ class Generator {
         // 套一层稳定的外壳：HMR 换实例时只换里面，父组件持有的引用不动
         instance.push('', `return component(${rootName}, create, props, children);`);
 
+        const indent = (line: string, spaces: number) => (line ? ' '.repeat(spaces) + line : '');
+        // `<script>` 里写了顶层 `await`：`create` 直接声明成 async，返回 Promise。
+        // 这样模板是"await 完之后"才建的，跟 SvelteKit 的 load 语义一样（数据先于组件树）
+        const async = hasTopLevelAwait(this.root.script);
+
         // 建一个组件实例。父组件通过 `Foo.create(props, children)` 调用。
         // `at` 是插入点：给了就把内容直接建在它里面，建树完成时已经在文档里了
         output.push(
             '',
             // `__at` 而不是 `at`：用户代码里可能有叫 at 的变量（实测撞过 `let at = 0`）
-            'export function create(props = {}, children = null, __at) {',
-            ...instance.map((line) => (line ? `  ${line}` : '')),
+            `export ${async ? 'async ' : ''}function create(props = {}, children = null, __at) {`,
+            ...instance.map((line) => indent(line, 2)),
             '}'
         );
+
+        if (async) {
+            // 给 router（以及将来可能的 suspense）认的标志
+            output.push('create.async = true;');
+        }
 
         output.push(
             '',
@@ -1233,12 +1319,125 @@ class Generator {
             }
         }
 
+        const raw = output.join('\n');
+        const js = transpile(raw, this.filename);
+
         return {
-            js: transpile(output.join('\n'), this.filename),
+            js,
             css,
+            // 行级映射：DevTools 里才能看到原始的 `.grain` 行。
+            // 锚点对着转译**前**的产物找（行数一致时更准：转译会改写类型标注等文本）
+            map: createSourceMap(js, this.source, this.filename, this.anchors()),
             warnings: this.analysis?.warnings ?? [],
             errors: this.analysis?.errors ?? []
         };
+    }
+
+    // ------------------------------------------------------------ module script
+
+    /**
+     * 处理 `<script module>`：跨实例共享、直接挂在模块顶层的那段代码。
+     *
+     * 跟实例脚本的区别是**没有组件实例**，所以 rune 的落地方式不一样：
+     *
+     * - `$state(x)` -> 普通变量（模块级没有片段可刷，`level` 也就没意义）
+     * - `$node(...)` -> 一对 get/listen + 一个变量，**自己订阅自己更新**
+     *   （源变了就重新取值；不涉及任何 `update$N`，因为这里没有片段）
+     * - `$props()` / `$bindable()` -> 报错（模块级没有 props）
+     *
+     * import / export 本来就该留在这一层，所以整段原样保留，只替换上面那几处。
+     */
+    private moduleScript(block: Script): string {
+        const edits: Edit[] = [];
+
+        const nodes = this.root.nodes.filter(
+            (node) => node.statement[0] >= block.contentStart && node.statement[1] <= block.contentEnd
+        );
+
+        // `$node(...)` 参数里的宏会被 readNode 展开后整个拼进语句替换里，
+        // 这里不能再应用一遍（嵌套 edit 会切坏产物）
+        const consumed = (item: Edit) =>
+            nodes.some((node) => item.start >= node.statement[0] && item.end <= node.statement[1]);
+
+        // 0. 宏展开（`$read` / `$store` / 用户宏）
+        edits.push(
+            ...this.root.replacements.filter(
+                (item) =>
+                    item.start >= block.contentStart &&
+                    item.end <= block.contentEnd &&
+                    !consumed(item)
+            )
+        );
+
+        for (const statement of block.content.body) {
+            // 1. `$state(...)` -> 初始值
+            if (statement.type === 'VariableDeclaration') {
+                for (const item of statement.declarations) {
+                    const init = item.init;
+
+                    if (init?.type !== 'CallExpression') continue;
+                    if (init.callee.type !== 'Identifier' || init.callee.name !== '$state') continue;
+
+                    const argument = init.arguments[0];
+
+                    edits.push({
+                        start: init.range[0],
+                        end: init.range[1],
+                        text: argument ? this.slice(argument.range).trim() : 'undefined'
+                    });
+                }
+            }
+
+            // 2. 模块级没有 props
+            simpleTraverse(statement as unknown as TSESTree.Node, {
+                enter: (node) => {
+                    if (node.type !== 'CallExpression' || node.callee.type !== 'Identifier') return;
+
+                    const name = node.callee.name;
+
+                    if (name !== '$props' && name !== '$bindable') return;
+
+                    throw new ParseError(
+                        `\`${name}\` has nothing to bind to in <script module> — it belongs in <script>`,
+                        node.range[0],
+                        node.range[1]
+                    );
+                }
+            });
+        }
+
+        // 3. `$node(...)` 声明：模块级自己订阅
+        for (const node of nodes) {
+            edits.push({
+                start: node.statement[0],
+                end: node.statement[1],
+                text: this.moduleNodeCode(node)
+            });
+        }
+
+        return stripUntrack(applyEdits(block.raw, edits, block.contentStart).trim());
+    }
+
+    /** 模块级 `$node`：读写对 + 变量 + 自订阅（没有片段可刷新） */
+    private moduleNodeCode(node: NodeDecl): string {
+        const pair = `__node$${this.counter++}`;
+        const members = [
+            node.get ? `get: ${node.get}` : '',
+            node.set ? `set: ${node.set}` : '',
+            node.listen ? `listen: ${node.listen}` : ''
+        ].filter(Boolean);
+
+        const code = [`const ${pair} = { ${members.join(', ')} };`];
+
+        code.push(node.get ? `let ${node.name} = ${pair}.get();` : `let ${node.name};`);
+
+        if (node.listen) {
+            const assign = node.get ? `${node.name} = ${pair}.get();` : `${node.name} = value;`;
+
+            code.push(`${pair}.listen?.((value) => { ${assign} });`);
+        }
+
+        return code.join('\n');
     }
 
     // ------------------------------------------------------------ script
@@ -1320,6 +1519,17 @@ class Generator {
 
         // 5.5 写了 `$state` 的顶层函数：刷新直接写进函数体
         edits.push(...this.functionWrappers(block));
+
+        // 已经拼进函数体的那些 edit 从全局剔掉：嵌套 edit 会让 `applyEdits` 切坏产物
+        if (this.innerEdits.length > 0) {
+            const consumed = new Set(this.innerEdits);
+
+            for (let index = edits.length - 1; index >= 0; index -= 1) {
+                if (consumed.has(edits[index]!)) edits.splice(index, 1);
+            }
+
+            this.innerEdits = [];
+        }
 
         // 6. 读写对的声明，插在 `let { ... } = $props()` 之后
         for (const bindable of bindables) {
@@ -1457,7 +1667,9 @@ class Generator {
             // `$node` 的刷新函数：先重算这个节点
             const assign = this.refreshAssigns.get(refresh.name) ?? '';
             // dev 下埋个检测点：真循环起来，运行时会抛
-            const guard = this.dev ? `guard(${JSON.stringify(refresh.name)}); ` : '';
+            // 传函数本身而不是名字：名字在每个实例里都一样，按名字计数会把"N 个实例
+        // 同一帧各刷一次"误判成环（见 runtime 里 `guard` 的注释）
+        const guard = this.dev ? `guard(${refresh.name}); ` : '';
 
             return `function ${refresh.name}() {${guard}${assign ? ` ${assign}` : ''}${updates ? ` ${updates}` : ' '}}`;
         });
@@ -1558,6 +1770,14 @@ class Generator {
             const mutations = this.mutationCalls(node);
 
             this.mutationEdits = mutations.edits;
+
+            // `bodySource()` 会把落在函数体里的 edit 一起拼进来，记下来，
+            // 之后从全局 edit 列表里剔掉（否则嵌套应用会切坏产物）
+            const [bodyFrom, bodyTo] = node.body.range;
+
+            for (const edit of [...this.bindableEdits, ...this.nodeWriteEdits, ...mutations.edits]) {
+                if (edit.start >= bodyFrom && edit.end <= bodyTo) this.innerEdits.push(edit);
+            }
 
             const params = this.paramsOf(node, borrows);
             // 去掉外层花括号，交给 guardChanges 重新包一层
@@ -1760,6 +1980,14 @@ class Generator {
             ];
 
             edits.push({ start: node.statement[0], end: node.statement[1], text: lines.join('\n') });
+
+            // `$node(...)` 的参数里可能套着宏（`$node($read(name))`）：那段文本已经被
+            // readNode 展开、拼进上面这条 edit 了，别再让全局 applyEdits 应用一遍
+            for (const item of this.root.replacements) {
+                if (item.start >= node.statement[0] && item.end <= node.statement[1]) {
+                    this.innerEdits.push(item);
+                }
+            }
 
             this.nodePairs.set(node.name, { pair, refresh, set: Boolean(node.set) });
 
@@ -2715,8 +2943,30 @@ class Generator {
         return `creBound(${render}${listen ? `, ${listen}` : ''})`;
     }
 
+    /** 语句锚点（sourcemap 用） */
+    private anchors(): Anchor[] {
+        return this.anchorSink;
+    }
+
     private child(node: TemplateNode, index: number, owner: string | null): string | string[] | null {
         // 模板插值里的绑定值：`{ listen: (update) => ... }`
+        if (!('type' in node)) return this.boundSource(node as BindingValue);
+
+        const saved = this.currentOrigin;
+
+        const range = (node as { range?: [number, number] }).range;
+
+        if (range) this.currentOrigin = range[0];
+
+        const result = this.childAt(node, index, owner);
+
+        this.currentOrigin = saved;
+
+        return result;
+    }
+
+    private childAt(node: TemplateNode, index: number, owner: string | null): string | string[] | null {
+        // `child()` 已经判过一次；这里是为了让 TS 收窄类型
         if (!('type' in node)) return this.boundSource(node as BindingValue);
 
         switch (node.type) {
@@ -2754,30 +3004,71 @@ class Generator {
 
     private ifBlock(node: IfBlock, index: number, owner: string | null): string {
         const deps = templateReads(node);
+        const slotBase = this.slots.length;
 
-        // 分支内容由 if 片段自己返回，里面的表达式不单独注册片段
-        const branches: Array<{ test: string | null; items: string[] }> = [
-            { test: node.test.raw, items: this.children(node.children, null) }
-        ];
+        /** 每个分支一个 render：建树语句全收在里面，条件成立时才跑 */
+        const branches: Array<{ test: string | null; render: string }> = [];
+
+        const plan = (test: string | null, children: TemplateNode[]) => {
+            const render = `__ifBranch$${this.counter++}`;
+            const frag = `__ifFrag$${this.counter++}`;
+
+            // 关键：分支内容 capture 出来，**不进 create 层** —— 这样子组件不会
+            // 在条件为假时被实例化（以前就是这样把 `operationList` 还没赋值、
+            // `selectedNote` 还是 null 的组件提前建了出来）
+            const [items, statements] = this.capture(() => this.children(children, null), false);
+
+            const body = statements.length > 0 ? `${statements.join('\n')}\n` : '';
+
+            branches.push({ test, render });
+
+            return [
+                `    const ${render} = () => {`,
+                ...(body ? body.split('\n').map((line) => (line ? `        ${line}` : line)) : []),
+                `        const ${frag} = creFragment([${items.join(', ')}]);`,
+                `        return { frag: ${frag}, nodes: Array.from(${frag}.el.childNodes) };`,
+                '    };'
+            ].join('\n');
+        };
+
+        const renders = [plan(node.test.raw, node.children)];
 
         for (const alternate of node.alternates) {
-            branches.push({
-                test: alternate.test ? alternate.test.raw : null,
-                items: this.children(alternate.children, null)
-            });
+            renders.push(plan(alternate.test ? alternate.test.raw : null, alternate.children));
         }
 
-        const body = branches
-            .map((branch, i) => {
-                const keyword =
-                    i === 0 ? `if (${branch.test})` : branch.test ? `else if (${branch.test})` : 'else';
-                return `${keyword} { return [${branch.items.join(', ')}]; }`;
-            })
-            .join(' ');
+        // 块内的片段改由分支 fragment 刷新（重跑子闭包），create 层不再直接调它们
+        for (const slot of this.slots.slice(slotBase)) slot.inner = true;
 
         if (owner) this.slots.push({ update: owner, index, deps });
 
-        return `() => { ${body} return []; }`;
+        const cache = `__ifCache$${this.counter++}`;
+
+        // `if (t0) which = 0; else if (t1) which = 1; else which = 2;`
+        const choose = branches
+            .map((branch, i) => {
+                if (i === 0) return `if (${branch.test}) __which = 0;`;
+
+                return branch.test === null ? `else __which = ${i};` : `else if (${branch.test}) __which = ${i};`;
+            })
+            .join(' ');
+
+        return [
+            '(() => {',
+            ...renders,
+            `    const ${cache} = [];`,
+            `    const __renders$ = [${branches.map((branch) => branch.render).join(', ')}];`,
+            '    return () => {',
+            '        let __which = -1;',
+            `        ${choose}`,
+            '        if (__which < 0) return [];',
+            `        const __entry = ${cache}[__which] ??= __renders$[__which]();`,
+            // 分支已经建过：重跑 fragment 的子闭包（插值刷新），节点不重建
+            '        __entry.frag();',
+            '        return __entry.nodes;',
+            '    };',
+            '})()'
+        ].join('\n');
     }
 
     /**
@@ -3516,7 +3807,7 @@ class Generator {
     private capture<T>(run: () => T, insideFragment = true): [T, string[]] {
         const saved = this.statements;
         const savedFragment = this.insideFragment;
-        const inner: string[] = [];
+        const inner: string[] = new StatementList(() => this.currentOrigin, this.anchorSink);
 
         this.statements = inner;
         this.insideFragment = insideFragment;

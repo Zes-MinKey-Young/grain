@@ -328,9 +328,15 @@ class ListImpl {
         }
     }
 
-    sync(items: Iterable<unknown>, force = false): void {
+    sync(items: Iterable<unknown> | null | undefined, force = false): void {
+        // `{#for x of null}` 当空列表处理（Svelte 也是这个语义）。
+        //
+        // 这不只是防手滑：编译器会把 for 的 `sync` 发在 create 顶层，即使这个 for 包在
+        // `{#if cond}` 里、cond 为假也照样跑一次 —— 那么 `{#if children}{#for c of children}`
+        // 在 children 为 null 时就会 `Array.from(null)` 崩掉。
+        //
         // 只在这里展开一次：`entries()` 这类迭代器是一次性的，展开两遍第二遍就是空的
-        const next = Array.from(items);
+        const next = items ? Array.from(items) : [];
 
         this.values = next;
 
@@ -708,8 +714,9 @@ class ListImpl {
             default:
                 // 说不清的那些：重新取一次再比对
                 if (this.options.source) {
-                    this.values = Array.from(this.options.source());
+                    const source = this.options.source();
 
+                    this.values = source ? Array.from(source) : [];
                     this.sync(this.values);
                 }
         }
@@ -910,13 +917,26 @@ const GUARD_WINDOW_MS = 10;
 const GUARD_LIMIT = 100;
 
 const guardHits = new Map<string, { start: number; count: number }>();
+/**
+ * 按**函数引用**计数。
+ *
+ * `__refresh$27` 这个名字在组件的每个实例里都一样，拿名字当键的话，N 个实例在同一帧
+ * 各跑一次就凑够 100 次，被误判成环（树形判定线一次 sync 能建几十个实例）。
+ * 函数是每个实例各一份的，所以键用函数本身。字符串那种留着兼容旧产物。
+ */
+const guardByFunction = new WeakMap<object, { start: number; count: number }>();
 
-export function guard(name: string): void {
+export function guard(target: string | ((...args: never[]) => unknown)): void {
+    const name = typeof target === 'string' ? target : target.name || '__refresh';
+
     const now = Date.now();
-    const at = guardHits.get(name);
+    const at = typeof target === 'string' ? guardHits.get(target) : guardByFunction.get(target);
 
     if (!at || now - at.start > GUARD_WINDOW_MS) {
-        guardHits.set(name, { start: now, count: 1 });
+        const fresh = { start: now, count: 1 };
+
+        if (typeof target === 'string') guardHits.set(target, fresh);
+        else guardByFunction.set(target, fresh);
 
         return;
     }
@@ -1124,6 +1144,15 @@ function toNodes(value: unknown): Node[] {
     }
 
     if (Array.isArray(value)) return value.flatMap(toNodes);
+
+    // 子组件的 `<script>` 里写了顶层 `await`，`create()` 就会返回 Promise。
+    // 只有页面根（router 那边 `await`）撑得住这种组件，塞进父组件的孩子列表里
+    // 只会变成一段 "[object Promise]" 文本 —— 与其让人对着这种鬼东西查半天，直接报错
+    if (typeof (value as { then?: unknown }).then === 'function') {
+        throw new Error(
+            'A component with a top-level `await` in `<script>` returns a Promise; it can only be used as a page root, not as a child component'
+        );
+    }
 
     if (typeof value === 'function') {
         const updater = value as Partial<Updater>;
@@ -1582,6 +1611,10 @@ export function hotReplace(
     oldCreate: (props?: unknown, children?: unknown) => Updater,
     nextCreate: (props?: unknown, children?: unknown) => Updater
 ): number {
+    // 异步组件（`<script>` 里有顶层 `await`，打了 `create.async`）在这是拿不到节点的 ——
+    // `nextCreate()` 返回的是 Promise。返回 0 让调用方退回"清空挂载点重新挂"
+    if ((nextCreate as { async?: boolean }).async) return 0;
+
     let replaced = 0;
 
     for (const shell of [...components]) {

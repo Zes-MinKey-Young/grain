@@ -1,4 +1,45 @@
 /**
+ * 源码里的一处改写。
+ *
+ * A single rewrite over the source. `start` / `end` are absolute offsets in whatever
+ * the string was sliced from; `applyEdits` takes the slice's own origin as `base`.
+ */
+export interface Edit {
+    start: number;
+    end: number;
+    text: string;
+}
+
+/**
+ * 从后往前应用改写，前面的改写不会影响后面区间的计算。
+ *
+ * Apply edits back to front so earlier ones don't shift the offsets of later ones.
+ * An edit whose range falls outside `code` (relative to `base`) is skipped — that
+ * usually means it belongs to another block or was already spliced in elsewhere.
+ *
+ * 区间**不能嵌套**：外层覆盖内层时，先应用的那条会让另一条的偏移失效，产物会被切坏。
+ *
+ * @param code 待改写的文本
+ * @param edits 改写列表，偏移是绝对偏移
+ * @param base `code` 第一个字符在源码里的绝对偏移
+ * @returns 改写后的文本
+ */
+export function applyEdits(code: string, edits: Edit[], base: number): string {
+    let result = code;
+
+    for (const edit of [...edits].sort((a, b) => b.start - a.start || b.end - a.end)) {
+        const start = edit.start - base;
+        const end = edit.end - base;
+
+        if (start < 0 || end > result.length) continue;
+
+        result = result.slice(0, start) + edit.text + result.slice(end);
+    }
+
+    return result;
+}
+
+/**
  * 不需要闭合标签的元素。
  *
  * Elements that must not have a closing tag — `<br>`, `<img>`, `<input>`, and so on.

@@ -1,4 +1,12 @@
-import { generate, type CssNode, type List, type TypeSelector } from 'css-tree';
+import {
+    generate,
+    parse,
+    type CssNode,
+    type List,
+    type PseudoClassSelector,
+    type Selector,
+    type TypeSelector
+} from 'css-tree';
 
 import type { Stylesheet } from '../types.js';
 
@@ -105,9 +113,12 @@ function renameAnimation(value: CssNode, renamed: Map<string, string>): void {
  *
  * `.a > .b:hover` -> `.a > .b.grain-hash:hover`
  * `*` 直接换成 scope 类，避免产生 `*.grain-hash`
+ *
+ * `:global(...)` 里的那段不参与 scope：先把伪类拆成节点，再看"目标元素"那一段
+ * 是不是整段都在 `:global` 里 —— 是就不加 scope，只把 `:global(...)` 脱掉。
  */
 function addScope(selector: { type: 'Selector'; children: List<CssNode> }, scopeId: string): void {
-    const items = selector.children.toArray();
+    const { items, global: fromGlobal } = expandGlobals(selector);
     if (items.length === 0) return;
 
     // 最后一个组合器之后才是"目标元素"那一段
@@ -117,6 +128,21 @@ function addScope(selector: { type: 'Selector'; children: List<CssNode> }, scope
             start = i + 1;
             break;
         }
+    }
+
+    // 目标元素整段都来自 `:global(...)`：不 scope
+    let allGlobal = items.length > start;
+    for (let i = start; i < items.length; i += 1) {
+        if (!fromGlobal[i]) {
+            allGlobal = false;
+            break;
+        }
+    }
+
+    if (allGlobal) {
+        selector.children.fromArray(items);
+
+        return;
     }
 
     // 伪类 / 伪元素放在 scope 类后面
@@ -141,4 +167,57 @@ function addScope(selector: { type: 'Selector'; children: List<CssNode> }, scope
     }
 
     selector.children.fromArray(items);
+}
+
+/**
+ * 把选择器里的 `:global(...)` 拆开，并记下每个节点是不是来自它。
+ *
+ * css-tree 不认识 `:global`，参数会被塞成一个 `Raw`（`.a .b` 这种整串），
+ * 所以这里再按选择器的语法解析一遍，才能把组合器拆对。
+ */
+function expandGlobals(selector: { children: List<CssNode> }): { items: CssNode[]; global: boolean[] } {
+    const items: CssNode[] = [];
+    const global: boolean[] = [];
+
+    for (const item of selector.children.toArray()) {
+        if (item.type !== 'PseudoClassSelector' || item.name !== 'global') {
+            items.push(item);
+            global.push(false);
+            continue;
+        }
+
+        const inner = globalInner(item);
+
+        // 没有参数（`.a :global`）或者解析失败：当普通伪类处理
+        if (inner.length === 0) {
+            items.push(item);
+            global.push(false);
+            continue;
+        }
+
+        items.push(...inner);
+        for (let index = 0; index < inner.length; index += 1) global.push(true);
+    }
+
+    return { items, global };
+}
+
+/** `:global(...)` 的参数 -> 选择器节点 */
+function globalInner(pseudo: PseudoClassSelector): CssNode[] {
+    const children = pseudo.children as List<CssNode> | null;
+    if (!children) return [];
+
+    const first = children.toArray()[0];
+    if (!first) return [];
+
+    // 正常是 Raw（css-tree 不认识这个伪类）；万一哪天认识了，直接用解析好的节点
+    if (first.type !== 'Raw') return children.toArray();
+
+    try {
+        const parsed = parse(first.value, { context: 'selector' }) as Selector;
+
+        return parsed.children.toArray();
+    } catch {
+        return [];
+    }
 }

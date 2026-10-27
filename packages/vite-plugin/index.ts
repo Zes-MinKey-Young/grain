@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, extname, resolve } from 'node:path';
 
-import type { Plugin } from 'vite';
+import { preprocessCSS, type Plugin, type ResolvedConfig } from 'vite';
 
 import {
     compile,
@@ -23,6 +23,20 @@ const STYLE_QUERY = 'grain-style.css';
 
 /** `App.grain?grain-ast` -> 解析结果，用来在页面上查看 AST */
 const AST_QUERY = 'grain-ast';
+
+/**
+ * `App.grain?grain-source` -> 组件原始源码，**用 `text/html` 回**。
+ *
+ * sourcemap 的 `sources` 指这儿：DevTools 按响应的 MIME 选高亮模式，`.grain` 这种
+ * 未知扩展名会被当成纯文本（没有高亮、还按 JS 解析出一堆红线）。
+ */
+const SOURCE_QUERY = 'grain-source';
+
+/** 组件里的那个 `<style ...>` 块 */
+const STYLE_BLOCK = /<style\b([^>]*)>([\s\S]*?)<\/style>/;
+
+/** `<style lang="less">` 里的 `lang` */
+const LANG_ATTRIBUTE = /\blang\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s"'>]+))/i;
 
 /**
  * `grain:routes` -> 路由表。
@@ -326,6 +340,10 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
     // transform（JS）和 load（CSS）会各编译一次同一个文件，按内容缓存掉
     const cache = new Map<string, CompileResult>();
     let isDev = false;
+    /** 已经在 configResolved 里拿到的配置（`preprocessCSS` 要它） */
+    let resolvedConfig: ResolvedConfig | null = null;
+    /** `<style lang="less">` 预处理时引入的文件（`@import` 的），HMR 要盯着 */
+    const styleDeps = new Map<string, string[]>();
     /** tsconfig 的 `paths`；Vite 自己那套认不了 `.grain`，这里补上 */
     let paths: PathConfig | null = null;
     /** 项目根：`grain:routes` 要扫它下面的 `src/routes` */
@@ -343,13 +361,51 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         return { file, queries: rawQuery ? rawQuery.split('&') : [] };
     };
 
-    const compileFile = (file: string, code: string): CompileResult => {
+    /**
+     * `<style lang="less">` / `lang="scss"`：交给 Vite 自己的 CSS 预处理管线，
+     * 拿到普通 CSS 之后再把 `lang` 去掉 —— 后面照常按组件样式做 scope。
+     *
+     * 之所以在这儿做而不是编译器里：编译器要同步、也不该背 less/sass 的依赖；
+     * 而 Vite 已经知道项目装了哪个预处理器、`@import` 的别名该怎么解析。
+     *
+     * @returns 改写后的源码 + 预处理器引入的文件；没有 `lang` 时返回 null
+     */
+    const preprocessStyle = async (
+        code: string,
+        file: string
+    ): Promise<{ code: string; deps: string[] } | null> => {
+        const block = STYLE_BLOCK.exec(code);
+        if (!block) return null;
+
+        const attributes = block[1] ?? '';
+        const lang = LANG_ATTRIBUTE.exec(attributes);
+        const name = lang?.[1] ?? lang?.[2] ?? lang?.[3];
+
+        // `lang="css"` / 没写 lang：本来就是 CSS，不用过预处理器
+        if (!name || name === 'css') return null;
+
+        if (!resolvedConfig) return null;
+
+        // 拿扩展名告诉 Vite 用哪个预处理器（它在 id 上看后缀，不看 query）
+        const result = await preprocessCSS(block[2] ?? '', `${file}.${name}`, resolvedConfig);
+
+        return {
+            code: code.replace(block[0], `<style${attributes.replace(LANG_ATTRIBUTE, '')}>${result.code}</style>`),
+            deps: [...(result.deps ?? [])]
+        };
+    };
+
+    const compileFile = async (file: string, code: string): Promise<CompileResult> => {
         const key = `${file}\n${code}`;
         const cached = cache.get(key);
         if (cached) return cached;
 
+        const preprocessed = await preprocessStyle(code, file);
+
+        if (preprocessed) styleDeps.set(file, preprocessed.deps);
+
         // dev 下编译器会往刷新函数埋循环检测点
-        const result = compile(code, { ...compilerOptions, filename: file, dev: isDev });
+        const result = compile(preprocessed?.code ?? code, { ...compilerOptions, filename: file, dev: isDev });
         cache.set(key, result);
 
         return result;
@@ -393,6 +449,7 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
 
         configResolved(config) {
             isDev = config.command === 'serve';
+            resolvedConfig = config;
 
             projectRoot = config.root;
 
@@ -409,6 +466,30 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
          * `index.html`，页面就挂错了。静态托管（GitHub Pages）本来也是这么做的。
          */
         configureServer(server) {
+            const devRoot = server.config.root;
+
+            // DevTools 里点开 sourcemap 指向的 `.grain` 时，浏览器会来取这个地址。
+            // 用 `text/html` 回它 —— 组件本来就是"HTML 外壳 + script/style"，
+            // Chrome 按 MIME 选高亮模式；`text/plain` 的话整片没有语法高亮、还会
+            // 被当成 JS 解析出一堆红色波浪线
+            server.middlewares.use((req, res, next) => {
+                const url = req.url ?? '';
+                const at = url.indexOf(`?${SOURCE_QUERY}`);
+
+                if (at === -1) return next();
+
+                const path = decodeURIComponent(url.slice(0, at));
+                const file = path.startsWith('/@fs/')
+                    ? path.slice('/@fs/'.length)
+                    : resolve(devRoot, path.replace(/^\//, ''));
+
+                if (!isGrain(file) || !existsSync(file)) return next();
+
+                res.setHeader('Content-Type', 'text/html; charset=utf-8');
+                res.setHeader('Cache-Control', 'no-cache');
+                res.end(readFileSync(file, 'utf8'));
+            });
+
             if (!options.pages) return;
 
             const root = server.config.root;
@@ -447,7 +528,7 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
         },
 
         // 虚拟模块
-        load(id) {
+        async load(id) {
             // `grain:routes` -> 目录即路由的表（项目根在 configResolved 时就定下来了）
             if (id === RESOLVED_ROUTES_ID) return routesModule(projectRoot ?? process.cwd());
 
@@ -456,7 +537,11 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
 
             if (queries.includes(STYLE_QUERY)) {
                 // `<file>?grain-style.css` -> 组件样式（交给 Vite 当普通 CSS 处理）
-                return compileFile(file, readFileSync(file, 'utf8')).css;
+                const result = await compileFile(file, readFileSync(file, 'utf8'));
+
+                for (const dep of styleDeps.get(file) ?? []) this.addWatchFile(dep);
+
+                return result.css;
             }
 
             if (queries.includes(AST_QUERY)) {
@@ -488,16 +573,26 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
 
         // `<file>.grain` -> JS 模块。
         // dev 下 Vite 会给非 JS 后缀的 import 加上 `?import` 之类的 query，所以只排掉自己的虚拟模块
-        transform(code, id) {
+        async transform(code, id) {
             const { file, queries } = splitId(id);
-            if (queries.includes(STYLE_QUERY) || queries.includes(AST_QUERY) || !isGrain(file)) return null;
 
-            const { js, css } = compileFile(file, code);
+            if (
+                queries.includes(STYLE_QUERY) ||
+                queries.includes(AST_QUERY) ||
+                queries.includes(SOURCE_QUERY) ||
+                !isGrain(file)
+            ) {
+                return null;
+            }
+
+            const { js, css, map } = await compileFile(file, code);
             const cssImport = css ? `\nimport ${JSON.stringify(`${file}?${STYLE_QUERY}`)};` : '';
 
             return {
                 code: js + cssImport + (isDev ? hmrSnippet(runtime) : ''),
-                map: null
+                // 行级映射，DevTools 里才看得到原始的 `.grain`。
+                // 源码地址走 `?grain-source`：那边是 `text/html`，Chrome 才会按 HTML 高亮
+                map: map && isDev ? { ...map, sources: [`${file}?${SOURCE_QUERY}`] } : map
             };
         }
     };

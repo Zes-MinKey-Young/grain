@@ -657,8 +657,12 @@ function callArguments(call: TSESTree.CallExpression, source: string, start: num
 /**
  * 展开 `<script>` / `<script module>` / `<script onmount>` 里的宏调用。
  *
- * 宏在这儿展开成**表达式**：`const bump = $handler(count)` 里的调用会被换成
- * 宏返回的 token 拼出来的那段代码。所以遍历 AST，找到宏调用就整个替换掉。
+ * 宏在这儿最常见的结果是**表达式**：`const bump = $handler(count)` 里的调用会被换成
+ * 宏返回的 token 拼出来的那段代码，AST 里那个节点也一并换掉（后面算读写依赖要用）。
+ *
+ * 但宏也可以展开成**绑定值的成员**（`get:` / `set:` / `listen:`）—— `$read` / `$store`
+ * 就是这样，配合 `$node($read(name))` 使用。那玩意儿不是表达式，没法解析成节点，
+ * 于是 AST 保持原样（节点本身合法），正文由 `readNode` 按绑定值重新读。
  */
 function expandScript(
     block: Script,
@@ -687,7 +691,15 @@ function expandScript(
         replacements.push({ start, end, text: item.raw });
         macros.push({ name, start, end, text: item.raw, where: 'script' });
 
-        return expressionFromRaw(item, { start, end }, placement, `the result of the macro \`${name}\``).content;
+        try {
+            return expressionFromRaw(item, { start, end }, placement, `the result of the macro \`${name}\``)
+                .content;
+        } catch {
+            // 不是表达式（比如展开成了 `listen: ...`）：正文照样换，AST 留着不动。
+            // 用错地方的话，产物里会留下不合法的代码 —— 但那是调用方的错，
+            // 这里不再"展开结果必须是表达式"地拦一道。
+            return call;
+        }
     };
 
     const visit = (node: unknown): unknown => {

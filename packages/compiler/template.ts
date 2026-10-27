@@ -28,10 +28,28 @@ export function readFragment(parser: Parser): RawTemplateNode[] {
         if (parser.isBlock('script') || parser.isBlock('style')) break;
         if (isClosingTag(parser)) parser.error('Unexpected closing tag');
 
+        const before = parser.index;
+
         nodes.push(...readNodes(parser, true));
+
+        // readNodes 什么都不收、位置也不动时，这个循环就成了死循环 (实测：元素里的
+        // `{/xxx}` —— 它把 `{/` 交还给调用方，而顶层没人接)。宁可报错也别把进程挂住
+        if (parser.index === before) noProgress(parser, before);
     }
 
     return nodes;
+}
+
+/**
+ * 循环里"读了一轮却一步没走"的兜底。
+ *
+ * 正常写法下不会走到这里；能走到说明有一处没被任何读取器消费的标记，
+ * 继续转下去就是死循环，所以直接报错。
+ */
+function noProgress(parser: Parser, at: number): never {
+    if (parser.match('{:') || parser.match('{/')) parser.error('There is no block to close', at);
+
+    parser.error('Unexpected token: nothing could be parsed here', at);
 }
 
 /** 是否是 `</tag>` 形式的闭合标签（`</ div>` 这种不是） */
@@ -369,7 +387,12 @@ function readBranchChildren(parser: Parser): RawTemplateNode[] {
     while (parser.index < parser.length) {
         if (parser.match('{:') || parser.match('{/')) break;
 
+        const before = parser.index;
+
         children.push(...readNodes(parser, false));
+
+        // 同上：`</div>` 之类的游离闭合标签会让 readNodes 原样返回，这里必须停下来
+        if (parser.index === before) noProgress(parser, before);
     }
 
     return children;
@@ -479,7 +502,14 @@ function readChildren(parser: Parser): RawTemplateNode[] {
 
     while (parser.index < parser.length) {
         if (isClosingTag(parser)) return children;
+
+        const before = parser.index;
+
         children.push(...readNodes(parser, false));
+
+        // readNodes 把 `{:` / `{/` 留给调用方消费；元素这里没有"块"可配，只能报错。
+        // 以前这里会原地打转（`<div>{/snippet}</div>` 直接把编译器挂住）
+        if (parser.index === before) noProgress(parser, before);
     }
 
     parser.error('Unclosed element');
@@ -717,7 +747,15 @@ export function readAttributeValue(parser: Parser): RawAttributeValue {
         return value;
     }
 
-    return readChunks(parser, (source, index) => isWhitespace(source[index]) || source[index] === '>');
+    // `/>` 也要当成结束：`<Foo x={1}/>` 后面那个 `/` 不是值的一部分。
+    // 以前它被当作文本吃进值里，`readElement` 就看不到自闭合，`<Foo>` 被当成容器
+    return readChunks(
+        parser,
+        (source, index) =>
+            isWhitespace(source[index]) ||
+            source[index] === '>' ||
+            (source[index] === '/' && source[index + 1] === '>')
+    );
 }
 
 /**

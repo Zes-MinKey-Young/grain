@@ -246,7 +246,9 @@ export function createRouter(options: {
 
         if (!page) return;
 
-        const result = page(target) as unknown;
+        // 页面组件的 `<script>` 里可能有顶层 `await`（`create.async`），那 `mount`
+        // 返回的是 Promise — 等它建好再继续
+        const result = await (page(target) as unknown);
 
         // 编译产物的 mount 返回一个 dispose（有的话）
         if (typeof result === 'function') mounted = result as () => void;
