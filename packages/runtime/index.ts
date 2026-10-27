@@ -1495,16 +1495,13 @@ class UpdaterImpl {
                     // 不能只插那个锚点 —— 行节点是 `place()` 时插到锚点前面的，而
                     // `place()` 依赖锚点已经在 DOM 里（`el.parentNode`），那要等这一步做完
                     const managed = (child as Partial<List>).nodes;
+                    const placed = managed ? [...managed] : [childEl];
 
-                    if (managed) {
-                        for (const node of managed) this.place(node);
-                    } else {
-                        this.place(childEl);
-                    }
+                    for (const node of placed) this.place(node);
 
                     // 这一项的参照节点：后面进来的元素要靠它定位插在哪。
                     // 用**第一个**节点（"插在这一项前面"的意思）—— 块可能有好几个节点
-                    this.anchors[index] = (managed ? managed[0] : childEl) as Node | undefined;
+                    this.anchors[index] = placed[0] as Node | undefined;
 
                     this.nested.push(child as Updater);
 
@@ -1517,14 +1514,14 @@ class UpdaterImpl {
                     // 记下真正落进去的节点，HMR 换实例时才知道要替换哪一段
                     const meta = (child as Partial<ComponentShell>).__grain;
 
-                    if (meta) meta.nodes = [...host.childNodes].slice(before);
+                    if (meta) meta.nodes = placed as Node[];
 
                     return;
                 }
 
                 const anchor = document.createComment('');
 
-                host.appendChild(anchor);
+                this.place(anchor);
 
                 const render = child as Bound;
                 const slot: Slot = { anchor, render, nodes: [] };
@@ -1541,7 +1538,7 @@ class UpdaterImpl {
                 let last: Node | undefined;
 
                 for (const node of toNodes(child)) {
-                    host.appendChild(node);
+                    this.place(node);
 
                     last = node;
                 }
