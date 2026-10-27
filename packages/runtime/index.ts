@@ -1172,6 +1172,66 @@ function eventFor(el: Element, name: string): string {
     return 'input';
 }
 
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+/**
+ * 这些标签必须用 `createElementNS` 建。
+ *
+ * `document.createElement('g')` 造出来的是 `HTMLUnknownElement`：文档树看着没问题、
+ * 属性也都在，但浏览器根本不当它是 SVG，结果就是——图标整个不渲染。`svg` 本身
+ * 还好（它有 HTML 特例），里面的 `g` / `path` / `circle` 全中招。
+ */
+const SVG_TAGS = new Set([
+    'svg',
+    'g',
+    'path',
+    'circle',
+    'ellipse',
+    'line',
+    'polyline',
+    'polygon',
+    'rect',
+    'text',
+    'tspan',
+    'textPath',
+    'use',
+    'defs',
+    'symbol',
+    'marker',
+    'mask',
+    'pattern',
+    'clipPath',
+    'linearGradient',
+    'radialGradient',
+    'stop',
+    'filter',
+    'foreignObject',
+    'image',
+    'animate',
+    'animateTransform',
+    'feBlend',
+    'feColorMatrix',
+    'feGaussianBlur',
+    'feOffset',
+    'feMerge',
+    'feMergeNode'
+]);
+
+/**
+ * 建元素：SVG 的用命名空间版本，其余照旧。
+ *
+ * 判断两次：父节点已经是 SVG 命名空间就跟着用（`<filter>` 里的冷门标签也能覆盖），
+ * 否则看标签本身在不在那份常用表里（`<svg>` 自己就是这种情况）。
+ */
+function createElementFor(tag: string, parent: Node | null): Element {
+    // `namespaceURI` 在 `Element` 上，`Node` 的声明里没有
+    const namespace = (parent as Element | null)?.namespaceURI ?? null;
+
+    if (namespace === SVG_NS) return document.createElementNS(SVG_NS, tag);
+
+    return SVG_TAGS.has(tag) ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
+}
+
 function readProp(el: Element, name: string): unknown {
     return name in el ? (el as unknown as Record<string, unknown>)[name] : el.getAttribute(name);
 }
@@ -1245,9 +1305,14 @@ class UpdaterImpl {
     anchors: Array<Node | undefined> = [];
 
     init(tag: string | null, props: Props, children: unknown[], at?: Mount): void {
-        this.el = tag === null ? document.createDocumentFragment() : document.createElement(tag);
-
+        // 先解插入点：建元素时要知道父节点是不是 SVG（`<filter>` 里那些冷门标签
+        // 靠白名单覆盖不全，父节点是 SVG 命名空间就跟着用）
         const spot = resolveMount(at, this);
+
+        this.el =
+            tag === null
+                ? document.createDocumentFragment()
+                : createElementFor(tag, spot?.parent ?? null);
 
         // 给了插入点就立刻插进去：建树完成时它已经在文档里了（onmount 因此不用是个钩子）
         if (spot && tag !== null) spot.parent.insertBefore(this.el, spot.before);
