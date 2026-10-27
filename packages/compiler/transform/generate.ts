@@ -1060,6 +1060,14 @@ class Generator {
      */
     private bindableEdits: Edit[] = [];
     /**
+     * `$props` 里 `$bindable` 的订阅（等模板建好再挂）。
+     *
+     * 绑定可能**没有 getter** —— `$store(x)` 就是（只有 set + listen），值靠 listen
+     * 送进来。不接住的话本地变量永远停在 `$bindable` 的默认值，依赖它派生的 `$node`
+     * 也就算不出东西（次侧栏切换按钮一直显示 "Select Option" 就是这么来的）。
+     */
+    private bindableListens: Array<{ binding: string; name: string }> = [];
+    /**
      * 落在顶层函数体内的"回调守卫"改写（见 `callbackEdits`）。
      *
      * 这些不能进全局 edit 列表：顶层函数那条 edit 会把整个声明替换掉，嵌套应用会把
@@ -1239,6 +1247,19 @@ class Generator {
             instance.push(
                 '',
                 ...this.nodeListens.map((item) => `${item.pair}.listen?.(${item.refresh});`)
+            );
+        }
+
+        // `$bindable` 的订阅：外部源（store / 受控父组件）送值过来时更新本地变量，
+        // 再刷依赖它的东西。同样得等元素建好（刷新调用要用到那些 updater）
+        for (const item of this.bindableListens) {
+            const calls = this.updateCalls(new Set([item.name]));
+
+            instance.push(
+                '',
+                `${item.binding}.listen?.(() => { ${item.name} = ${item.binding}.get();${
+                    calls ? ` ${calls}` : ''
+                } });`
             );
         }
 
@@ -1556,6 +1577,8 @@ class Generator {
                 end,
                 text: `\nconst ${bindable.binding} = toBinding(props[${JSON.stringify(bindable.prop)}], ${bindable.fallback});\nlet ${bindable.name} = ${bindable.binding}.get();`
             });
+
+            this.bindableListens.push({ binding: bindable.binding, name: bindable.name });
         }
 
         // 7. `$untrack(...)` -> 参数本体（编译期标记，不进产物）

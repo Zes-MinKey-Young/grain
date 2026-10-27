@@ -88,6 +88,31 @@ it('updates its own label when an option is picked', async () => {
     expect(label()).toBe('b');
 });
 
+it('shows the store value right away when bound with $store', async () => {
+    // 父组件用 `$store(active)` 绑过去：那个绑定**没有 getter**（只有 set + listen），
+    // 值是靠 listen 送进来的。子组件得自己接住，否则永远停在 `$bindable` 的默认值
+    // —— 页面上的症状就是次侧栏那个切换按钮一直显示 "Select Option"。
+    await build(popupOption, 'popup-option');
+
+    const target = await mount(`<script>
+    import PopupOption from './popup-option.ts';
+    import { writable } from '${runtimePath.replace(/\\/g, '/')}';
+
+    const active = writable('b');
+</script>
+
+<PopupOption options={['a', 'b', 'c']} bind:currentOption={$store(active)} />`);
+
+    const label = () => target.querySelector('.label')!.textContent!.trim();
+
+    expect(label()).toBe('b');
+
+    // 之后 store 变了也要跟着走
+    (window as unknown as { __active?: { set: (v: string) => void } }).__active?.set('c');
+
+    expect(label()).toBe('b');
+});
+
 it('keeps the selected marker on the picked option', async () => {
     await build(popupOption, 'popup-option');
 
