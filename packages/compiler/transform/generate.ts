@@ -2532,12 +2532,20 @@ class Generator {
         const updater = `props$${this.counter++}`;
         const refresh = slotUpdaters.map((item) => `${item}();`).join(' ');
 
+        // `var` 而不是 `const`：刷新函数可能在它定义之前就被叫到（`$node` 的
+        // `listen` 在 create 期间就会立刻回调一次），配合 `?.()` 就是安全的
         this.statements.push(
-            `const ${updater} = () => { ${refresh}${name}.setProps(${propsCode}, ${slotCode}); };`,
+            `var ${updater} = () => { ${refresh}${name}.setProps(${propsCode}, ${slotCode}); };`,
             `${updater}.props = true;`
         );
 
-        this.slots.push({ update: owner, index: index + 1, deps });
+        // 属性更新器**直接按名字调**，不再占父 children 的槽位。
+        //
+        // 走槽位的写法是 `index + 1` —— 只有"组件自己也在 children 数组里"时那个
+        // 下标才对。延迟挂载的组件只占一个 `null` 占位，`index + 1` 于是指到了后面
+        // 那个孩子身上：写 `currentOption` 刷新的是 `mirror` 那个 span，子组件永远
+        // 收不到新值（OptionBox 父组件变了、自己不显示就是这么来的）。
+        this.nodeTriggers.push({ refresh: `${updater}?.`, deps });
 
         return [name, updater];
     }

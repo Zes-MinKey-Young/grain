@@ -48,6 +48,63 @@ export const playButton = `<script>
 <IconSwitchButton onImgSrc="/icons/pause.svg" offImgSrc="/icons/play.svg" onchange={onchange} bind:checked />
 `;
 
+/**
+ * `PopupOption.grain` 的骨架：`$bindable` + `$node` 派生下标 + `$node` 的文本插值。
+ *
+ * 症状是"点了选项父组件更新了、自己显示没变"。
+ */
+export const popupOption = `<script>
+    let {
+        options = [],
+        displayTexts = null,
+        currentOption = $bindable(''),
+        onchange,
+        equals
+    } = $props<{
+        options: any[];
+        displayTexts?: string[] | null;
+        currentOption?: any;
+        onchange?: (option: any) => void;
+        equals?: (a: any, b: any) => boolean;
+    }>();
+
+    let isPopupVisible = $state(false);
+
+    const same = (a: any, b: any) => (equals ? equals(a, b) : a === b);
+
+    // 选中项全部由 currentOption 推出来
+    const currentIndex = $node({
+        get: () => options.findIndex((option) => same(option, currentOption))
+    });
+
+    function textOf(option: any, index: number) {
+        return displayTexts?.[index] || String(option ?? '');
+    }
+
+    function selectOption(index: number) {
+        const option = options[index];
+
+        currentOption = option;
+        onchange?.(option);
+        isPopupVisible = false;
+    }
+</script>
+
+<div class="trigger" role="button" onclick={() => (isPopupVisible = true)}>
+    <span class="label">{currentIndex >= 0 ? textOf(options[currentIndex], currentIndex) : 'Select Option'}</span>
+
+    {#if isPopupVisible}
+        <div class="popup">
+            {#for [i, option] of options.entries()}
+                <div class="option-item {i === currentIndex ? 'selected' : ''}" onclick={() => selectOption(i)}>
+                    {textOf(option, i)}
+                </div>
+            {/for}
+        </div>
+    {/if}
+</div>
+`;
+
 /** `GridSwitch.grain`：内联 SVG */
 export const gridSwitch = `<script>
     let { onchange: onChange, checked = $bindable(false) } = $props<{
