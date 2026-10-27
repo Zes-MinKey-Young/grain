@@ -109,6 +109,35 @@ it('keeps order when the parent sits inside an {#if} branch', async () => {
     expect(childNames(footer)).toEqual(['div', 'div', 'input']);
 });
 
+it('keeps order inside a {#for} row', async () => {
+    await build(iconSwitchButton, 'icon-switch');
+    await build(playButton, 'play-button');
+
+    // 判定线列表就是这种形状：`{#if}` 里套 `{#for}`，行里再放组件
+    const target = await mount(`<script>
+    import PlayButton from './play-button.ts';
+
+    let items = $state([1, 2]);
+</script>
+
+<div id="rows">
+    {#for item of items}
+        <div class="row">
+            <PlayButton />
+            <span>{item}</span>
+        </div>
+    {/for}
+</div>`);
+
+    const rows = [...target.querySelectorAll('.row')];
+
+    expect(rows.length).toBe(2);
+
+    for (const row of rows) {
+        expect(childNames(row)).toEqual(['div', 'span']);
+    }
+});
+
 it('keeps a component above its following element (secondary sidebar)', async () => {
     await build(iconSwitchButton, 'icon-switch');
     await build(playButton, 'play-button');
