@@ -717,6 +717,8 @@ function mentions(node: TSESTree.Node, names: Set<string>): boolean {
 interface Deferred {
     node: Element;
     index: number;
+    /** 是子组件：还要给它的 props 更新器留一格（见 `component()`） */
+    props?: boolean;
 }
 
 /**
@@ -2453,9 +2455,16 @@ class Generator {
         return { ...attributes, class: [...chunks, ` ${scope}`] };
     }
 
-    private element(node: Element, owner: string | null, index: number, at?: string): string | string[] {
+    private element(
+        node: Element,
+        owner: string | null,
+        index: number,
+        at?: string,
+        /** 是 `flushDeferred` 那一路（父建好之后才创建的） */
+        deferred = false
+    ): string | string[] {
         return isComponentName(node.name)
-            ? this.component(node, owner, index, at)
+            ? this.component(node, owner, index, at, deferred)
             : this.plainElement(node, at);
     }
 
@@ -2465,7 +2474,14 @@ class Generator {
      * 只 `create()` 一次。依赖的 state 变化时推新 props 给它（`setProps`），
      * 不重新 create —— 重建会把子组件自己的 state 一起丢掉。
      */
-    private component(node: Element, owner: string | null, index: number, at?: string): string[] {
+    private component(
+        node: Element,
+        owner: string | null,
+        index: number,
+        at?: string,
+        /** 是 `flushDeferred` 那一路：props 更新器得手工登记（见下面的 `slot`） */
+        deferred = false
+    ): string[] {
         const parts: string[] = [];
         const deps = new Set<string>();
 
@@ -2539,13 +2555,20 @@ class Generator {
             `${updater}.props = true;`
         );
 
-        // 属性更新器**直接按名字调**，不再占父 children 的槽位。
+        // 属性更新器要在父的 children 里占一格：父刷新时靠 `update$N(index + 1)` 调它。
         //
-        // 走槽位的写法是 `index + 1` —— 只有"组件自己也在 children 数组里"时那个
-        // 下标才对。延迟挂载的组件只占一个 `null` 占位，`index + 1` 于是指到了后面
-        // 那个孩子身上：写 `currentOption` 刷新的是 `mirror` 那个 span，子组件永远
-        // 收不到新值（OptionBox 父组件变了、自己不显示就是这么来的）。
-        this.nodeTriggers.push({ refresh: `${updater}?.`, deps });
+        // 延迟挂载的组件（`deferred`）不在 children 数组里，父建树时也就注册不到它 ——
+        // 由 `flushDeferred` 之后补一句 `update$parent.slot(index + 1, props$N)` 手工登记。
+        // 直接按名字调（`props$N?.()`）是不行的：更新器常常定义在 `{#for}` 行的闭包里，
+        // 而在外层作用域生成的刷新函数够不到它（会抛 `props$N is not defined`）。
+        // 编译期依赖：写入依赖它的变量时要发 `update$parent(index + 1)`
+        this.slots.push({ update: owner, index: index + 1, deps });
+
+        // 延迟挂载的组件不在 children 数组里，父建树时注册不到这个更新器 ——
+        // 补一句手工登记。直接按名字调（`props$N?.()`）是不行的：更新器可能定义在
+        // `{#for}` 行的闭包里，在外层作用域生成的刷新函数够不到它
+        //（会抛 `props$N is not defined`）。
+        if (deferred) this.statements.push(`${owner}.slot(${index + 1}, ${updater});`);
 
         return [name, updater];
     }
@@ -2897,7 +2920,13 @@ class Generator {
     /** 父建好之后，把它的嵌套元素逐个创建出来（带插入位置） */
     private flushDeferred(deferred: Deferred[], parent: string): void {
         for (const item of deferred) {
-            this.element(item.node, parent, item.index, `{ parent: ${parent}, index: ${item.index} }`);
+            this.element(
+                item.node,
+                parent,
+                item.index,
+                `{ parent: ${parent}, index: ${item.index} }`,
+                item.props
+            );
         }
     }
 
@@ -3005,8 +3034,16 @@ class Generator {
                 // 不占位的话后面每个孩子都会往前挤一格 —— 连续两个元素会拿到同一个
                 // index，插到同一个参照节点前面，顺序就反了（进度条跑到按钮左边就是
                 // 这么来的）。运行时跳过 `null`，但它仍然占着那个下标。
-                deferred.push({ node: node as Element, index: items.length });
+                const element = node as Element;
+                const component = isComponentName(element.name);
+
+                deferred.push({ node: element, index: items.length, props: component });
                 items.push('null');
+
+                // 组件的 props 更新器也要占一格（见 `component()`）：父刷新它用的是
+                // `update$parent(index + 1)`，而组件体是单独发射的、不在数组里 ——
+                // 不给它留位，那个下标就会指到后面那个孩子身上
+                if (component) items.push('null');
 
                 continue;
             }

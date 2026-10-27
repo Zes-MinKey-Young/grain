@@ -1443,6 +1443,17 @@ class UpdaterImpl {
         }
     }
 
+    /**
+     * 登记一个"按槽位调用"的更新器。
+     *
+     * 延迟挂载的子组件（父建好之后才 `create` 的）不在父的 children 数组里，
+     * 父建树时自然注册不到它的 props 更新器 —— 编译器会补一句
+     * `update$parent.slot(index + 1, props$N)`。
+     */
+    slot(index: number, render: () => unknown): void {
+        this.slots[index] = { anchor: null, render, nodes: [], props: true };
+    }
+
     /** 插一个节点：组件根要插在调用方给的参照节点之前，其余追加到末尾 */
     private place(node: Node): void {
         if (this.insertBefore) this.host.insertBefore(node, this.insertBefore);
