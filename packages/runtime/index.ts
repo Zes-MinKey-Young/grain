@@ -1239,11 +1239,22 @@ function readProp(el: Element, name: string): unknown {
 function applyProp(el: Element, key: string, value: unknown): void {
     if (value === null || value === undefined || value === false) {
         el.removeAttribute(key);
-    } else if (key === 'class' || !(key in el)) {
-        el.setAttribute(key, String(value));
-    } else {
-        (el as unknown as Record<string, unknown>)[key] = value;
+
+        return;
     }
+
+    // SVG 元素上的 `width` / `height` 这些是**只读**的 `SVGAnimatedLength`，
+    // 走属性赋值会抛 "has only a getter"（`<svg width="200">` 直接炸整个建树）。
+    // SVG 一律当属性写。
+    const isSvg = (el as { namespaceURI?: string | null }).namespaceURI === SVG_NS;
+
+    if (key === 'class' || isSvg || !(key in el)) {
+        el.setAttribute(key, String(value));
+
+        return;
+    }
+
+    (el as unknown as Record<string, unknown>)[key] = value;
 }
 
 function renderSlot(slot: Slot): void {
