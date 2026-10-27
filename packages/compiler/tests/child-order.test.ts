@@ -109,6 +109,22 @@ it('keeps order when the parent sits inside an {#if} branch', async () => {
     expect(childNames(footer)).toEqual(['div', 'div', 'input']);
 });
 
+it('keeps order at the template root (no wrapper element)', async () => {
+    await build(iconSwitchButton, 'icon-switch');
+    await build(playButton, 'play-button');
+
+    // 组件直接在模板根上 —— 父是根 fragment，不带任何 wrapper
+    const target = await mount(`<script>
+    import PlayButton from './play-button.ts';
+</script>
+
+<PlayButton />
+<div class="after">after</div>`);
+
+    expect(childNames(target)).toEqual(['div', 'div']);
+    expect(target.querySelector('.after')!.textContent).toBe('after');
+});
+
 it('keeps order inside a {#for} row', async () => {
     await build(iconSwitchButton, 'icon-switch');
     await build(playButton, 'play-button');
