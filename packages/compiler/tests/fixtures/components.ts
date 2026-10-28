@@ -114,6 +114,7 @@ export const popupOption = `<script>
  */
 export const judgeLineRow = `<script>
     import Self from './judge-line-row.ts';
+    import { selected } from './judge-store.ts';
 
     let { level = 0, target, show = true } = $props<{
         level?: number;
@@ -123,6 +124,16 @@ export const judgeLineRow = `<script>
 
     let folded = $state(false);
     let refreshKey = $state(0);
+    let root: HTMLDivElement;
+
+    /** 这条线是不是当前选中的（真组件里来自 selectedLineNumber 那个 store） */
+    let displays = $state(selected.get() === target.id);
+
+    function scrollIntoView() {
+        if (selected.get() !== target.id || !root) return;
+
+        root.scrollIntoView({ block: 'center' });
+    }
 
     // 内容没变就返回同一份（对照应用里那版）
     let lastSource = [];
@@ -154,7 +165,19 @@ export const judgeLineRow = `<script>
     }
 </script>
 
-<div class="row" style="opacity: {values.moveX * 0 + 1}" onclick={bump}>
+<script onmount>
+    // 真组件就是这样：建树时每个实例订阅一次（订阅会**立即**回调），
+    // 回调里 scrollIntoView —— 行多的时候这一下最容易叠成环
+    selected.subscribe((lineNumber: number) => {
+        const next = lineNumber === target.id;
+
+        if (next !== displays) displays = next;
+
+        scrollIntoView();
+    });
+</script>
+
+<div class="row {displays ? 'selected' : ''}" bind:this={root} style="opacity: {values.moveX * 0 + 1}" onclick={bump}>
     <span class="id">{target.id}</span>
     <span class="level">{level}</span>
 

@@ -52,6 +52,27 @@ const mount = async (page: string): Promise<Element> => {
 };
 
 it('renders a recursive judge line tree without spinning', async () => {
+    // 脚手架：store（真组件里是 `store.ts` 的 `selectedLineNumber`）+ 滚动桩
+    await Bun.write(
+        tmp('judge-store.ts'),
+        `let current = 0;
+const listeners = new Set<any>();
+
+export const selected = {
+    get: () => current,
+    set: (next: number) => {
+        if (next === current) return;
+        current = next;
+        for (const listener of [...listeners]) listener(current);
+    },
+    subscribe: (listener: any) => {
+        listeners.add(listener);
+        listener(current);
+        return () => listeners.delete(listener);
+    }
+};`
+    );
+
     await build(judgeLineRow, 'judge-line-row');
 
     const target = await mount(`<script>
