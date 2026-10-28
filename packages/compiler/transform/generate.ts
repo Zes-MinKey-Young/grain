@@ -1191,8 +1191,23 @@ class Generator {
 
         // script 要先处理：`$bindable` 会决定要不要 import toBinding
         const parts = this.root.script ? this.script(this.root.script) : { head: [], body: '' };
-        // onmount 跟 script 走同一套处理（`$state` 展开、`$props()` 换成 props）
+
+        // onmount 跟 script 走同一套处理（`$state` 展开、`$props()` 换成 props），
+        // 但 `script()` 会重新赋值 `bindables` / `propNames` —— onmount 里没有
+        // `$props()`，于是它们被清成空：
+        //
+        // - 用了 `$bindable` 却没 import `toBinding`（`EasingTypeTabs` 直接抛
+        //   `ReferenceError: toBinding is not defined`）
+        // - `setProps` 连有哪些 prop 都不知道 → 父组件推的值不生效
+        //
+        // 所以先存起来，处理完 onmount 再放回去
+        const scriptBindables = this.bindables;
+        const scriptPropNames = this.propNames;
+
         const onmount = this.root.onmount ? this.script(this.root.onmount) : null;
+
+        this.bindables = scriptBindables;
+        this.propNames = scriptPropNames;
 
         const imported = ['creEle', 'creFragment', 'component'];
         if (this.bindables.length > 0) imported.push('toBinding');
@@ -2330,7 +2345,15 @@ class Generator {
         for (const entry of this.propNames) {
             if (bound.has(entry.name)) continue;
 
-            assignments.push(`  ${entry.name} = $props[${JSON.stringify(entry.key)}];`);
+            // 父组件**没传**这个 prop 时不能把变量写成 undefined —— 那会覆盖掉
+            // `$props` 解构里的默认值（`let { level = 0 } = $props()`）。
+            //
+            // 踩过的坑：判定线的 `level` 默认 0，父层不传时被写成 undefined，
+            // 下一层算 `level + 1` 得到 NaN，而 `NaN !== NaN` 恒真 → 每次推 props
+            // 都判定"变了" → 无限刷新（`Nap` 那张谱进编辑器就撞循环保护）。
+            const key = JSON.stringify(entry.key);
+
+            assignments.push(`  if ($props[${key}] !== undefined) ${entry.name} = $props[${key}];`);
             changed.add(entry.name);
         }
 
@@ -2368,6 +2391,15 @@ class Generator {
 
         if (updates) {
             const test = names.map((name, index) => `${name} !== ${previous[index]}`).join(' || ');
+
+            // 临时诊断：哪个 prop 变了（排查"父组件不停推 props"的环）
+            if (this.dev && test) {
+                const detail = names
+                    .map((name, index) => `${name}: ${name} !== ${previous[index]}`)
+                    .join(', ');
+
+                body.push(`  if (${test}) console.log('[props] ${this.filename}', { ${detail} });`);
+            }
 
             body.push(test ? `  if (${test}) { ${updates} }` : `  ${updates}`);
         }
