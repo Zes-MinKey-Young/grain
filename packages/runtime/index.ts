@@ -1127,6 +1127,7 @@ export interface ComponentFactory {
 }
 
 const FRAGMENT_NODE = 11;
+const TEXT_NODE = 3;
 
 /** 活着的组件外壳，`hotReplace` 遍历它找要重建的实例 */
 const components = new Set<ComponentShell>();
@@ -1291,6 +1292,24 @@ function renderSlot(slot: Slot): void {
     }
 
     const nodes = toNodes(slot.render());
+
+    /**
+     * 纯文本内容原地改 `nodeValue`，别换节点。
+     *
+     * `toNodes(fn)` 每渲染一次就造一个**新的**文本节点。换掉之后，上一级（比如
+     * `{#if}` 的分支）记着的还是旧那个 —— 它切分支时按记录去删，删的是旧节点，
+     * 新节点留在 DOM 里（首页切到列表后"还没有谱面"那句还挂着）。
+     */
+    if (slot.nodes.length === 1 && nodes.length === 1) {
+        const previous = slot.nodes[0]!;
+        const next = nodes[0]!;
+
+        if (previous.nodeType === TEXT_NODE && next.nodeType === TEXT_NODE) {
+            if (previous.nodeValue !== next.nodeValue) previous.nodeValue = next.nodeValue;
+
+            return;
+        }
+    }
 
     for (const node of slot.nodes) node.parentNode?.removeChild(node);
     slot.nodes = nodes;

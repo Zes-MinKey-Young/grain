@@ -37,7 +37,7 @@ const stub = async (name: string, code: string): Promise<string> => {
     return `./${name}.ts`;
 };
 
-it.skip('removes the "no charts" branch once the charts arrive', async () => {
+it('removes the "no charts" branch once the charts arrive', async () => {
     await stub('home-i18n', `export const _ = (key) => key === 'chartIndex.noCharts' ? 'NOTHING-HERE' : key;`);
     await stub(
         'home-bg',
