@@ -106,6 +106,20 @@ export const popupOption = `<script>
 `;
 
 /**
+ * 首页那种列表：`{#if items.length > 0}` 的一支里放 `{#for}`。
+ *
+ * 数据是挂载后才异步取回来的，条件从 false 变 true —— 分支必须跟着换。
+ */
+export const emptyBranch = `<script>
+    let { items = [] } = $props<{ items?: string[] }>();
+</script>
+
+{#for item of items}
+    <span class="item">{item}</span>
+{/for}
+`;
+
+/**
  * 只有一个 `$bindable` 开关、把状态显示出来的组件。
  *
  * 用来验 `bind:checked` 这种**没写 `={...}`** 的简写：它得绑到父组件同名的局部
