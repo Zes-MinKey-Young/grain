@@ -1836,6 +1836,22 @@ export function toBinding<T>(value: unknown, fallback?: T): Binding<T> {
         const listen: ((update: () => void) => void) | undefined = binding.listen;
         const write: ((next: T) => T) | undefined = binding.set;
 
+        /**
+         * **先同步取一次当前值**。
+         *
+         * 订阅（`writable.subscribe`）在注册时就会立刻回调一次，所以这里挂一下再摘掉
+         * 就能拿到值。不这么做的话，组件主体里读到的还是 `fallback` ——
+         * `PopupOption` 那句"值不在选项里就写回 options[0]"于是把外部值改回去了
+         *（点事件后次侧栏闪一下又弹回判定线列表，点第二回才正常）。
+         */
+        if (listen) {
+            const stop = listen((next?: unknown) => {
+                if (next !== undefined) current = next as T;
+            });
+
+            if (typeof stop === 'function') stop();
+        }
+
         return {
             external: binding.external ?? true,
             get: () => current,
