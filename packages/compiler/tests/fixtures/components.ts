@@ -106,6 +106,67 @@ export const popupOption = `<script>
 `;
 
 /**
+ * `JudgeLineManager.grain` 的骨架：**自递归** + `{#if}` 里套 `{#for}` +
+ * 两个 `$node`（一个返回排好序的数组、一个返回新对象）。
+ *
+ * 症状：`Nap` 那张谱一进来就把循环保护打满（`__refresh$N` 10ms 内 100 次），
+ * 判定线列表一个都没渲染出来。
+ */
+export const judgeLineRow = `<script>
+    import Self from './judge-line-row.ts';
+
+    let { level = 0, target, show = true } = $props<{
+        level?: number;
+        target: any;
+        show?: boolean;
+    }>();
+
+    let folded = $state(false);
+    let refreshKey = $state(0);
+
+    // 内容没变就返回同一份（对照应用里那版）
+    let lastSource = [];
+    let lastSorted = [];
+
+    const sortedChildren = $node({
+        get: () => {
+            const source = [...target.children];
+
+            const unchanged =
+                source.length === lastSource.length &&
+                source.every((child, index) => child === lastSource[index]);
+
+            if (unchanged) return lastSorted;
+
+            lastSource = source;
+            lastSorted = [...source].sort((a, b) => a.id - b.id);
+
+            return lastSorted;
+        }
+    });
+
+    const values = $node({
+        get: () => ({ moveX: target.moveX, refreshKey })
+    });
+
+    function bump() {
+        refreshKey += 1;
+    }
+</script>
+
+<div class="row" style="opacity: {values.moveX * 0 + 1}" onclick={bump}>
+    <span class="id">{target.id}</span>
+    <span class="level">{level}</span>
+
+    {#if sortedChildren.length > 0}
+        {#for child of sortedChildren with key = child}
+            <Self target={child} level={level + 1} show={!folded} />
+        {/for}
+    {/if}
+</div>
+`;
+
+/**
  * 首页那种列表：`{#if items.length > 0}` 的一支里放 `{#for}`。
  *
  * 数据是挂载后才异步取回来的，条件从 false 变 true —— 分支必须跟着换。
