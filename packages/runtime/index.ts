@@ -916,27 +916,28 @@ export function reactiveSet<T>(initial: Iterable<T> = []): Set<T> & ReactiveCont
 const GUARD_WINDOW_MS = 10;
 const GUARD_LIMIT = 100;
 
-const guardHits = new Map<string, { start: number; count: number }>();
 /**
- * 按**函数引用**计数。
+ * 按**函数引用**计数 —— 也就是按实例隔离。
  *
- * `__refresh$27` 这个名字在组件的每个实例里都一样，拿名字当键的话，N 个实例在同一帧
+ * `__refresh$28` 这个名字在组件的每个实例里都一样，拿名字当键的话，N 个实例在同一帧
  * 各跑一次就凑够 100 次，被误判成环（树形判定线一次 sync 能建几十个实例）。
- * 函数是每个实例各一份的，所以键用函数本身。字符串那种留着兼容旧产物。
+ * 刷新函数是 `create()` 里生成的，每个实例各一份，所以键只能用函数本身 ——
+ * 这也是为什么这里**不接受字符串**：字符串天然无法区分实例。
  */
-const guardByFunction = new WeakMap<object, { start: number; count: number }>();
+const guardByFunction = new WeakMap<
+    object,
+    { start: number; count: number; origin?: string }
+>();
 
-export function guard(target: string | ((...args: never[]) => unknown)): void {
-    const name = typeof target === 'string' ? target : target.name || '__refresh';
+export function guard(refresh: (...args: never[]) => unknown, context?: string): void {
+    const at = guardByFunction.get(refresh);
 
     const now = Date.now();
-    const at = typeof target === 'string' ? guardHits.get(target) : guardByFunction.get(target);
 
     if (!at || now - at.start > GUARD_WINDOW_MS) {
-        const fresh = { start: now, count: 1 };
-
-        if (typeof target === 'string') guardHits.set(target, fresh);
-        else guardByFunction.set(target, fresh);
+        // 记下这一轮的**第一次**调用栈：环真正被点燃的那一下通常就在这几帧里
+        //（`setProps` / `sync` / `renderSlot` …），比反复刷新的那一段有用得多
+        guardByFunction.set(refresh, { start: now, count: 1, origin: new Error().stack ?? '' });
 
         return;
     }
@@ -945,12 +946,22 @@ export function guard(target: string | ((...args: never[]) => unknown)): void {
 
     if (at.count < GUARD_LIMIT) return;
 
-    // 抛之前清掉：下一轮从零开始，不然第一次触发之后就永远卡着
-    guardHits.clear();
+    // 抛之前重置：下一轮从零开始，不然第一次触发之后就永远卡着
+    guardByFunction.delete(refresh);
+
+    const name = refresh.name || '__refresh';
+
+    // 附上这一轮的起点（第一次调用的栈顶几帧），比反复刷新的那一段有用
+    const origin = (at.origin ?? '')
+        .split('\n')
+        .slice(2, 6)
+        .map((line) => line.trim())
+        .join('\n');
 
     throw new Error(
-        `\`${name}\` ran ${GUARD_LIMIT} times within ${GUARD_WINDOW_MS}ms — ` +
-            'this is almost always a reactive loop: a value that keeps triggering its own update.'
+        `${context ? `${context} 的 ` : ''}\`${name}\` ran ${GUARD_LIMIT} times within ` +
+            `${GUARD_WINDOW_MS}ms — this is almost always a reactive loop: ` +
+            `a value that keeps triggering its own update.${origin ? `\n起点：\n${origin}` : ''}`
     );
 }
 

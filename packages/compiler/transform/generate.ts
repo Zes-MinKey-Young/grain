@@ -1708,7 +1708,11 @@ class Generator {
             // dev 下埋个检测点：真循环起来，运行时会抛
             // 传函数本身而不是名字：名字在每个实例里都一样，按名字计数会把"N 个实例
         // 同一帧各刷一次"误判成环（见 runtime 里 `guard` 的注释）
-        const guard = this.dev ? `guard(${refresh.name}); ` : '';
+        // 传**函数本身**（按实例隔离；字符串键会把"N 个实例各跑一次"误判成环），
+        // 第二个参数是组件文件名，报错时能直接看出是哪个组件
+        const guard = this.dev
+            ? `guard(${refresh.name}, ${JSON.stringify(this.filename)}); `
+            : '';
 
             return `function ${refresh.name}() {${guard}${assign ? ` ${assign}` : ''}${updates ? ` ${updates}` : ' '}}`;
         });
