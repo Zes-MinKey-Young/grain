@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname, extname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { preprocessCSS, type Plugin, type ResolvedConfig } from 'vite';
 
@@ -23,6 +24,16 @@ const STYLE_QUERY = 'grain-style.css';
 
 /** `App.grain?grain-ast` -> 解析结果，用来在页面上查看 AST */
 const AST_QUERY = 'grain-ast';
+
+/**
+ * 插件自己的产物文件。
+ *
+ * Vite 只在启动时加载一次插件，之后改 `dist` 它不知道（它仅监听配置文件的依赖，
+ * 而且排除 `node_modules`，我们正是从那儿拿插件）。所以 dev 下盯着这两个文件，
+ * 一变就重启 —— 改完编译器不用再手动重启 `tauri dev`。
+ */
+const PLUGIN_DIST = dirname(fileURLToPath(import.meta.url));
+const SELF_DIST = [resolve(PLUGIN_DIST, 'index.js'), resolve(PLUGIN_DIST, '..', 'compiler', 'index.js')];
 
 /**
  * `App.grain?grain-source` -> 组件原始源码，**用 `text/html` 回**。
@@ -466,6 +477,18 @@ export default function grain(options: GrainPluginOptions = {}): Plugin {
          * `index.html`，页面就挂错了。静态托管（GitHub Pages）本来也是这么做的。
          */
         configureServer(server) {
+            // 插件是 Vite 启动时加载一次的，之后改 dist 它不知道。
+            // 盯着自己那两个产物文件，变了就重启 dev server ——
+            // 否则每次改编译器都得手动重启（Vite 只监听配置文件的依赖，且排除 node_modules）
+            server.watcher.add(SELF_DIST);
+
+            server.watcher.on('change', (file: string) => {
+                if (!SELF_DIST.includes(file)) return;
+
+                server.config.logger.info(`[grain] 编译器产物变了，重启 dev server (${file})`);
+                void server.restart();
+            });
+
             const devRoot = server.config.root;
 
             // DevTools 里点开 sourcemap 指向的 `.grain` 时，浏览器会来取这个地址。
