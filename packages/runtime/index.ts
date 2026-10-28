@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Grain 运行时。
  *
  * 编译期已经把依赖关系分析完了，运行时只做三件事：
@@ -1291,29 +1291,11 @@ function renderSlot(slot: Slot): void {
     }
 
     const nodes = toNodes(slot.render());
-    const parent = slot.anchor?.parentNode;
 
-    /**
-     * 清掉上一次的内容：从记录下来的第一个节点一路删到锚点。
-     *
-     * 不能只按 `slot.nodes` 逐个删 —— 那个数组是"上一次渲染返回的节点"，而分支里
-     * 可能混着**不是当时记下来**的节点（插值、组件根、`{#for}` 的行），漏一个就
-     * 永远留在 DOM 里（首页切到列表后"还没有谱面"那句话还挂着就是这么来的）。
-     * 槽位的内容永远是连续的一段、以锚点结尾，所以按区间删是稳的。
-     */
-    if (parent) {
-        let node = slot.nodes.find((item) => item.parentNode === parent) ?? null;
-
-        while (node && node !== slot.anchor) {
-            const next = node.nextSibling;
-
-            parent.removeChild(node);
-            node = next;
-        }
-    }
-
+    for (const node of slot.nodes) node.parentNode?.removeChild(node);
     slot.nodes = nodes;
 
+    const parent = slot.anchor?.parentNode;
     if (!parent) return;
 
     for (const node of nodes) parent.insertBefore(node, slot.anchor);

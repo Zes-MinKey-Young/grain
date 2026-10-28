@@ -96,6 +96,7 @@ it('switches to the other branch when the condition becomes true later', async (
     import EmptyBranch from './empty-branch.ts';
 
     let items = $state([]);
+    let note = '还没有谱面';
 </script>
 
 <script onmount>
@@ -125,6 +126,7 @@ it('switches to the other branch when the condition becomes true later', async (
 it('removes the else branch when switching to a list branch', async () => {
     const target = await mount(`<script>
     let items = $state([]);
+    let note = '还没有谱面';
 </script>
 
 <script onmount>
@@ -141,7 +143,7 @@ it('removes the else branch when switching to a list branch', async () => {
             {/for}
         </ul>
     {:else}
-        {'还没有谱面'}
+        {note}
     {/if}
 </div>`);
 
@@ -156,6 +158,7 @@ it('removes the else branch when switching to a list branch', async () => {
 it('replaces the else branch when the if-block follows placeholder children', async () => {
     const target = await mount(`<script>
     let items = $state([]);
+    let note = '还没有谱面';
 </script>
 
 <script onmount>
@@ -174,7 +177,7 @@ it('replaces the else branch when the if-block follows placeholder children', as
             {/for}
         </ul>
     {:else}
-        {'还没有谱面'}
+        {note}
     {/if}
 </div>`);
 
