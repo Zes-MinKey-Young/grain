@@ -1568,10 +1568,17 @@ class UpdaterImpl {
                 const slot: Slot = { anchor, render, nodes: [] };
 
                 this.slots[index] = slot;
-                // 参照用锚点：内容节点每次刷新都会换掉，锚点不动
-                this.anchors[index] = anchor;
 
                 renderSlot(slot);
+
+                /**
+                 * 参照节点用**这一格内容的第一个节点**，不是那个注释锚点。
+                 *
+                 * 后来插入的兄弟（尤其是延迟发射的元素）会 `insertBefore(node, 参照)`。
+                 * 拿注释当参照的话，内容早就插在注释前面了，新来的就会落到内容**后面**
+                 *（分组布局里 header 掉到行下面就是这么来的）。
+                 */
+                this.anchors[index] = (slot.nodes[0] as Node | undefined) ?? anchor;
 
                 // 模板插值也可以是单向绑定：`{$read(store)}`
                 render.listen?.(() => renderSlot(slot));
