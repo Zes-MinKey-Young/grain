@@ -91,8 +91,13 @@ export interface Writable<T> {
 /** `for` 块里的一项：节点，加一个"换成新值"的更新函数 */
 export interface ListEntry {
     nodes: Node[];
-    /** 复用这一项时调用：把循环变量重新绑到新值上，再刷依赖它的片段 */
-    update(next: unknown, index: number): void;
+    /**
+     * 复用这一项时调用：把循环变量重新绑到新值上，再刷依赖它的片段。
+     *
+     * `force` 为真时**整行重跑** —— "值没变就只刷下标"的快速路径会漏掉行里
+     * 读外层变量的绑定（外层一变，那些绑定就永远停在旧值）。
+     */
+    update(next: unknown, index: number, force?: boolean): void;
     /**
      * 这一项里某个属性被改了（`items[i].prop = v`）：只刷读了它的那些片段。
      *
@@ -329,6 +334,9 @@ class ListImpl {
     }
 
     sync(items: Iterable<unknown> | null | undefined, force = false): void {
+        // `force`：整块刷新（外层依赖变了 / 变量被重新赋值）—— 每行都要**整行**重跑，
+        // 不能走"值没变就只刷下标"的快速路径（那条只刷新读了下标的片段，
+        // 行里读外层变量的绑定会被跳过）
         // `{#for x of null}` 当空列表处理（Svelte 也是这个语义）。
         //
         // 这不只是防手滑：编译器会把 for 的 `sync` 发在 create 顶层，即使这个 for 包在
@@ -361,7 +369,9 @@ class ListImpl {
                     // 整个变量被重新赋值时（`force`）例外：那种语义就是全量刷。
                     // 项带下标时总是要调 update：下标变了，由它自己决定刷哪一块
                     // （值没换就只刷读了下标的那些片段）
-                    if (force || found.item !== next[i]) found.update(next[i], i);
+                    if (force || found.item !== next[i]) {
+                        found.update(next[i], i, force);
+                    }
 
                     found.item = next[i];
                     found.at = i;
@@ -1397,7 +1407,13 @@ class UpdaterImpl {
         if (at && typeof at.index === 'number') {
             const owner = at.parent as unknown as UpdaterImpl;
 
-            owner?.nested.push(this as unknown as Updater);
+            // 推**可调用**的包装：`nested` 遍历时是 `child()`，而 `this` 是
+            // `UpdaterImpl` 实例（不是那个 Proxy），直接推进去会在调用时抛
+            // TypeError，级联刷新就断在半路 —— 表现出来是"外层属性变了、
+            // 里面内容一动不动"（PopupOption 弹窗高亮不跟随就是这么来的）
+            const self = this as unknown as UpdaterImpl;
+
+            owner?.nested.push((() => self.invoke()) as unknown as Updater);
         }
 
         this.buildProps(props);
@@ -1852,11 +1868,13 @@ export function toBinding<T>(value: unknown, fallback?: T): Binding<T> {
          *（点事件后次侧栏闪一下又弹回判定线列表，点第二回才正常）。
          */
         if (listen) {
-            const stop = listen((next?: unknown) => {
+            // 订阅的返回值是"取消订阅"（有的实现返回 void，所以要判类型）
+            const subscribe = listen as unknown as (update: (value?: unknown) => void) => unknown;
+            const stop = subscribe((next?: unknown) => {
                 if (next !== undefined) current = next as T;
             });
 
-            if (typeof stop === 'function') stop();
+            if (typeof stop === 'function') (stop as () => void)();
         }
 
         return {

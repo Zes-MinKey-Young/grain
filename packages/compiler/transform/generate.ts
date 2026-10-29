@@ -196,6 +196,15 @@ interface Slot {
      * 行内片段依赖外部 state 时，靠"刷整个 list"（list 会重跑每一行）覆盖。
      */
     inner?: boolean;
+    /**
+     * 所属的块槽位（`{#if}` / `{#for}` 那一格）。
+     *
+     * inner 槽位自己刷不了，但**不能就此丢掉这次刷新** —— 块重跑时它的 fragment
+     * 会级联到里面所有东西。之前直接 `continue` 的后果：只有分支内部读某个变量时，
+     * 块自己不被刷新，于是"外面的属性变了、里面的行一动不动"
+     *（PopupOption 弹窗里的高亮不跟随就是这么来的）。
+     */
+    outer?: { update: string; index: number };
 }
 
 interface PendingWrapper {
@@ -2450,13 +2459,18 @@ class Generator {
 
         for (const slot of this.slots) {
             // 行内的片段够不到（它是 render$X 的局部变量）—— 见 `Slot.inner`
-            if (slot.inner) continue;
-            if (skip?.has(`${slot.update}#${slot.index}`)) continue;
+            // 分支 / 行内部的槽位：够不到它本身，但可以刷新它所属的块，
+            // 块重跑时 fragment 会级联到内部（不能直接跳过，否则内部读的变量
+            // 变了没人管 —— 界面就是"外层属性动了、里面的行不动"）
+            const target = slot.inner ? slot.outer : slot;
+
+            if (!target) continue;
+            if (skip?.has(`${target.update}#${target.index}`)) continue;
             if (!intersects(slot.deps, writes)) continue;
 
-            const indices = grouped.get(slot.update) ?? [];
-            if (!indices.includes(slot.index)) indices.push(slot.index);
-            grouped.set(slot.update, indices);
+            const indices = grouped.get(target.update) ?? [];
+            if (!indices.includes(target.index)) indices.push(target.index);
+            grouped.set(target.update, indices);
         }
 
         const calls: string[] = [];
@@ -3279,7 +3293,12 @@ class Generator {
         }
 
         // 块内的片段改由分支 fragment 刷新（重跑子闭包），create 层不再直接调它们
-        for (const slot of this.slots.slice(slotBase)) slot.inner = true;
+        // 分支内部的槽位够不到自己，但记下所属的块：它依赖的变量变了要刷这一块
+        for (const slot of this.slots.slice(slotBase)) {
+            slot.inner = true;
+
+            if (owner) slot.outer = { update: owner, index };
+        }
 
         if (owner) this.slots.push({ update: owner, index, deps });
 
@@ -3355,8 +3374,12 @@ class Generator {
         }
 
         // 块内注册的都标上：它们的 updater 是 `render$X` 的局部变量，顶层的刷新
-        // 调用够不到（见 `Slot.inner`）
-        for (const slot of this.slots.slice(slotBase)) slot.inner = true;
+        // 调用够不到（见 `Slot.inner`），但记下所属的块，内部依赖变了要刷这一块
+        for (const slot of this.slots.slice(slotBase)) {
+            slot.inner = true;
+
+            if (owner) slot.outer = { update: owner, index };
+        }
 
         let fallback = 'null';
 
@@ -3502,8 +3525,10 @@ class Generator {
             // 项带下标时（`entries()`）特殊处理：值没换、只是位置变了的话，只有下标
             // 那一块需要更新 —— 整行重跑会把行里其它部分（比如 `Math.random()`）
             // 也一并重算
+            // `force`（整块刷新 / 外层依赖变了）必须整行重跑：只刷下标的话，
+            // 行里读外层变量的绑定会被跳过
             swapByValue && names.length === 2 && indexRefresh !== ''
-                ? `    update: (next) => { if (next[1] === ${names[1]}) { ${names[0]} = next[0]; ${indexRefresh} } else { ${pattern} = next; ${row}(); } },`
+                ? `    update: (next, index, force) => { if (!force && next[1] === ${names[1]}) { ${names[0]} = next[0]; ${indexRefresh} } else { ${pattern} = next; ${row}(); } },`
                 : `    update: (next) => { ${pattern} = next; ${row}(); },`,
             `  };`,
             '};',
