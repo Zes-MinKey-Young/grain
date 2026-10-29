@@ -104,9 +104,7 @@ it('moves the highlight inside the popup when an option is picked', async () => 
 
     click(target.querySelectorAll('.option-item')[2]!);
 
-    // 重新打开弹窗看高亮
-    click(trigger);
-
+    // 弹窗**保持打开**时就要正确（关掉再开会被重刷，把问题盖住）
     expect(target.querySelector('.mirror')!.textContent).toBe('c');
     expect(selected()).toBe(2);
 });
