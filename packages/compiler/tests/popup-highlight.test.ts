@@ -76,9 +76,14 @@ it('moves the highlight inside the popup when an option is picked', async () => 
 
     {#if isPopupVisible}
         <div class="popup">
-            {#for [index, option] of options.entries()}
-                <div class="option-item {index === currentIndex ? 'selected' : ''}" onclick={() => selectOption(index)}>{option}</div>
-            {/for}
+            <!-- 这一层很关键：它是"延迟发射"的元素，if 块刷新时要顺着
+                 nested 级联下来。以前 nested 里推的是不可调用的实例，级联
+                 断在这里 —— 外框属性刷新了、行一动不动（高亮不跟随）。 -->
+            <div class="options-list">
+                {#for [index, option] of options.entries()}
+                    <div class="option-item {index === currentIndex ? 'selected' : ''}" onclick={() => selectOption(index)}>{option}</div>
+                {/for}
+            </div>
         </div>
     {/if}
 </div>`,
