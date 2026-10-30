@@ -1076,6 +1076,8 @@ class Generator {
      * 也就算不出东西（次侧栏切换按钮一直显示 "Select Option" 就是这么来的）。
      */
     private bindableListens: Array<{ binding: string; name: string }> = [];
+    /** `bind:` setter 的刷新体（延后发射，见 `bindStatements()` 与 `run()`） */
+    private bindFlushes: Array<{ flush: string; writes: Set<string> }> = [];
     /**
      * 落在顶层函数体内的"回调守卫"改写（见 `callbackEdits`）。
      *
@@ -1250,6 +1252,19 @@ class Generator {
         // bind: 的 setter
         const binds = this.bindStatements();
         if (binds.length > 0) instance.push('', ...binds);
+
+        // setter 的刷新体：到这里 `bindStatements()` 才把要刷的名字收齐，
+        // 而槽位是在模板语句里登记的 —— 所以补在 `this.statements` 末尾（下面才插入）。
+        if (this.bindFlushes.length > 0) {
+            this.statements.push(
+                '',
+                ...this.bindFlushes.map(
+                    (item) => `const ${item.flush} = () => { ${this.updateCalls(item.writes)} };`
+                )
+            );
+
+            this.bindFlushes = [];
+        }
 
         // $bindable 非受控时的刷新函数
         const refreshes = this.refreshStatements();
@@ -2268,16 +2283,30 @@ class Generator {
 
     /** `bind:` 的 setter：赋值 + 刷新受影响的片段（延迟到这里才能算全片段） */
     private bindStatements(): string[] {
-        return this.pendingBinds.map((bind) => {
+        if (process.env.GRAIN_DEBUG_FILL) console.error('[bindStatements] pending=' + this.pendingBinds.length);
+
+        const lines = this.pendingBinds.map((bind) => {
             const reactive = [...this.reactiveWrites(bind.writes)];
 
-            // 刷新按**全部写入**算，不只看 $state：$bindable 也是"写了要刷别人"的
-            //（`<Child bind:checked>` 简写生成的 setter 就是写它），过滤掉的话
-            // updates 是空的，子组件回写了父组件也不推 props —— 按钮点了没反应。
-            const updates = this.updateCalls(bind.writes.size > 0 ? bind.writes : new Set(reactive));
+            // 刷新调用**不能在这里算**：setter 声明在模板之前（模板代码要引用它），
+            // 那时 `this.slots` 还是空的 → `updateCalls` 只能返回空串，
+            // 写 `bind:` 的变量时一条刷新都不发（`aspect` 的 setter 里 `if (…) { }` 空的）。
+            //
+            // 这里只留调用点，刷新体等模板语句登记完槽位后再补（见 `run()`）。
+            // flush 只在用户交互时被调（create 之后），不会踩 TDZ。
+            const flush = `__flush$${this.counter++}`;
 
-            return `const ${bind.name} = ${bind.render(updates, reactive)};`;
+            this.bindFlushes.push({
+                flush,
+                writes: bind.writes.size > 0 ? bind.writes : new Set(reactive)
+            });
+
+            return `const ${bind.name} = ${bind.render(`${flush}();`, reactive)};`;
         });
+
+        this.pendingBinds = [];
+
+        return lines;
     }
 
     /**
