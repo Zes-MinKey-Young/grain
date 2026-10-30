@@ -1076,6 +1076,8 @@ class Generator {
      * 也就算不出东西（次侧栏切换按钮一直显示 "Select Option" 就是这么来的）。
      */
     private bindableListens: Array<{ binding: string; name: string }> = [];
+    /** `componentAttribute()` 解析 `bind:` 时读到的变量（供父组件 props 更新器收集依赖） */
+    private attrDeps: Set<string> | null = null;
     /** `bind:` setter 的刷新体（延后发射，见 `bindStatements()` 与 `run()`） */
     private bindFlushes: Array<{ flush: string; writes: Set<string> }> = [];
     /**
@@ -2592,7 +2594,16 @@ class Generator {
         const deps = new Set<string>();
 
         for (const [key, value] of Object.entries(this.scopedAttributes(node.attributes))) {
+            // `bind:` 属性在外层这里拿到的是**未解析**的值（`get`/`expression` 还是
+            // 原始对象），读不出依赖；真正的解析在 `componentAttribute()` 里。
+            // 那边解析时会把读到的变量记到 `attrDeps`，这里收口合并
+            this.attrDeps = new Set();
+
             parts.push(this.componentAttribute(key, value));
+
+            if (this.attrDeps && this.attrDeps.size > 0) addAll(deps, this.attrDeps);
+
+            this.attrDeps = null;
 
             // 绑定值走的是 bindingAttribute，但它 getter 读的变量同样是依赖：
             // 那些变量变了，父组件要把新的绑定推给子组件
@@ -2868,7 +2879,14 @@ class Generator {
         if (binding.active) parts.push('active: true');
 
         // get 读了哪些变量 -> 那些变量变化时精确重跑这个 getter
-        this.registerSlot(owner, slotIndex, collectReads(get.content));
+        const reads = collectReads(get.content);
+
+        this.registerSlot(owner, slotIndex, reads);
+
+        // 同一批 reads 也是**父组件 props 更新器**的依赖：不记的话
+        // `bind:currentOption={aspect}` 这类组件的 props 更新器 dep 为空，
+        // 压根不会生成，改值之后子组件收不到（按钮文字不跟着变）。
+        if (this.attrDeps) addAll(this.attrDeps, reads);
 
         return { code: `${name}: { ${parts.join(', ')} }`, slot: true };
     }
@@ -3300,7 +3318,13 @@ class Generator {
             // 关键：分支内容 capture 出来，**不进 create 层** —— 这样子组件不会
             // 在条件为假时被实例化（以前就是这样把 `operationList` 还没赋值、
             // `selectedNote` 还是 null 的组件提前建了出来）
-            const [items, statements] = this.capture(() => this.children(children, null), false);
+            // owner 用这一分支自己的 fragment：不传的话分支里的**子组件**拿不到
+            // props 更新器（`component()` 里 `!owner` 直接返回），父组件改值之后
+            // 子组件永远收不到（PopupOption 的 label 不跟着变）。
+            //
+            // 引用 `__ifFrag$N` 是安全的：它虽然在本函数里声明，但生成的刷新调用
+            // 都走 `Slot.outer` 映射回 if 块（`updateCalls` 不会直接发 `__ifFrag$N`）。
+            const [items, statements] = this.capture(() => this.children(children, frag), false);
 
             const body = statements.length > 0 ? `${statements.join('\n')}\n` : '';
 
