@@ -2432,15 +2432,6 @@ class Generator {
         if (updates) {
             const test = names.map((name, index) => `${name} !== ${previous[index]}`).join(' || ');
 
-            // 临时诊断：哪个 prop 变了（排查"父组件不停推 props"的环）
-            if (this.dev && test) {
-                const detail = names
-                    .map((name, index) => `${name}: ${name} !== ${previous[index]}`)
-                    .join(', ');
-
-                body.push(`  if (${test}) console.log('[props] ${this.filename}', { ${detail} });`);
-            }
-
             body.push(test ? `  if (${test}) { ${updates} }` : `  ${updates}`);
         }
 
